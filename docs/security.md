@@ -19,6 +19,10 @@ The same key creates stable linkage across separately processed files. Changing 
 
 The transformation is one-way and does not store a lookup table. Losing the key prevents consistent processing of later files, but does not make existing output reversible. Keeping the key permits deterministic matching guesses against low-entropy source identifiers, so key access must remain restricted.
 
+Safe Harbor metadata mode adds two sensitive inputs: the independently assigned patient scope and the original-to-output UID map. Treat both as controlled linkage material. Do not place either in reports, logs, test fixtures, or public configuration repositories. The implementation reports missing, invalid, identity-preserving, colliding, and mismatched mappings without printing their contents. Temporal diagnostics identify only the affected tag and VR, never the source value.
+
+Descriptor maps and safe-private allowlists are disclosure decisions. Review every approved output and private creator/offset against the intended release. An exact configuration match proves that the configured transformation occurred; it does not prove that the approved output is non-identifying.
+
 ## Input behavior
 
 The default rejects files already marked Patient Identity Removed=`YES`. This prevents accidental repeated transformation. `--allow-reanonymize` is intended for deliberate re-keying; it does not preserve the pseudonyms from the first pass.
@@ -30,13 +34,17 @@ Invalid DA, DT, and TM values fail the operation instead of being copied. Missin
 Before disclosing output:
 
 1. run `dicom-validate` and retain the JSON report;
-2. resolve every error-severity finding;
-3. inspect pixel data for burned-in text and recognizable features;
-4. confirm that the intended recipient and purpose match the de-identification risk assessment;
-5. sample representative SOP Classes and transfer syntaxes with an independent DICOM validator;
-6. retain the software version, profile edition, configuration, key identifier, validation record, and release approval in the applicable quality system.
+2. use `--source` comparison when the original and linkage inputs are available;
+3. resolve every error-severity finding;
+4. inspect pixel data for burned-in text and recognizable features;
+5. inspect filenames, paths, archives, manifests, and linked records outside the DICOM object;
+6. confirm that the intended recipient and purpose match the de-identification risk assessment;
+7. sample representative SOP Classes and transfer syntaxes with an independent DICOM validator;
+8. retain the software version, profile edition, configuration, non-secret key identifier, validation record, and release approval in the applicable quality system.
 
 Do not include the key itself in those records. Use a non-secret key identifier or controlled configuration reference.
+
+A passing `safe-harbor-metadata` report covers only metadata processed under the supplied configuration. Pixel inspection, external mapping provenance and controls, re-identification-code safeguards, and the covered entity's “actual knowledge” determination remain outside the tool. The report does not claim HIPAA compliance.
 
 ## Dependency audit
 

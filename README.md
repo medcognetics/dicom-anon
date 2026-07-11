@@ -2,7 +2,7 @@
 
 `dicom-anon` de-identifies individual DICOM Part 10 files and checks metadata against the same confidentiality profile. The workspace provides a Rust library, two Unix-style commands, a Python extension, and a Node.js N-API module.
 
-The default policy implements the metadata actions from the [DICOM PS3.15 2026c Basic Application Level Confidentiality Profile](https://dicom.nema.org/medical/dicom/current/output/chtml/part15/chapter_E.html) with the Retain Longitudinal Temporal Information With Modified Dates option. Patient identifiers and UIDs receive keyed deterministic replacements. Dates and times move by patient-specific whole-day and whole-hour offsets. Midnight adjustments are applied to known paired date/time attributes so intervals between studies remain unchanged.
+The default policy implements the metadata actions from the [DICOM PS3.15 2026c Basic Application Level Confidentiality Profile](https://dicom.nema.org/medical/dicom/current/output/chtml/part15/chapter_E.html) with Clean Descriptors, Retain Patient Characteristics, and Retain Longitudinal Temporal Information With Modified Dates. Patient identifiers and UIDs receive keyed deterministic replacements. Dates and times move by patient-specific whole-day and whole-hour offsets. Patient ages from `090Y` through `999Y` are categorized as `090Y`. Study and Series Description are retained only when an exact caller-supplied mapping approves a safe replacement; otherwise they receive a safe dummy.
 
 This software does not inspect pixel data for burned-in text or recognizable faces. It does not claim the Clean Pixel Data or Clean Recognizable Visual Features options. Read [Conformance and scope](docs/conformance.md) before using output outside a controlled environment.
 
@@ -57,6 +57,29 @@ target/release/dicom-anonymize input.dcm - \
 
 The command fails when Patient ID, Issuer of Patient ID, and Patient Name cannot provide a stable patient scope. Pass `--patient-scope VALUE` when the caller has a stable association key that is not stored in the file.
 
+Every metadata option in Table E.1-1 can be enabled or disabled. For example:
+
+```console
+target/release/dicom-anonymize input.dcm output.dcm \
+  --key-file deidentification.key \
+  --enable-option retain-device-identity \
+  --disable-option clean-descriptors
+```
+
+`clean-pixel-data` and `clean-recognizable-visual-features` are represented but rejected because this tool does not process pixels. Conflicting option columns are rejected before input is processed.
+
+The separate `safe-harbor-metadata` policy applies strict Safe Harbor transformations to metadata controlled by the tool. It requires an independently assigned non-PHI patient scope and a complete original-to-output UID map:
+
+```console
+target/release/dicom-anonymize input.dcm output.dcm \
+  --policy safe-harbor-metadata \
+  --patient-scope SUBJECT-42 \
+  --uid-map uid-map.json \
+  --key-file deidentification.key
+```
+
+This policy empties Patient ID, Patient Name, and Patient Birth Date; stores a keyed subject token in Clinical Trial Subject ID; aggregates DA to `YYYY0101`, DT to `YYYY`, and TM to `000000`; and caps age at `090Y`. It is a metadata policy result, not a claim that a file or organization is HIPAA compliant.
+
 ## Validate a file
 
 ```console
@@ -73,6 +96,14 @@ Exit status is part of the interface:
 | 2 | Usage, input, output, or runtime error | Usage, input, or runtime error |
 
 Validation checks profile markers, required removals, private attributes, replacement UID syntax, nested sequences, and identifying File Meta Information. A warning reports pixel data that was not assessed. Validation cannot prove that a dummy text value differs from an original value, nor can it establish that pixels are safe to disclose.
+
+Candidate-only validation accepts the same profile flags as anonymization and reports one `source_not_compared` warning for transformations it cannot prove. Source-aware validation verifies the exact configured transformation without placing source values or secrets in findings:
+
+```console
+target/release/dicom-validate output.dcm \
+  --source input.dcm \
+  --key-file deidentification.key
+```
 
 ## Rust API
 

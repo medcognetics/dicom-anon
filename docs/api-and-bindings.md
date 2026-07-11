@@ -57,6 +57,22 @@ assert!(validation_report.conformant);
 
 `AnonymizationReport` is serializable and records the patient pseudonym, whole-day date offset, whole-hour time offset, and action counts. `ValidationReport` contains a Boolean result and structured findings. `DefaultDicomObject` is re-exported for callers that do not otherwise depend on `dicom-object`.
 
+`Options::new` uses `ProfileConfiguration::default()`, which enables Clean Descriptors, Retain Modified Dates, and Retain Patient Characteristics. Configuration can be changed before constructing the anonymizer:
+
+```rust
+# use dicom_anon::{DicomOption, Options, ProfileConfiguration, SecretKey};
+# fn run() -> Result<(), Box<dyn std::error::Error>> {
+let mut options = Options::new(SecretKey::new([42_u8; 32])?);
+options.profile = ProfileConfiguration::safe_harbor();
+options.patient_scope = Some("SUBJECT-42".to_owned());
+options.profile.options.insert(DicomOption::RetainSafePrivate);
+options.profile.uid_mappings.insert("1.2.3".to_owned(), "2.25.101".to_owned());
+# Ok(())
+# }
+```
+
+Use `validate_object_with_options` for configured candidate-only validation. Use `validate_source_object` with the original, candidate, and matching anonymization `Options` for exact source comparison. Existing `validate_object` and `validate_file` remain default-configuration wrappers.
+
 ## Python
 
 Build and install the extension with maturin:
@@ -82,10 +98,26 @@ output, report_json = dicom_anon_python.anonymize(source, key)
 Path("output.dcm").write_bytes(output)
 report = json.loads(report_json)
 
-conformant, validation_json = dicom_anon_python.validate(output)
+configuration_json = json.dumps({
+    "policy": "dicom",
+    "options": [
+        "clean-descriptors",
+        "retain-modified-dates",
+        "retain-patient-characteristics",
+    ],
+    "descriptor_mappings": {},
+    "safe_private_allowlist": [],
+    "uid_mappings": {},
+})
+conformant, validation_json = dicom_anon_python.validate(
+    output, configuration_json
+)
+exact, exact_json = dicom_anon_python.validate_with_source(
+    source, output, key, None, configuration_json
+)
 ```
 
-`anonymize` accepts an optional third `patient_scope` argument. Errors become `ValueError`. The JSON fields match the Rust report models.
+`anonymize` accepts optional `patient_scope` and `configuration_json` arguments. `validate` accepts optional configuration JSON. `validate_with_source` is a separate function so candidate-only `validate` retains its original meaning. Errors become `ValueError`. The JSON fields match the Rust report models.
 
 ## Node.js and TypeScript
 
@@ -101,7 +133,7 @@ The N-API surface accepts and returns `Buffer` values:
 
 ```typescript
 import { readFileSync, writeFileSync } from "node:fs";
-import { anonymize, validate } from "@dicom-anon/core";
+import { anonymize, validate, validateWithSource } from "@dicom-anon/core";
 
 const source = readFileSync("input.dcm");
 const key = readFileSync("deidentification.key");
@@ -112,9 +144,11 @@ const validation = validate(result.data);
 if (!validation.conformant) {
   throw new Error(validation.reportJson);
 }
+
+const exact = validateWithSource(source, result.data, key);
 ```
 
-The optional third `patientScope` argument serves the same purpose as the Rust and Python options. N-API errors use `InvalidArg` with the Rust error message.
+`anonymize` accepts optional `patientScope` and `configurationJson` arguments. `validate` accepts optional configuration JSON. `validateWithSource` accepts the source, candidate, key, optional patient scope, and optional configuration JSON. N-API errors use `InvalidArg` with the Rust error message.
 
 ## Binding consistency
 

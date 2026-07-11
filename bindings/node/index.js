@@ -589,3 +589,4 @@ if (!nativeBinding) {
 module.exports = nativeBinding
 module.exports.anonymize = nativeBinding.anonymize
 module.exports.validate = nativeBinding.validate
+module.exports.validateWithSource = nativeBinding.validateWithSource

@@ -2,9 +2,73 @@
 
 use std::path::PathBuf;
 
-use clap::ValueEnum;
+use clap::{Args, ValueEnum};
 
-use crate::SecretKey;
+use crate::{
+    DeidentificationPolicy, DicomOption, ProfileConfiguration, SafePrivateElement, SecretKey,
+};
+
+/// Shared confidentiality-profile command-line options.
+#[derive(Debug, Clone, Args)]
+pub struct ProfileArgs {
+    /// High-level de-identification policy.
+    #[arg(long, value_enum, default_value = "dicom")]
+    pub policy: DeidentificationPolicy,
+    /// Enable one DICOM confidentiality option; repeat as needed.
+    #[arg(long, value_enum)]
+    pub enable_option: Vec<DicomOption>,
+    /// Disable one default DICOM confidentiality option; repeat as needed.
+    #[arg(long, value_enum)]
+    pub disable_option: Vec<DicomOption>,
+    /// JSON exact descriptor source-to-safe-output mappings.
+    #[arg(long, value_name = "PATH")]
+    pub descriptor_map: Option<PathBuf>,
+    /// JSON safe-private creator and element-offset allowlist.
+    #[arg(long, value_name = "PATH")]
+    pub safe_private_allowlist: Option<PathBuf>,
+    /// JSON original-to-output UID map required by Safe Harbor mode.
+    #[arg(long, value_name = "PATH")]
+    pub uid_map: Option<PathBuf>,
+}
+
+impl ProfileArgs {
+    pub fn load(&self) -> Result<ProfileConfiguration, String> {
+        let mut profile = match self.policy {
+            DeidentificationPolicy::Dicom => ProfileConfiguration::default(),
+            DeidentificationPolicy::SafeHarborMetadata => ProfileConfiguration::safe_harbor(),
+        };
+        for option in &self.enable_option {
+            if self.disable_option.contains(option) {
+                return Err(format!(
+                    "option {option:?} cannot be both enabled and disabled"
+                ));
+            }
+            profile.options.insert(*option);
+        }
+        for option in &self.disable_option {
+            profile.options.remove(option);
+        }
+        if let Some(path) = &self.descriptor_map {
+            profile.descriptor_mappings = read_json(path, "descriptor map")?;
+        }
+        if let Some(path) = &self.safe_private_allowlist {
+            let values: Vec<SafePrivateElement> = read_json(path, "safe-private allowlist")?;
+            profile.safe_private_allowlist = values.into_iter().collect();
+        }
+        if let Some(path) = &self.uid_map {
+            profile.uid_mappings = read_json(path, "UID map")?;
+        }
+        profile.validate().map_err(|error| error.to_string())?;
+        Ok(profile)
+    }
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(path: &PathBuf, name: &str) -> Result<T, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("cannot read {name} {}: {error}", path.display()))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| format!("cannot parse {name} {}: {error}", path.display()))
+}
 
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 pub enum ColorMode {

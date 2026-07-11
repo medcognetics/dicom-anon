@@ -2,13 +2,15 @@
 
 ## Project purpose
 
-This workspace implements deterministic DICOM metadata de-identification and validation. The normative behavior comes from DICOM PS3.15 2026c Table E.1-1 with the Retain Longitudinal Temporal Information With Modified Dates option.
+This workspace implements deterministic, configurable DICOM metadata de-identification and validation. Normative behavior comes from DICOM PS3.15 2026c Table E.1-1 and the selected option columns. Defaults are Clean Descriptors, Retain Patient Characteristics, and Retain Longitudinal Temporal Information With Modified Dates. A separate strict Safe Harbor metadata policy is available.
 
 ## Repository map
 
 - `core/src/anonymize.rs`: de-identification engine and profile marker insertion
 - `core/src/validate.rs`: metadata conformance checks
-- `core/src/profile.rs`: frozen PS3.15 rule table and grouped lookup
+- `core/src/profile.rs`: profile configuration and option resolution
+- `core/src/profile_generated.rs`: generated frozen PS3.15 rule matrix and safe-private registry
+- `tools/generate_profile.py`: reproducible edition-checked profile generator
 - `core/src/pseudonym.rs`: keyed patient and UID transformations
 - `core/src/temporal.rs`: DICOM DA, DT, and TM shifting with paired-date rollover
 - `core/src/io.rs`: stream and atomic file operations
@@ -27,12 +29,14 @@ This workspace implements deterministic DICOM metadata de-identification and val
 - Preserve UID referential integrity by deriving every replacement from the original UID and key.
 - Apply rules recursively to every sequence item.
 - For a `D` sequence, dummy every contained value rather than applying ordinary keep/remove rules.
-- Remove all odd-group private attributes, including private creators and nested private attributes.
+- Remove all odd-group private attributes unless Retain Safe Private is enabled and the exact creator/offset is approved by the frozen registry, an embedded declaration, or the caller registry. Process nested private content independently.
 - Replace File Meta Information instead of copying source AE titles or private information.
 - Fail closed on invalid dates, missing patient scope, unsupported DICOM input, and already de-identified input unless the caller opts in.
 - Treat pixel data as unassessed. Do not claim a pixel-cleaning option without an implemented and tested pixel inspection path.
 - Keep anonymization deterministic. Do not add timestamps, random UIDs, random date offsets, or nondeterministic report ordering.
 - Keep the patient-scoped time offset stable and apply TM midnight rollover to its known paired DA attribute.
+- Never include originals, key material, patient scope, UID-map contents, or identifying mismatch values in validation reports or logs.
+- In Safe Harbor metadata mode, require an external non-PHI patient scope and a complete collision-free UID map; empty Patient ID, Patient Name, and Birth Date; and retain no temporal detail below year.
 
 ## Development sequence
 
@@ -65,11 +69,12 @@ Keep the workload and sample size unchanged when comparing results. Record the b
 The rule table is normative data. When changing it:
 
 1. Use the current final DICOM PS3.15 Table E.1-1 as the source.
-2. Record the DICOM edition in `PROFILE_VERSION` and `docs/conformance.md`.
-3. Apply option columns after the Basic Profile column.
-4. Update the rule-count, representative-action, nested-sequence, and validation tests.
-5. Run `make check` and `make bench`.
-6. Review the conformance statement for changed actions or limitations.
+2. Run the edition-checked `tools/generate_profile.py`; do not hand-edit `profile_generated.rs`.
+3. Record the DICOM edition in `PROFILE_VERSION` and `docs/conformance.md`.
+4. Apply enabled option columns after the Basic Profile column and reject conflicting overrides.
+5. Update rule-count, every-option, safe-private, representative-action, nested-sequence, and validation tests.
+6. Run `make check` and `make bench`.
+7. Review the conformance statement for changed actions or limitations.
 
 Do not infer an action from a keyword or Value Representation when Table E.1-1 defines the tag. Unknown DA, DT, and TM attributes are shifted as an extension-safety rule. Unknown private attributes are removed.
 
