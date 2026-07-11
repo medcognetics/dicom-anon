@@ -1,30 +1,34 @@
-#[package]
-#name = "rust-template" # the name of the package
-#version = "0.1.0"    # the current version, obeying semver
-#authors = ["Scott Chase Waggener <chase.waggener@icloud.com>"]
-#edition = "2021"
-
-#[dependencies]
-#dicom = "0.7.0"
-#indicatif = { version= "0.17", features= ["rayon"] }
-#arrow = "51.0.0"
-#parquet = "51.0.0"
-#clap = { version = "4.5", features = ["derive"] }
-#rayon = "1.10"
-#rust_search = "2.1"
-#xxhash-rust = { version = "0.8", features = ["xxh3"] }
-#log = "0.4"
-#thiserror = "1.0"
-#env_logger = "0.11"
-#
-#[dev-dependencies]
-#tempfile = "3.10"
-#dicom-test-files = "0.3"
-#rstest = "0.19"
-
-
 [workspace]
-members = [
-    "core",
-]
+members = ["core", "bindings/python", "bindings/node"]
 resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+authors = ["Scott Chase Waggener <chase.waggener@icloud.com>"]
+repository = "https://github.com/TidalPaladin/dicom-anon"
+
+[workspace.dependencies]
+blake3 = "=1.8.2"
+chrono = { version = "=0.4.42", default-features = false, features = ["std"] }
+clap = { version = "=4.5.54", features = ["derive", "env"] }
+criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support", "plotters"] }
+dicom-core = "=0.10.0"
+dicom-dictionary-std = "=0.10.0"
+dicom-object = { version = "=0.10.0", features = ["inventory-registry"] }
+napi = { version = "=3.10.3", default-features = false, features = ["napi8"] }
+napi-derive = "=3.5.9"
+napi-build = "=2.3.2"
+pyo3 = { version = "=0.29.0", features = ["abi3-py310", "extension-module"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.149"
+tempfile = "=3.24.0"
+thiserror = "=2.0.17"
+zeroize = "=1.8.2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

@@ -1,0 +1,16 @@
+[package]
+name = "dicom-anon-python"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "dicom_anon_python"
+crate-type = ["cdylib"]
+
+[dependencies]
+dicom-anon = { path = "../../core" }
+pyo3.workspace = true
+serde_json.workspace = true

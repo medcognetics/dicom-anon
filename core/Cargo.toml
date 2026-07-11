@@ -1,15 +1,40 @@
 [package]
-name = "rust-template-core"
-version = "0.1.0"
-edition = "2021"
+name = "dicom-anon"
+description = "Deterministic DICOM PS3.15 de-identification and validation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "dicom_anon"
 
 [dependencies]
-
+blake3.workspace = true
+chrono.workspace = true
+clap.workspace = true
+dicom-core.workspace = true
+dicom-dictionary-std.workspace = true
+dicom-object.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
-tempfile = "3.10"
-rstest = "0.19"
+criterion.workspace = true
 
 [[bin]]
-name = "rust-template"
-path = "src/main.rs"
+name = "dicom-anonymize"
+path = "src/bin/dicom-anonymize.rs"
+
+[[bin]]
+name = "dicom-validate"
+path = "src/bin/dicom-validate.rs"
+
+[[bench]]
+name = "anonymization"
+harness = false

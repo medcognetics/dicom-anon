@@ -1,0 +1,25 @@
+{
+  "name": "@dicom-anon/core",
+  "version": "0.1.0",
+  "description": "Node.js bindings for deterministic DICOM PS3.15 de-identification",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT OR Apache-2.0",
+  "files": [
+    "*.node",
+    "index.js",
+    "index.d.ts"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "typecheck": "tsc --noEmit --strict --types node index.d.ts"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "3.7.2",
+    "@types/node": "26.1.1",
+    "typescript": "7.0.2"
+  }
+}

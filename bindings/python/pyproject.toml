@@ -1,0 +1,15 @@
+[build-system]
+requires = ["maturin>=1.10,<2"]
+build-backend = "maturin"
+
+[project]
+name = "dicom-anon"
+version = "0.1.0"
+description = "Python bindings for deterministic DICOM PS3.15 de-identification"
+requires-python = ">=3.10"
+license = "MIT OR Apache-2.0"
+
+[tool.maturin]
+manifest-path = "Cargo.toml"
+module-name = "dicom_anon_python"
+include = ["dicom_anon_python.pyi"]
