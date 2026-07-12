@@ -62,7 +62,11 @@ fn anonymize_stdout_pipes_into_json_validation() {
     assert!(validated.stderr.is_empty());
     let report: serde_json::Value = serde_json::from_slice(&validated.stdout).unwrap();
     assert_eq!(report["conformant"], true);
-    assert!(report["findings"].as_array().unwrap().is_empty());
+    assert!(report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| finding["code"] == "source_not_compared"));
     assert!(!validated.stdout.windows(2).any(|window| window == b"\x1b["));
 }
 
@@ -230,4 +234,171 @@ fn validator_text_modes_color_status_and_show_warnings() {
     assert_eq!(runtime_error.status.code(), Some(2));
     assert!(runtime_error.stdout.is_empty());
     assert!(String::from_utf8_lossy(&runtime_error.stderr).contains("failed to read DICOM"));
+}
+
+#[test]
+fn source_aware_cli_validation_uses_the_same_configuration_and_key() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.dcm");
+    let candidate = directory.path().join("candidate.dcm");
+    std::fs::write(&source, source_bytes()).unwrap();
+
+    let anonymized = Command::new(env!("CARGO_BIN_EXE_dicom-anonymize"))
+        .arg(&source)
+        .arg(&candidate)
+        .args(["--key-env", KEY_ENV])
+        .env(KEY_ENV, KEY)
+        .output()
+        .unwrap();
+    assert_eq!(anonymized.status.code(), Some(0));
+
+    let validated = Command::new(env!("CARGO_BIN_EXE_dicom-validate"))
+        .arg(&candidate)
+        .arg("--source")
+        .arg(&source)
+        .args(["--key-env", KEY_ENV, "--format", "json"])
+        .env(KEY_ENV, KEY)
+        .output()
+        .unwrap();
+    assert_eq!(validated.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&validated.stdout).unwrap();
+    assert_eq!(report["validation_mode"], "source_comparison");
+    assert!(!report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| finding["code"] == "source_not_compared"));
+}
+
+#[test]
+fn safe_harbor_pipeline_uses_external_scope_uid_map_and_year_aggregation() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.dcm");
+    let candidate = directory.path().join("candidate.dcm");
+    let uid_map = directory.path().join("uid-map.json");
+    let mut source_object = dicom_anon::read_dicom(&source_bytes()[..]).unwrap();
+    source_object.put_str(tags::PATIENT_AGE, VR::AS, "097Y");
+    source_object.put_str(tags::PATIENT_BIRTH_DATE, VR::DA, "19270102");
+    source_object.put_str(tags::STUDY_TIME, VR::TM, "112233");
+    let mut bytes = Vec::new();
+    source_object.write_all(&mut bytes).unwrap();
+    std::fs::write(&source, bytes).unwrap();
+    std::fs::write(
+        &uid_map,
+        serde_json::to_vec(&serde_json::json!({
+            "1.2.840.999.1.1": "2.25.101",
+            "1.2.840.999.1": "2.25.102",
+            "1.2.840.999.1.2": "2.25.103"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let profile_args = [
+        "--policy",
+        "safe-harbor-metadata",
+        "--uid-map",
+        uid_map.to_str().unwrap(),
+    ];
+    let anonymized = Command::new(env!("CARGO_BIN_EXE_dicom-anonymize"))
+        .arg(&source)
+        .arg(&candidate)
+        .args(profile_args)
+        .args(["--patient-scope", "SUBJECT-42", "--key-env", KEY_ENV])
+        .env(KEY_ENV, KEY)
+        .output()
+        .unwrap();
+    assert_eq!(
+        anonymized.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&anonymized.stderr)
+    );
+    let object = dicom_anon::read_dicom(std::fs::File::open(&candidate).unwrap()).unwrap();
+    assert_eq!(
+        object.element(tags::PATIENT_ID).unwrap().to_str().unwrap(),
+        ""
+    );
+    assert_eq!(
+        object
+            .element(tags::PATIENT_NAME)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        ""
+    );
+    assert_eq!(
+        object
+            .element(tags::PATIENT_BIRTH_DATE)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        ""
+    );
+    assert_eq!(
+        object.element(tags::PATIENT_AGE).unwrap().to_str().unwrap(),
+        "090Y"
+    );
+    assert_eq!(
+        object.element(tags::STUDY_DATE).unwrap().to_str().unwrap(),
+        "20240101"
+    );
+    assert_eq!(
+        object.element(tags::STUDY_TIME).unwrap().to_str().unwrap(),
+        "000000"
+    );
+
+    let candidate_only = Command::new(env!("CARGO_BIN_EXE_dicom-validate"))
+        .arg(&candidate)
+        .args(profile_args)
+        .args(["--format", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        candidate_only.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&candidate_only.stdout)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&candidate_only.stdout).unwrap();
+    assert_eq!(report["policy"], "safe-harbor-metadata");
+    assert_eq!(report["validation_mode"], "candidate_only");
+
+    let source_comparison = Command::new(env!("CARGO_BIN_EXE_dicom-validate"))
+        .arg(&candidate)
+        .arg("--source")
+        .arg(&source)
+        .args(profile_args)
+        .args([
+            "--patient-scope",
+            "SUBJECT-42",
+            "--key-env",
+            KEY_ENV,
+            "--format",
+            "json",
+        ])
+        .env(KEY_ENV, KEY)
+        .output()
+        .unwrap();
+    assert_eq!(source_comparison.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&source_comparison.stdout).unwrap();
+    assert_eq!(report["validation_mode"], "source_comparison");
+}
+
+#[test]
+fn unsupported_pixel_option_is_rejected_before_processing() {
+    let output = run_with_stdin(
+        Command::new(env!("CARGO_BIN_EXE_dicom-anonymize"))
+            .args([
+                "-",
+                "--key-env",
+                KEY_ENV,
+                "--enable-option",
+                "clean-pixel-data",
+            ])
+            .env(KEY_ENV, KEY),
+        &source_bytes(),
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported"));
 }

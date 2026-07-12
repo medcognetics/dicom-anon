@@ -1,15 +1,322 @@
-//! DICOM PS3.15 confidentiality profile rules.
+//! DICOM PS3.15 confidentiality profile rules and option resolution.
 
+use std::collections::{BTreeMap, BTreeSet};
+
+use clap::ValueEnum;
+use dicom_core::header::Header;
+use dicom_core::value::Value;
 use dicom_core::Tag;
+use dicom_dictionary_std::tags;
+use dicom_object::mem::InMemDicomObject;
 use serde::{Deserialize, Serialize};
 
-/// Human-readable profile name embedded in output metadata.
-pub const PROFILE_NAME: &str =
-    "DICOM PS3.15 Basic Application Confidentiality Profile + Modified Dates";
+use crate::{Error, Result};
+
+/// Human-readable name of the default profile.
+pub const PROFILE_NAME: &str = "DICOM PS3.15 Basic Application Confidentiality Profile + Clean Descriptors + Modified Dates + Retain Patient Characteristics";
 /// DICOM edition used to construct the rule table.
 pub const PROFILE_VERSION: &str = "2026c";
 
-/// Effective action after applying the modified-dates option.
+const OPTION_COLUMN_COUNT: usize = 10;
+
+/// High-level transformation policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+#[value(rename_all = "kebab-case")]
+pub enum DeidentificationPolicy {
+    /// Configurable DICOM PS3.15 profile and options.
+    Dicom,
+    /// Safe Harbor-oriented metadata policy with external linkage mappings.
+    SafeHarborMetadata,
+}
+
+/// Options defined for the DICOM Basic Application Level Confidentiality Profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+#[value(rename_all = "kebab-case")]
+pub enum DicomOption {
+    CleanPixelData,
+    CleanRecognizableVisualFeatures,
+    CleanGraphics,
+    CleanStructuredContent,
+    CleanDescriptors,
+    RetainFullDates,
+    RetainModifiedDates,
+    RetainPatientCharacteristics,
+    RetainDeviceIdentity,
+    RetainInstitutionIdentity,
+    RetainUids,
+    RetainSafePrivate,
+}
+
+impl DicomOption {
+    pub(crate) const fn matrix_index(self) -> Option<usize> {
+        match self {
+            Self::RetainSafePrivate => Some(0),
+            Self::RetainUids => Some(1),
+            Self::RetainDeviceIdentity => Some(2),
+            Self::RetainInstitutionIdentity => Some(3),
+            Self::RetainPatientCharacteristics => Some(4),
+            Self::RetainFullDates => Some(5),
+            Self::RetainModifiedDates => Some(6),
+            Self::CleanDescriptors => Some(7),
+            Self::CleanStructuredContent => Some(8),
+            Self::CleanGraphics => Some(9),
+            Self::CleanPixelData | Self::CleanRecognizableVisualFeatures => None,
+        }
+    }
+
+    const fn from_matrix_index(index: u8) -> Self {
+        match index {
+            0 => Self::RetainSafePrivate,
+            1 => Self::RetainUids,
+            2 => Self::RetainDeviceIdentity,
+            3 => Self::RetainInstitutionIdentity,
+            4 => Self::RetainPatientCharacteristics,
+            5 => Self::RetainFullDates,
+            6 => Self::RetainModifiedDates,
+            7 => Self::CleanDescriptors,
+            8 => Self::CleanStructuredContent,
+            9 => Self::CleanGraphics,
+            _ => unreachable!(),
+        }
+    }
+
+    /// DCM code and meaning for De-identification Method Code Sequence.
+    #[must_use]
+    pub const fn method_code(self) -> (&'static str, &'static str) {
+        match self {
+            Self::CleanPixelData => ("113101", "Clean Pixel Data Option"),
+            Self::CleanRecognizableVisualFeatures => {
+                ("113102", "Clean Recognizable Visual Features Option")
+            }
+            Self::CleanGraphics => ("113103", "Clean Graphics Option"),
+            Self::CleanStructuredContent => ("113104", "Clean Structured Content Option"),
+            Self::CleanDescriptors => ("113105", "Clean Descriptors Option"),
+            Self::RetainFullDates => (
+                "113106",
+                "Retain Longitudinal Temporal Information Full Dates Option",
+            ),
+            Self::RetainModifiedDates => (
+                "113107",
+                "Retain Longitudinal Temporal Information Modified Dates Option",
+            ),
+            Self::RetainPatientCharacteristics => {
+                ("113108", "Retain Patient Characteristics Option")
+            }
+            Self::RetainDeviceIdentity => ("113109", "Retain Device Identity Option"),
+            Self::RetainUids => ("113110", "Retain UIDs Option"),
+            Self::RetainSafePrivate => ("113111", "Retain Safe Private Option"),
+            Self::RetainInstitutionIdentity => ("113112", "Retain Institution Identity Option"),
+        }
+    }
+}
+
+/// A private element known to be safe for a specific private creator.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SafePrivateElement {
+    /// Private Creator value.
+    pub creator: String,
+    /// Low byte of the private data element within its reserved block.
+    pub element_offset: u8,
+}
+
+/// Serializable profile configuration shared by all interfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileConfiguration {
+    pub policy: DeidentificationPolicy,
+    pub options: BTreeSet<DicomOption>,
+    /// Canonical hexadecimal tag -> exact source value -> safe output value.
+    #[serde(default)]
+    pub descriptor_mappings: BTreeMap<String, BTreeMap<String, String>>,
+    #[serde(default)]
+    pub safe_private_allowlist: BTreeSet<SafePrivateElement>,
+    /// Original UID -> independently assigned replacement UID.
+    #[serde(default)]
+    pub uid_mappings: BTreeMap<String, String>,
+}
+
+impl Default for ProfileConfiguration {
+    fn default() -> Self {
+        Self {
+            policy: DeidentificationPolicy::Dicom,
+            options: [
+                DicomOption::CleanDescriptors,
+                DicomOption::RetainModifiedDates,
+                DicomOption::RetainPatientCharacteristics,
+            ]
+            .into_iter()
+            .collect(),
+            descriptor_mappings: BTreeMap::new(),
+            safe_private_allowlist: BTreeSet::new(),
+            uid_mappings: BTreeMap::new(),
+        }
+    }
+}
+
+impl ProfileConfiguration {
+    /// Construct the strict Safe Harbor metadata defaults.
+    #[must_use]
+    pub fn safe_harbor() -> Self {
+        Self {
+            policy: DeidentificationPolicy::SafeHarborMetadata,
+            options: [
+                DicomOption::CleanGraphics,
+                DicomOption::CleanStructuredContent,
+                DicomOption::CleanDescriptors,
+                DicomOption::RetainModifiedDates,
+                DicomOption::RetainPatientCharacteristics,
+            ]
+            .into_iter()
+            .collect(),
+            descriptor_mappings: BTreeMap::new(),
+            safe_private_allowlist: BTreeSet::new(),
+            uid_mappings: BTreeMap::new(),
+        }
+    }
+
+    /// Validate option support, policy constraints, and action compatibility.
+    pub fn validate(&self) -> Result<()> {
+        for unsupported in [
+            DicomOption::CleanPixelData,
+            DicomOption::CleanRecognizableVisualFeatures,
+        ] {
+            if self.options.contains(&unsupported) {
+                return Err(Error::UnsupportedProfileOption(format!("{unsupported:?}")));
+            }
+        }
+        if self.options.contains(&DicomOption::RetainFullDates)
+            && self.options.contains(&DicomOption::RetainModifiedDates)
+        {
+            return Err(Error::ConflictingProfileOptions(
+                "retain-full-dates and retain-modified-dates are mutually exclusive".to_owned(),
+            ));
+        }
+        if self.policy == DeidentificationPolicy::SafeHarborMetadata {
+            for forbidden in [
+                DicomOption::RetainFullDates,
+                DicomOption::RetainDeviceIdentity,
+                DicomOption::RetainInstitutionIdentity,
+                DicomOption::RetainUids,
+            ] {
+                if self.options.contains(&forbidden) {
+                    return Err(Error::UnsupportedSafeHarborOption(format!("{forbidden:?}")));
+                }
+            }
+        }
+        for &(left, right, tag, name) in OPTION_CONFLICTS {
+            let left = DicomOption::from_matrix_index(left);
+            let right = DicomOption::from_matrix_index(right);
+            if self.has(left) && self.has(right) {
+                return Err(Error::ConflictingProfileOptions(format!(
+                    "{name} ({:04X},{:04X}) has conflicting actions from {left:?} and {right:?}",
+                    tag >> 16,
+                    tag as u16
+                )));
+            }
+        }
+        for (tag, mappings) in &self.descriptor_mappings {
+            if tag.len() != 8
+                || !tag
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte))
+            {
+                return Err(Error::InvalidProfileConfiguration(
+                    "descriptor-map tags must be eight uppercase hexadecimal digits".to_owned(),
+                ));
+            }
+            if mappings
+                .values()
+                .any(|value| value.is_empty() || value.contains('\0'))
+            {
+                return Err(Error::InvalidProfileConfiguration(
+                    "descriptor-map outputs must be non-empty and contain no null characters"
+                        .to_owned(),
+                ));
+            }
+        }
+        if self
+            .safe_private_allowlist
+            .iter()
+            .any(|entry| entry.creator.is_empty() || entry.creator.contains('\0'))
+        {
+            return Err(Error::InvalidProfileConfiguration(
+                "safe-private creators must be non-empty and contain no null characters".to_owned(),
+            ));
+        }
+        let mut replacement_uids = BTreeSet::new();
+        let source_uids = self.uid_mappings.keys().collect::<BTreeSet<_>>();
+        for (source, replacement) in &self.uid_mappings {
+            if !valid_uid(source) || !valid_uid(replacement) {
+                return Err(Error::InvalidSafeHarborUidMapping(
+                    "source and replacement values must be valid DICOM UIDs".to_owned(),
+                ));
+            }
+            if !replacement_uids.insert(replacement) {
+                return Err(Error::InvalidSafeHarborUidMapping(
+                    "replacement UIDs must be unique".to_owned(),
+                ));
+            }
+            if source == replacement || source_uids.contains(replacement) {
+                return Err(Error::InvalidSafeHarborUidMapping(
+                    "replacement UIDs must differ from every source UID".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn has(&self, option: DicomOption) -> bool {
+        self.options.contains(&option)
+    }
+
+    #[must_use]
+    pub fn descriptor_replacement(&self, tag: Tag, source: &str) -> Option<&str> {
+        self.descriptor_mappings
+            .get(&format!("{:04X}{:04X}", tag.0, tag.1))
+            .and_then(|values| values.get(source))
+            .map(String::as_str)
+    }
+
+    pub(crate) fn deidentification_method(&self) -> String {
+        let option_names = self
+            .options
+            .iter()
+            .map(|option| option.method_code().1)
+            .collect::<Vec<_>>()
+            .join("\\");
+        match self.policy {
+            DeidentificationPolicy::Dicom => format!(
+                "DICOM PS3.15 Basic Profile\\{option_names}\\dicom-anon {PROFILE_VERSION}"
+            ),
+            DeidentificationPolicy::SafeHarborMetadata => format!(
+                "DICOM PS3.15 Basic Profile\\{option_names}\\dicom-anon safe-harbor-metadata {PROFILE_VERSION}"
+            ),
+        }
+    }
+
+    pub(crate) fn allows_safe_private(&self, creator: &str, element_offset: u8) -> bool {
+        self.safe_private_allowlist.contains(&SafePrivateElement {
+            creator: creator.to_owned(),
+            element_offset,
+        }) || SAFE_PRIVATE_ATTRIBUTES
+            .binary_search(&(creator, element_offset))
+            .is_ok()
+    }
+}
+
+fn valid_uid(uid: &str) -> bool {
+    !uid.is_empty()
+        && uid.len() <= 64
+        && uid.split('.').all(|component| {
+            !component.is_empty()
+                && component.bytes().all(|byte| byte.is_ascii_digit())
+                && (component == "0" || !component.starts_with('0'))
+        })
+}
+
+/// Effective action for an attribute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProfileAction {
@@ -21,34 +328,241 @@ pub enum ProfileAction {
     Clean,
 }
 
-/// One exact-tag confidentiality rule.
+/// One frozen Table E.1-1 row with all option-column actions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProfileRule {
     tag: u32,
-    /// Standard attribute name.
     pub name: &'static str,
-    /// Effective action.
+    /// Effective action for `ProfileConfiguration::default()`.
     pub action: ProfileAction,
+    basic_action: ProfileAction,
+    option_actions: [Option<ProfileAction>; OPTION_COLUMN_COUNT],
 }
 
 impl ProfileRule {
-    const fn new(tag: u32, name: &'static str, action: ProfileAction) -> Self {
-        Self { tag, name, action }
+    pub(super) const fn new(
+        tag: u32,
+        name: &'static str,
+        action: ProfileAction,
+        basic_action: ProfileAction,
+        option_actions: [Option<ProfileAction>; OPTION_COLUMN_COUNT],
+    ) -> Self {
+        Self {
+            tag,
+            name,
+            action,
+            basic_action,
+            option_actions,
+        }
     }
 
-    /// DICOM tag governed by this rule.
     #[must_use]
     pub const fn tag(self) -> Tag {
         Tag((self.tag >> 16) as u16, self.tag as u16)
     }
+
+    fn resolve(self, configuration: &ProfileConfiguration) -> Result<ProfileAction> {
+        let mut override_action = None;
+        let mut override_option = None;
+        for option in &configuration.options {
+            let Some(index) = option.matrix_index() else {
+                continue;
+            };
+            let Some(action) = self.option_actions[index] else {
+                continue;
+            };
+            if let Some(existing) = override_action {
+                if existing != action {
+                    return Err(Error::ConflictingProfileOptions(format!(
+                        "{} ({:04X},{:04X}) has conflicting actions from {:?} and {:?}",
+                        self.name,
+                        self.tag().0,
+                        self.tag().1,
+                        override_option.expect("set with action"),
+                        option
+                    )));
+                }
+            } else {
+                override_action = Some(action);
+                override_option = Some(*option);
+            }
+        }
+        Ok(override_action.unwrap_or(self.basic_action))
+    }
+
+    const fn option_action(self, option: DicomOption) -> Option<ProfileAction> {
+        match option.matrix_index() {
+            Some(index) => self.option_actions[index],
+            None => None,
+        }
+    }
 }
 
-/// Find the effective rule for a tag.
-///
-/// Handles Curve Data (50xx,xxxx) and Overlay Data/Comments
-/// (60xx,3000/4000) in addition to exact tags.
-#[must_use]
-pub fn profile_rule(tag: Tag) -> Option<&'static ProfileRule> {
+/// A resolved rule for a specific configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedProfileRule {
+    pub name: &'static str,
+    pub action: ProfileAction,
+    tag: Tag,
+}
+
+impl ResolvedProfileRule {
+    #[must_use]
+    pub const fn tag(self) -> Tag {
+        self.tag
+    }
+}
+
+include!("profile_generated.rs");
+
+/// Resolve safe private data elements and their required creator attributes.
+pub(crate) fn safe_private_tags(
+    object: &InMemDicomObject,
+    configuration: &ProfileConfiguration,
+) -> BTreeSet<Tag> {
+    let mut safe = BTreeSet::new();
+    if !configuration.has(DicomOption::RetainSafePrivate) {
+        return safe;
+    }
+
+    let creators = object
+        .iter()
+        .filter(|element| element.tag().0 % 2 == 1 && (0x0010..=0x00FF).contains(&element.tag().1))
+        .filter_map(|element| {
+            let creator = element.to_str().ok()?;
+            Some((
+                element.tag(),
+                element.tag().1 as u8,
+                creator.trim_matches([' ', '\0']).to_owned(),
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    for &(creator_tag, block, ref creator) in &creators {
+        for element in object.iter().filter(|element| {
+            element.tag().0 == creator_tag.0 && element.tag().1 >> 8 == u16::from(block)
+        }) {
+            if configuration.allows_safe_private(creator, element.tag().1 as u8) {
+                safe.insert(creator_tag);
+                safe.insert(element.tag());
+            }
+        }
+    }
+
+    let Some(characteristics) = object.get(tags::PRIVATE_DATA_ELEMENT_CHARACTERISTICS_SEQUENCE)
+    else {
+        return safe;
+    };
+    let Value::Sequence(sequence) = characteristics.value() else {
+        return safe;
+    };
+    for item in sequence.items() {
+        let Some(group) = item
+            .get(tags::PRIVATE_GROUP_REFERENCE)
+            .and_then(|element| element.to_int::<u16>().ok())
+        else {
+            continue;
+        };
+        let Some(creator) = item
+            .get(tags::PRIVATE_CREATOR_REFERENCE)
+            .and_then(|element| element.to_str().ok())
+        else {
+            continue;
+        };
+        let creator = creator.trim_matches([' ', '\0']);
+        let status = item
+            .get(tags::BLOCK_IDENTIFYING_INFORMATION_STATUS)
+            .and_then(|element| element.to_str().ok())
+            .unwrap_or_default();
+        let declared_offsets = if status.trim_matches([' ', '\0']) == "SAFE" {
+            None
+        } else if status.trim_matches([' ', '\0']) == "MIXED" {
+            Some(
+                item.get(tags::NONIDENTIFYING_PRIVATE_ELEMENTS)
+                    .and_then(|element| element.to_multi_int::<u16>().ok())
+                    .unwrap_or_default(),
+            )
+        } else {
+            continue;
+        };
+
+        for &(creator_tag, block, ref actual_creator) in &creators {
+            if creator_tag.0 != group || actual_creator != creator {
+                continue;
+            }
+            for element in object.iter().filter(|element| {
+                element.tag().0 == group && element.tag().1 >> 8 == u16::from(block)
+            }) {
+                let offset = element.tag().1 & 0x00FF;
+                if declared_offsets
+                    .as_ref()
+                    .is_none_or(|offsets| offsets.contains(&offset))
+                {
+                    safe.insert(creator_tag);
+                    safe.insert(element.tag());
+                }
+            }
+        }
+    }
+    safe
+}
+
+const CURVE_DATA_RULE: ProfileRule = ProfileRule::new(
+    0x50000000,
+    "Curve Data",
+    ProfileAction::Remove,
+    ProfileAction::Remove,
+    [
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(ProfileAction::Clean),
+    ],
+);
+const OVERLAY_DATA_RULE: ProfileRule = ProfileRule::new(
+    0x60003000,
+    "Overlay Data",
+    ProfileAction::Remove,
+    ProfileAction::Remove,
+    [
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(ProfileAction::Clean),
+    ],
+);
+const OVERLAY_COMMENTS_RULE: ProfileRule = ProfileRule::new(
+    0x60004000,
+    "Overlay Comments",
+    ProfileAction::Remove,
+    ProfileAction::Remove,
+    [
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(ProfileAction::Clean),
+    ],
+);
+
+fn raw_profile_rule(tag: Tag) -> Option<&'static ProfileRule> {
     if tag.0 & 0xFF00 == 0x5000 {
         return Some(&CURVE_DATA_RULE);
     }
@@ -60,733 +574,53 @@ pub fn profile_rule(tag: Tag) -> Option<&'static ProfileRule> {
         });
     }
     let key = u32::from(tag.0) << 16 | u32::from(tag.1);
-    profile_rule_exact(key)
-}
-
-const CURVE_DATA_RULE: ProfileRule =
-    ProfileRule::new(0x50000000, "Curve Data", ProfileAction::Remove);
-const OVERLAY_DATA_RULE: ProfileRule =
-    ProfileRule::new(0x60003000, "Overlay Data", ProfileAction::Remove);
-const OVERLAY_COMMENTS_RULE: ProfileRule =
-    ProfileRule::new(0x60004000, "Overlay Comments", ProfileAction::Remove);
-
-#[inline]
-fn profile_rule_exact(key: u32) -> Option<&'static ProfileRule> {
-    let rules = match (key >> 16) as u16 {
-        0x0000 => &PROFILE_RULES[0..2],
-        0x0002 => &PROFILE_RULES[2..3],
-        0x0004 => &PROFILE_RULES[3..4],
-        0x0008 => &PROFILE_RULES[4..71],
-        0x0010 => &PROFILE_RULES[71..126],
-        0x0012 => &PROFILE_RULES[126..149],
-        0x0014 => &PROFILE_RULES[149..151],
-        0x0016 => &PROFILE_RULES[151..189],
-        0x0018 => &PROFILE_RULES[189..246],
-        0x0020 => &PROFILE_RULES[246..260],
-        0x0028 => &PROFILE_RULES[260..263],
-        0x0032 => &PROFILE_RULES[263..286],
-        0x0034 => &PROFILE_RULES[286..290],
-        0x0038 => &PROFILE_RULES[290..313],
-        0x003A => &PROFILE_RULES[313..320],
-        0x0040 => &PROFILE_RULES[320..441],
-        0x0042 => &PROFILE_RULES[441..442],
-        0x0044 => &PROFILE_RULES[442..447],
-        0x0050 => &PROFILE_RULES[447..450],
-        0x0062 => &PROFILE_RULES[450..451],
-        0x0064 => &PROFILE_RULES[451..452],
-        0x0068 => &PROFILE_RULES[452..454],
-        0x006A => &PROFILE_RULES[454..457],
-        0x0070 => &PROFILE_RULES[457..466],
-        0x0072 => &PROFILE_RULES[466..481],
-        0x0074 => &PROFILE_RULES[481..483],
-        0x0088 => &PROFILE_RULES[483..489],
-        0x0100 => &PROFILE_RULES[489..490],
-        0x0400 => &PROFILE_RULES[490..506],
-        0x2030 => &PROFILE_RULES[506..507],
-        0x2100 => &PROFILE_RULES[507..511],
-        0x2200 => &PROFILE_RULES[511..513],
-        0x3002 => &PROFILE_RULES[513..515],
-        0x3006 => &PROFILE_RULES[515..532],
-        0x3008 => &PROFILE_RULES[532..543],
-        0x300A => &PROFILE_RULES[543..589],
-        0x300C => &PROFILE_RULES[589..591],
-        0x300E => &PROFILE_RULES[591..594],
-        0x3010 => &PROFILE_RULES[594..626],
-        0x4000 => &PROFILE_RULES[626..628],
-        0x4008 => &PROFILE_RULES[628..650],
-        0xFFFA => &PROFILE_RULES[650..651],
-        0xFFFC => &PROFILE_RULES[651..652],
-        _ => return None,
-    };
+    let rules = profile_rule_group(tag.0);
     rules
         .binary_search_by_key(&key, |rule| rule.tag)
         .ok()
         .map(|index| &rules[index])
 }
 
-// Generated from DICOM PS3.15 2026c Table E.1-1. Do not edit by hand.
-#[rustfmt::skip]
-pub(super) const PROFILE_RULES: &[ProfileRule] = &[
-    ProfileRule::new(0x00001000, "Affected SOP Instance UID", ProfileAction::Remove),
-    ProfileRule::new(0x00001001, "Requested SOP Instance UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x00020003, "Media Storage SOP Instance UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x00041511, "Referenced SOP Instance UID in File", ProfileAction::RemapUid),
-    ProfileRule::new(0x00080012, "Instance Creation Date", ProfileAction::Clean),
-    ProfileRule::new(0x00080013, "Instance Creation Time", ProfileAction::Clean),
-    ProfileRule::new(0x00080014, "Instance Creator UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x00080015, "Instance Coercion DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x00080017, "Acquisition UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x00080018, "SOP Instance UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x00080019, "Pyramid UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x00080020, "Study Date", ProfileAction::Clean),
-    ProfileRule::new(0x00080021, "Series Date", ProfileAction::Clean),
-    ProfileRule::new(0x00080022, "Acquisition Date", ProfileAction::Clean),
-    ProfileRule::new(0x00080023, "Content Date", ProfileAction::Clean),
-    ProfileRule::new(0x00080024, "Overlay Date", ProfileAction::Clean),
-    ProfileRule::new(0x00080025, "Curve Date", ProfileAction::Clean),
-    ProfileRule::new(0x0008002A, "Acquisition DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x00080030, "Study Time", ProfileAction::Clean),
-    ProfileRule::new(0x00080031, "Series Time", ProfileAction::Clean),
-    ProfileRule::new(0x00080032, "Acquisition Time", ProfileAction::Clean),
-    ProfileRule::new(0x00080033, "Content Time", ProfileAction::Clean),
-    ProfileRule::new(0x00080034, "Overlay Time", ProfileAction::Clean),
-    ProfileRule::new(0x00080035, "Curve Time", ProfileAction::Clean),
-    ProfileRule::new(0x00080050, "Accession Number", ProfileAction::Empty),
-    ProfileRule::new(0x00080054, "Retrieve AE Title", ProfileAction::Remove),
-    ProfileRule::new(0x00080055, "Station AE Title", ProfileAction::Remove),
-    ProfileRule::new(0x00080058, "Failed SOP Instance UID List", ProfileAction::RemapUid),
-    ProfileRule::new(0x00080080, "Institution Name", ProfileAction::Dummy),
-    ProfileRule::new(0x00080081, "Institution Address", ProfileAction::Remove),
-    ProfileRule::new(0x00080082, "Institution Code Sequence", ProfileAction::Dummy),
-    ProfileRule::new(0x00080090, "Referring Physician's Name", ProfileAction::Empty),
-    ProfileRule::new(0x00080092, "Referring Physician's Address", ProfileAction::Remove),
-    ProfileRule::new(0x00080094, "Referring Physician's Telephone Numbers", ProfileAction::Remove),
-    ProfileRule::new(0x00080096, "Referring Physician Identification Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x0008009C, "Consulting Physician's Name", ProfileAction::Empty),
-    ProfileRule::new(0x0008009D, "Consulting Physician Identification Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00080106, "Context Group Version", ProfileAction::Clean),
-    ProfileRule::new(0x00080107, "Context Group Local Version", ProfileAction::Clean),
-    ProfileRule::new(0x00080201, "Timezone Offset From UTC", ProfileAction::Clean),
-    ProfileRule::new(0x00081000, "Network ID", ProfileAction::Remove),
-    ProfileRule::new(0x00081010, "Station Name", ProfileAction::Dummy),
-    ProfileRule::new(0x00081030, "Study Description", ProfileAction::Remove),
-    ProfileRule::new(0x0008103E, "Series Description", ProfileAction::Remove),
-    ProfileRule::new(0x00081040, "Institutional Department Name", ProfileAction::Remove),
-    ProfileRule::new(0x00081041, "Institutional Department Type Code Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00081048, "Physician(s) of Record", ProfileAction::Remove),
-    ProfileRule::new(0x00081049, "Physician(s) of Record Identification Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00081050, "Performing Physician's Name", ProfileAction::Remove),
-    ProfileRule::new(0x00081052, "Performing Physician Identification Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00081060, "Name of Physician(s) Reading Study", ProfileAction::Remove),
-    ProfileRule::new(0x00081062, "Physician(s) Reading Study Identification Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00081070, "Operators' Name", ProfileAction::Dummy),
-    ProfileRule::new(0x00081072, "Operator Identification Sequence", ProfileAction::Dummy),
-    ProfileRule::new(0x00081080, "Admitting Diagnoses Description", ProfileAction::Remove),
-    ProfileRule::new(0x00081084, "Admitting Diagnoses Code Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00081088, "Pyramid Description", ProfileAction::Remove),
-    ProfileRule::new(0x00081110, "Referenced Study Sequence", ProfileAction::Empty),
-    ProfileRule::new(0x00081111, "Referenced Performed Procedure Step Sequence", ProfileAction::Dummy),
-    ProfileRule::new(0x00081120, "Referenced Patient Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00081140, "Referenced Image Sequence", ProfileAction::RemapUid),
-    ProfileRule::new(0x00081155, "Referenced SOP Instance UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x00081195, "Transaction UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x00081301, "Principal Diagnosis Code Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00081302, "Primary Diagnosis Code Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00081303, "Secondary Diagnoses Code Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00081304, "Histological Diagnoses Code Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00082111, "Derivation Description", ProfileAction::Remove),
-    ProfileRule::new(0x00082112, "Source Image Sequence", ProfileAction::RemapUid),
-    ProfileRule::new(0x00083010, "Irradiation Event UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x00084000, "Identifying Comments", ProfileAction::Remove),
-    ProfileRule::new(0x00100010, "Patient's Name", ProfileAction::Empty),
-    ProfileRule::new(0x00100011, "Person Names to Use Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00100012, "Name to Use", ProfileAction::Remove),
-    ProfileRule::new(0x00100013, "Name to Use Comment", ProfileAction::Remove),
-    ProfileRule::new(0x00100014, "Third Person Pronouns Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00100015, "Pronoun Code Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00100016, "Pronoun Comment", ProfileAction::Remove),
-    ProfileRule::new(0x00100020, "Patient ID", ProfileAction::Dummy),
-    ProfileRule::new(0x00100021, "Issuer of Patient ID", ProfileAction::Remove),
-    ProfileRule::new(0x00100030, "Patient's Birth Date", ProfileAction::Empty),
-    ProfileRule::new(0x00100032, "Patient's Birth Time", ProfileAction::Remove),
-    ProfileRule::new(0x00100040, "Patient's Sex", ProfileAction::Empty),
-    ProfileRule::new(0x00100041, "Gender Identity Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00100042, "Sex Parameters for Clinical Use Category Comment", ProfileAction::Remove),
-    ProfileRule::new(0x00100043, "Sex Parameters for Clinical Use Category Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00100044, "Gender Identity Code Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00100045, "Gender Identity Comment", ProfileAction::Remove),
-    ProfileRule::new(0x00100046, "Sex Parameters for Clinical Use Category Code Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00100047, "Sex Parameters for Clinical Use Category Reference", ProfileAction::Remove),
-    ProfileRule::new(0x00100050, "Patient's Insurance Plan Code Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00100101, "Patient's Primary Language Code Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00100102, "Patient's Primary Language Modifier Code Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00101000, "Other Patient IDs", ProfileAction::Remove),
-    ProfileRule::new(0x00101001, "Other Patient Names", ProfileAction::Remove),
-    ProfileRule::new(0x00101002, "Other Patient IDs Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00101005, "Patient's Birth Name", ProfileAction::Remove),
-    ProfileRule::new(0x00101010, "Patient's Age", ProfileAction::Remove),
-    ProfileRule::new(0x00101020, "Patient's Size", ProfileAction::Remove),
-    ProfileRule::new(0x00101030, "Patient's Weight", ProfileAction::Remove),
-    ProfileRule::new(0x00101040, "Patient's Address", ProfileAction::Remove),
-    ProfileRule::new(0x00101050, "Insurance Plan Identification", ProfileAction::Remove),
-    ProfileRule::new(0x00101060, "Patient's Mother's Birth Name", ProfileAction::Remove),
-    ProfileRule::new(0x00101080, "Military Rank", ProfileAction::Remove),
-    ProfileRule::new(0x00101081, "Branch of Service", ProfileAction::Remove),
-    ProfileRule::new(0x00101090, "Medical Record Locator", ProfileAction::Remove),
-    ProfileRule::new(0x00101100, "Referenced Patient Photo Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00102000, "Medical Alerts", ProfileAction::Remove),
-    ProfileRule::new(0x00102110, "Allergies", ProfileAction::Remove),
-    ProfileRule::new(0x00102150, "Country of Residence", ProfileAction::Remove),
-    ProfileRule::new(0x00102152, "Region of Residence", ProfileAction::Remove),
-    ProfileRule::new(0x00102154, "Patient's Telephone Numbers", ProfileAction::Remove),
-    ProfileRule::new(0x00102155, "Patient's Telecom Information", ProfileAction::Remove),
-    ProfileRule::new(0x00102160, "Ethnic Group", ProfileAction::Remove),
-    ProfileRule::new(0x00102161, "Ethnic Group Code Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00102162, "Ethnic Groups", ProfileAction::Remove),
-    ProfileRule::new(0x00102180, "Occupation", ProfileAction::Remove),
-    ProfileRule::new(0x001021A0, "Smoking Status", ProfileAction::Remove),
-    ProfileRule::new(0x001021B0, "Additional Patient History", ProfileAction::Remove),
-    ProfileRule::new(0x001021C0, "Pregnancy Status", ProfileAction::Remove),
-    ProfileRule::new(0x001021D0, "Last Menstrual Date", ProfileAction::Clean),
-    ProfileRule::new(0x001021F0, "Patient's Religious Preference", ProfileAction::Remove),
-    ProfileRule::new(0x00102203, "Patient's Sex Neutered", ProfileAction::Empty),
-    ProfileRule::new(0x00102297, "Responsible Person", ProfileAction::Remove),
-    ProfileRule::new(0x00102299, "Responsible Organization", ProfileAction::Remove),
-    ProfileRule::new(0x00104000, "Patient Comments", ProfileAction::Remove),
-    ProfileRule::new(0x00120010, "Clinical Trial Sponsor Name", ProfileAction::Dummy),
-    ProfileRule::new(0x00120020, "Clinical Trial Protocol ID", ProfileAction::Dummy),
-    ProfileRule::new(0x00120021, "Clinical Trial Protocol Name", ProfileAction::Empty),
-    ProfileRule::new(0x00120022, "Issuer of Clinical Trial Protocol ID", ProfileAction::Remove),
-    ProfileRule::new(0x00120023, "Other Clinical Trial Protocol IDs Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00120030, "Clinical Trial Site ID", ProfileAction::Empty),
-    ProfileRule::new(0x00120031, "Clinical Trial Site Name", ProfileAction::Empty),
-    ProfileRule::new(0x00120032, "Issuer of Clinical Trial Site ID", ProfileAction::Remove),
-    ProfileRule::new(0x00120040, "Clinical Trial Subject ID", ProfileAction::Dummy),
-    ProfileRule::new(0x00120041, "Issuer of Clinical Trial Subject ID", ProfileAction::Remove),
-    ProfileRule::new(0x00120042, "Clinical Trial Subject Reading ID", ProfileAction::Dummy),
-    ProfileRule::new(0x00120043, "Issuer of Clinical Trial Subject Reading ID", ProfileAction::Remove),
-    ProfileRule::new(0x00120050, "Clinical Trial Time Point ID", ProfileAction::Empty),
-    ProfileRule::new(0x00120051, "Clinical Trial Time Point Description", ProfileAction::Remove),
-    ProfileRule::new(0x00120055, "Issuer of Clinical Trial Time Point ID", ProfileAction::Remove),
-    ProfileRule::new(0x00120060, "Clinical Trial Coordinating Center Name", ProfileAction::Empty),
-    ProfileRule::new(0x00120071, "Clinical Trial Series ID", ProfileAction::Remove),
-    ProfileRule::new(0x00120072, "Clinical Trial Series Description", ProfileAction::Remove),
-    ProfileRule::new(0x00120073, "Issuer of Clinical Trial Series ID", ProfileAction::Remove),
-    ProfileRule::new(0x00120081, "Clinical Trial Protocol Ethics Committee Name", ProfileAction::Dummy),
-    ProfileRule::new(0x00120082, "Clinical Trial Protocol Ethics Committee Approval Number", ProfileAction::Remove),
-    ProfileRule::new(0x00120086, "Ethics Committee Approval Effectiveness Start Date", ProfileAction::Clean),
-    ProfileRule::new(0x00120087, "Ethics Committee Approval Effectiveness End Date", ProfileAction::Clean),
-    ProfileRule::new(0x0014407C, "Calibration Time", ProfileAction::Clean),
-    ProfileRule::new(0x0014407E, "Calibration Date", ProfileAction::Clean),
-    ProfileRule::new(0x0016002B, "Maker Note", ProfileAction::Remove),
-    ProfileRule::new(0x0016004B, "Device Setting Description", ProfileAction::Remove),
-    ProfileRule::new(0x0016004D, "Camera Owner Name", ProfileAction::Remove),
-    ProfileRule::new(0x0016004E, "Lens Specification", ProfileAction::Remove),
-    ProfileRule::new(0x0016004F, "Lens Make", ProfileAction::Remove),
-    ProfileRule::new(0x00160050, "Lens Model", ProfileAction::Remove),
-    ProfileRule::new(0x00160051, "Lens Serial Number", ProfileAction::Remove),
-    ProfileRule::new(0x00160070, "GPS Version ID", ProfileAction::Remove),
-    ProfileRule::new(0x00160071, "GPS Latitude Ref", ProfileAction::Remove),
-    ProfileRule::new(0x00160072, "GPS Latitude", ProfileAction::Remove),
-    ProfileRule::new(0x00160073, "GPS Longitude Ref", ProfileAction::Remove),
-    ProfileRule::new(0x00160074, "GPS Longitude", ProfileAction::Remove),
-    ProfileRule::new(0x00160075, "GPS Altitude Ref", ProfileAction::Remove),
-    ProfileRule::new(0x00160076, "GPS Altitude", ProfileAction::Remove),
-    ProfileRule::new(0x00160077, "GPS Time Stamp", ProfileAction::Remove),
-    ProfileRule::new(0x00160078, "GPS Satellites", ProfileAction::Remove),
-    ProfileRule::new(0x00160079, "GPS Status", ProfileAction::Remove),
-    ProfileRule::new(0x0016007A, "GPS Measure Mode", ProfileAction::Remove),
-    ProfileRule::new(0x0016007B, "GPS DOP", ProfileAction::Remove),
-    ProfileRule::new(0x0016007C, "GPS Speed Ref", ProfileAction::Remove),
-    ProfileRule::new(0x0016007D, "GPS Speed", ProfileAction::Remove),
-    ProfileRule::new(0x0016007E, "GPS Track Ref", ProfileAction::Remove),
-    ProfileRule::new(0x0016007F, "GPS Track", ProfileAction::Remove),
-    ProfileRule::new(0x00160080, "GPS Img Direction Ref", ProfileAction::Remove),
-    ProfileRule::new(0x00160081, "GPS Img Direction", ProfileAction::Remove),
-    ProfileRule::new(0x00160082, "GPS Map Datum", ProfileAction::Remove),
-    ProfileRule::new(0x00160083, "GPS Dest Latitude Ref", ProfileAction::Remove),
-    ProfileRule::new(0x00160084, "GPS Dest Latitude", ProfileAction::Remove),
-    ProfileRule::new(0x00160085, "GPS Dest Longitude Ref", ProfileAction::Remove),
-    ProfileRule::new(0x00160086, "GPS Dest Longitude", ProfileAction::Remove),
-    ProfileRule::new(0x00160087, "GPS Dest Bearing Ref", ProfileAction::Remove),
-    ProfileRule::new(0x00160088, "GPS Dest Bearing", ProfileAction::Remove),
-    ProfileRule::new(0x00160089, "GPS Dest Distance Ref", ProfileAction::Remove),
-    ProfileRule::new(0x0016008A, "GPS Dest Distance", ProfileAction::Remove),
-    ProfileRule::new(0x0016008B, "GPS Processing Method", ProfileAction::Remove),
-    ProfileRule::new(0x0016008C, "GPS Area Information", ProfileAction::Remove),
-    ProfileRule::new(0x0016008D, "GPS Date Stamp", ProfileAction::Clean),
-    ProfileRule::new(0x0016008E, "GPS Differential", ProfileAction::Remove),
-    ProfileRule::new(0x00180010, "Contrast/Bolus Agent", ProfileAction::Dummy),
-    ProfileRule::new(0x00180027, "Intervention Drug Stop Time", ProfileAction::Clean),
-    ProfileRule::new(0x00180035, "Intervention Drug Start Time", ProfileAction::Clean),
-    ProfileRule::new(0x00181000, "Device Serial Number", ProfileAction::Dummy),
-    ProfileRule::new(0x00181002, "Device UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x00181004, "Plate ID", ProfileAction::Remove),
-    ProfileRule::new(0x00181005, "Generator ID", ProfileAction::Remove),
-    ProfileRule::new(0x00181007, "Cassette ID", ProfileAction::Remove),
-    ProfileRule::new(0x00181008, "Gantry ID", ProfileAction::Remove),
-    ProfileRule::new(0x00181009, "Unique Device Identifier", ProfileAction::Remove),
-    ProfileRule::new(0x0018100A, "UDI Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x0018100B, "Manufacturer's Device Class UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x00181010, "Secondary Capture Device ID", ProfileAction::Remove),
-    ProfileRule::new(0x00181011, "Hardcopy Creation Device ID", ProfileAction::Remove),
-    ProfileRule::new(0x00181012, "Date of Secondary Capture", ProfileAction::Clean),
-    ProfileRule::new(0x00181014, "Time of Secondary Capture", ProfileAction::Clean),
-    ProfileRule::new(0x00181030, "Protocol Name", ProfileAction::Dummy),
-    ProfileRule::new(0x00181042, "Contrast/Bolus Start Time", ProfileAction::Clean),
-    ProfileRule::new(0x00181043, "Contrast/Bolus Stop Time", ProfileAction::Clean),
-    ProfileRule::new(0x00181072, "Radiopharmaceutical Start Time", ProfileAction::Clean),
-    ProfileRule::new(0x00181073, "Radiopharmaceutical Stop Time", ProfileAction::Clean),
-    ProfileRule::new(0x00181078, "Radiopharmaceutical Start DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x00181079, "Radiopharmaceutical Stop DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x001811BB, "Acquisition Field Of View Label", ProfileAction::Dummy),
-    ProfileRule::new(0x00181200, "Date of Last Calibration", ProfileAction::Clean),
-    ProfileRule::new(0x00181201, "Time of Last Calibration", ProfileAction::Clean),
-    ProfileRule::new(0x00181202, "DateTime of Last Calibration", ProfileAction::Clean),
-    ProfileRule::new(0x00181203, "Calibration DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x00181204, "Date of Manufacture", ProfileAction::Clean),
-    ProfileRule::new(0x00181205, "Date of Installation", ProfileAction::Clean),
-    ProfileRule::new(0x00181400, "Acquisition Device Processing Description", ProfileAction::Dummy),
-    ProfileRule::new(0x00182042, "Target UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x00184000, "Acquisition Comments", ProfileAction::Remove),
-    ProfileRule::new(0x00185011, "Transducer Identification Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x0018700A, "Detector ID", ProfileAction::Dummy),
-    ProfileRule::new(0x0018700C, "Date of Last Detector Calibration", ProfileAction::Clean),
-    ProfileRule::new(0x0018700E, "Time of Last Detector Calibration", ProfileAction::Clean),
-    ProfileRule::new(0x00189074, "Frame Acquisition DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x00189151, "Frame Reference DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x00189185, "Respiratory Motion Compensation Technique Description", ProfileAction::Remove),
-    ProfileRule::new(0x00189367, "X-Ray Source ID", ProfileAction::Dummy),
-    ProfileRule::new(0x00189369, "Source Start DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x0018936A, "Source End DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x00189371, "X-Ray Detector ID", ProfileAction::Dummy),
-    ProfileRule::new(0x00189373, "X-Ray Detector Label", ProfileAction::Remove),
-    ProfileRule::new(0x0018937B, "Multi-energy Acquisition Description", ProfileAction::Remove),
-    ProfileRule::new(0x0018937F, "Decomposition Description", ProfileAction::Remove),
-    ProfileRule::new(0x00189424, "Acquisition Protocol Description", ProfileAction::Remove),
-    ProfileRule::new(0x00189516, "Start Acquisition DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x00189517, "End Acquisition DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x00189623, "Functional Sync Pulse", ProfileAction::Clean),
-    ProfileRule::new(0x00189701, "Decay Correction DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x00189804, "Exclusion Start DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x00189919, "Instruction Performed DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x00189937, "Requested Series Description", ProfileAction::Remove),
-    ProfileRule::new(0x0018A002, "Contribution DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x0018A003, "Contribution Description", ProfileAction::Remove),
-    ProfileRule::new(0x0020000D, "Study Instance UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x0020000E, "Series Instance UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x00200010, "Study ID", ProfileAction::Empty),
-    ProfileRule::new(0x00200027, "Pyramid Label", ProfileAction::Remove),
-    ProfileRule::new(0x00200052, "Frame of Reference UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x00200200, "Synchronization Frame of Reference UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x00203401, "Modifying Device ID", ProfileAction::Remove),
-    ProfileRule::new(0x00203403, "Modified Image Date", ProfileAction::Clean),
-    ProfileRule::new(0x00203405, "Modified Image Time", ProfileAction::Clean),
-    ProfileRule::new(0x00203406, "Modified Image Description", ProfileAction::Remove),
-    ProfileRule::new(0x00204000, "Image Comments", ProfileAction::Remove),
-    ProfileRule::new(0x00209158, "Frame Comments", ProfileAction::Remove),
-    ProfileRule::new(0x00209161, "Concatenation UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x00209164, "Dimension Organization UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x00281199, "Palette Color Lookup Table UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x00281214, "Large Palette Color Lookup Table UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x00284000, "Image Presentation Comments", ProfileAction::Remove),
-    ProfileRule::new(0x00320012, "Study ID Issuer", ProfileAction::Remove),
-    ProfileRule::new(0x00320032, "Study Verified Date", ProfileAction::Clean),
-    ProfileRule::new(0x00320033, "Study Verified Time", ProfileAction::Clean),
-    ProfileRule::new(0x00320034, "Study Read Date", ProfileAction::Clean),
-    ProfileRule::new(0x00320035, "Study Read Time", ProfileAction::Clean),
-    ProfileRule::new(0x00321000, "Scheduled Study Start Date", ProfileAction::Clean),
-    ProfileRule::new(0x00321001, "Scheduled Study Start Time", ProfileAction::Clean),
-    ProfileRule::new(0x00321010, "Scheduled Study Stop Date", ProfileAction::Clean),
-    ProfileRule::new(0x00321011, "Scheduled Study Stop Time", ProfileAction::Clean),
-    ProfileRule::new(0x00321020, "Scheduled Study Location", ProfileAction::Remove),
-    ProfileRule::new(0x00321021, "Scheduled Study Location AE Title", ProfileAction::Remove),
-    ProfileRule::new(0x00321030, "Reason for Study", ProfileAction::Remove),
-    ProfileRule::new(0x00321032, "Requesting Physician", ProfileAction::Remove),
-    ProfileRule::new(0x00321033, "Requesting Service", ProfileAction::Remove),
-    ProfileRule::new(0x00321040, "Study Arrival Date", ProfileAction::Clean),
-    ProfileRule::new(0x00321041, "Study Arrival Time", ProfileAction::Clean),
-    ProfileRule::new(0x00321050, "Study Completion Date", ProfileAction::Clean),
-    ProfileRule::new(0x00321051, "Study Completion Time", ProfileAction::Clean),
-    ProfileRule::new(0x00321060, "Requested Procedure Description", ProfileAction::Empty),
-    ProfileRule::new(0x00321066, "Reason for Visit", ProfileAction::Remove),
-    ProfileRule::new(0x00321067, "Reason for Visit Code Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00321070, "Requested Contrast Agent", ProfileAction::Remove),
-    ProfileRule::new(0x00324000, "Study Comments", ProfileAction::Remove),
-    ProfileRule::new(0x00340001, "Flow Identifier Sequence", ProfileAction::Dummy),
-    ProfileRule::new(0x00340002, "Flow Identifier", ProfileAction::Dummy),
-    ProfileRule::new(0x00340005, "Source Identifier", ProfileAction::Dummy),
-    ProfileRule::new(0x00340007, "Frame Origin Timestamp", ProfileAction::Clean),
-    ProfileRule::new(0x00380004, "Referenced Patient Alias Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00380010, "Admission ID", ProfileAction::Remove),
-    ProfileRule::new(0x00380011, "Issuer of Admission ID", ProfileAction::Remove),
-    ProfileRule::new(0x00380014, "Issuer of Admission ID Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x0038001A, "Scheduled Admission Date", ProfileAction::Clean),
-    ProfileRule::new(0x0038001B, "Scheduled Admission Time", ProfileAction::Clean),
-    ProfileRule::new(0x0038001C, "Scheduled Discharge Date", ProfileAction::Clean),
-    ProfileRule::new(0x0038001D, "Scheduled Discharge Time", ProfileAction::Clean),
-    ProfileRule::new(0x0038001E, "Scheduled Patient Institution Residence", ProfileAction::Remove),
-    ProfileRule::new(0x00380020, "Admitting Date", ProfileAction::Clean),
-    ProfileRule::new(0x00380021, "Admitting Time", ProfileAction::Clean),
-    ProfileRule::new(0x00380030, "Discharge Date", ProfileAction::Clean),
-    ProfileRule::new(0x00380032, "Discharge Time", ProfileAction::Clean),
-    ProfileRule::new(0x00380040, "Discharge Diagnosis Description", ProfileAction::Remove),
-    ProfileRule::new(0x00380050, "Special Needs", ProfileAction::Remove),
-    ProfileRule::new(0x00380060, "Service Episode ID", ProfileAction::Remove),
-    ProfileRule::new(0x00380061, "Issuer of Service Episode ID", ProfileAction::Remove),
-    ProfileRule::new(0x00380062, "Service Episode Description", ProfileAction::Remove),
-    ProfileRule::new(0x00380064, "Issuer of Service Episode ID Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00380300, "Current Patient Location", ProfileAction::Remove),
-    ProfileRule::new(0x00380400, "Patient's Institution Residence", ProfileAction::Remove),
-    ProfileRule::new(0x00380500, "Patient State", ProfileAction::Remove),
-    ProfileRule::new(0x00384000, "Visit Comments", ProfileAction::Remove),
-    ProfileRule::new(0x003A0020, "Multiplex Group Label", ProfileAction::Remove),
-    ProfileRule::new(0x003A0203, "Channel Label", ProfileAction::Remove),
-    ProfileRule::new(0x003A020C, "Channel Derivation Description", ProfileAction::Remove),
-    ProfileRule::new(0x003A0310, "Multiplex Group UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x003A0314, "Impedance Measurement DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x003A0329, "Waveform Filter Description", ProfileAction::Remove),
-    ProfileRule::new(0x003A032B, "Filter Lookup Table Description", ProfileAction::Remove),
-    ProfileRule::new(0x00400001, "Scheduled Station AE Title", ProfileAction::Remove),
-    ProfileRule::new(0x00400002, "Scheduled Procedure Step Start Date", ProfileAction::Clean),
-    ProfileRule::new(0x00400003, "Scheduled Procedure Step Start Time", ProfileAction::Clean),
-    ProfileRule::new(0x00400004, "Scheduled Procedure Step End Date", ProfileAction::Clean),
-    ProfileRule::new(0x00400005, "Scheduled Procedure Step End Time", ProfileAction::Clean),
-    ProfileRule::new(0x00400006, "Scheduled Performing Physician's Name", ProfileAction::Remove),
-    ProfileRule::new(0x00400007, "Scheduled Procedure Step Description", ProfileAction::Remove),
-    ProfileRule::new(0x00400009, "Scheduled Procedure Step ID", ProfileAction::Remove),
-    ProfileRule::new(0x0040000B, "Scheduled Performing Physician Identification Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00400010, "Scheduled Station Name", ProfileAction::Remove),
-    ProfileRule::new(0x00400011, "Scheduled Procedure Step Location", ProfileAction::Remove),
-    ProfileRule::new(0x00400012, "Pre-Medication", ProfileAction::Remove),
-    ProfileRule::new(0x00400241, "Performed Station AE Title", ProfileAction::Remove),
-    ProfileRule::new(0x00400242, "Performed Station Name", ProfileAction::Remove),
-    ProfileRule::new(0x00400243, "Performed Location", ProfileAction::Remove),
-    ProfileRule::new(0x00400244, "Performed Procedure Step Start Date", ProfileAction::Clean),
-    ProfileRule::new(0x00400245, "Performed Procedure Step Start Time", ProfileAction::Clean),
-    ProfileRule::new(0x00400250, "Performed Procedure Step End Date", ProfileAction::Clean),
-    ProfileRule::new(0x00400251, "Performed Procedure Step End Time", ProfileAction::Clean),
-    ProfileRule::new(0x00400253, "Performed Procedure Step ID", ProfileAction::Remove),
-    ProfileRule::new(0x00400254, "Performed Procedure Step Description", ProfileAction::Remove),
-    ProfileRule::new(0x00400275, "Request Attributes Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00400280, "Comments on the Performed Procedure Step", ProfileAction::Remove),
-    ProfileRule::new(0x00400310, "Comments on Radiation Dose", ProfileAction::Remove),
-    ProfileRule::new(0x0040050A, "Specimen Accession Number", ProfileAction::Remove),
-    ProfileRule::new(0x00400512, "Container Identifier", ProfileAction::Dummy),
-    ProfileRule::new(0x00400513, "Issuer of the Container Identifier Sequence", ProfileAction::Empty),
-    ProfileRule::new(0x0040051A, "Container Description", ProfileAction::Remove),
-    ProfileRule::new(0x00400551, "Specimen Identifier", ProfileAction::Dummy),
-    ProfileRule::new(0x00400554, "Specimen UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x00400555, "Acquisition Context Sequence", ProfileAction::Empty),
-    ProfileRule::new(0x00400556, "Acquisition Context Description", ProfileAction::Remove),
-    ProfileRule::new(0x00400562, "Issuer of the Specimen Identifier Sequence", ProfileAction::Empty),
-    ProfileRule::new(0x00400600, "Specimen Short Description", ProfileAction::Remove),
-    ProfileRule::new(0x00400602, "Specimen Detailed Description", ProfileAction::Remove),
-    ProfileRule::new(0x00400610, "Specimen Preparation Sequence", ProfileAction::Empty),
-    ProfileRule::new(0x004006FA, "Slide Identifier", ProfileAction::Remove),
-    ProfileRule::new(0x00401001, "Requested Procedure ID", ProfileAction::Remove),
-    ProfileRule::new(0x00401002, "Reason for the Requested Procedure", ProfileAction::Remove),
-    ProfileRule::new(0x00401004, "Patient Transport Arrangements", ProfileAction::Remove),
-    ProfileRule::new(0x00401005, "Requested Procedure Location", ProfileAction::Remove),
-    ProfileRule::new(0x0040100A, "Reason for Requested Procedure Code Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00401010, "Names of Intended Recipients of Results", ProfileAction::Remove),
-    ProfileRule::new(0x00401011, "Intended Recipients of Results Identification Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00401101, "Person Identification Code Sequence", ProfileAction::Dummy),
-    ProfileRule::new(0x00401102, "Person's Address", ProfileAction::Remove),
-    ProfileRule::new(0x00401103, "Person's Telephone Numbers", ProfileAction::Remove),
-    ProfileRule::new(0x00401104, "Person's Telecom Information", ProfileAction::Remove),
-    ProfileRule::new(0x00401400, "Requested Procedure Comments", ProfileAction::Remove),
-    ProfileRule::new(0x00402001, "Reason for the Imaging Service Request", ProfileAction::Remove),
-    ProfileRule::new(0x00402004, "Issue Date of Imaging Service Request", ProfileAction::Clean),
-    ProfileRule::new(0x00402005, "Issue Time of Imaging Service Request", ProfileAction::Clean),
-    ProfileRule::new(0x00402008, "Order Entered By", ProfileAction::Remove),
-    ProfileRule::new(0x00402009, "Order Enterer's Location", ProfileAction::Remove),
-    ProfileRule::new(0x00402010, "Order Callback Phone Number", ProfileAction::Remove),
-    ProfileRule::new(0x00402011, "Order Callback Telecom Information", ProfileAction::Remove),
-    ProfileRule::new(0x00402016, "Placer Order Number / Imaging Service Request", ProfileAction::Empty),
-    ProfileRule::new(0x00402017, "Filler Order Number / Imaging Service Request", ProfileAction::Empty),
-    ProfileRule::new(0x00402400, "Imaging Service Request Comments", ProfileAction::Remove),
-    ProfileRule::new(0x00403001, "Confidentiality Constraint on Patient Data Description", ProfileAction::Remove),
-    ProfileRule::new(0x00404005, "Scheduled Procedure Step Start DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x00404008, "Scheduled Procedure Step Expiration DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x00404010, "Scheduled Procedure Step Modification DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x00404011, "Expected Completion DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x00404023, "Referenced General Purpose Scheduled Procedure Step Transaction UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x00404025, "Scheduled Station Name Code Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00404027, "Scheduled Station Geographic Location Code Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00404028, "Performed Station Name Code Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00404030, "Performed Station Geographic Location Code Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00404034, "Scheduled Human Performers Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00404035, "Actual Human Performers Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x00404036, "Human Performer's Organization", ProfileAction::Remove),
-    ProfileRule::new(0x00404037, "Human Performer's Name", ProfileAction::Remove),
-    ProfileRule::new(0x00404050, "Performed Procedure Step Start DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x00404051, "Performed Procedure Step End DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x00404052, "Procedure Step Cancellation DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x0040A023, "Findings Group Recording Date (Trial)", ProfileAction::Clean),
-    ProfileRule::new(0x0040A024, "Findings Group Recording Time (Trial)", ProfileAction::Clean),
-    ProfileRule::new(0x0040A027, "Verifying Organization", ProfileAction::Dummy),
-    ProfileRule::new(0x0040A030, "Verification DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x0040A032, "Observation DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x0040A033, "Observation Start DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x0040A034, "Effective Start DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x0040A035, "Effective Stop DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x0040A073, "Verifying Observer Sequence", ProfileAction::Dummy),
-    ProfileRule::new(0x0040A075, "Verifying Observer Name", ProfileAction::Dummy),
-    ProfileRule::new(0x0040A078, "Author Observer Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x0040A07A, "Participant Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x0040A07C, "Custodial Organization Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x0040A082, "Participation DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x0040A088, "Verifying Observer Identification Code Sequence", ProfileAction::Empty),
-    ProfileRule::new(0x0040A110, "Date of Document or Verbal Transaction (Trial)", ProfileAction::Clean),
-    ProfileRule::new(0x0040A112, "Time of Document Creation or Verbal Transaction (Trial)", ProfileAction::Clean),
-    ProfileRule::new(0x0040A120, "DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x0040A121, "Date", ProfileAction::Clean),
-    ProfileRule::new(0x0040A122, "Time", ProfileAction::Clean),
-    ProfileRule::new(0x0040A123, "Person Name", ProfileAction::Dummy),
-    ProfileRule::new(0x0040A124, "UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x0040A13A, "Referenced DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x0040A171, "Observation UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x0040A172, "Referenced Observation UID (Trial)", ProfileAction::RemapUid),
-    ProfileRule::new(0x0040A192, "Observation Date (Trial)", ProfileAction::Clean),
-    ProfileRule::new(0x0040A193, "Observation Time (Trial)", ProfileAction::Clean),
-    ProfileRule::new(0x0040A307, "Current Observer (Trial)", ProfileAction::Remove),
-    ProfileRule::new(0x0040A352, "Verbal Source (Trial)", ProfileAction::Remove),
-    ProfileRule::new(0x0040A353, "Address (Trial)", ProfileAction::Remove),
-    ProfileRule::new(0x0040A354, "Telephone Number (Trial)", ProfileAction::Remove),
-    ProfileRule::new(0x0040A358, "Verbal Source Identifier Code Sequence (Trial)", ProfileAction::Remove),
-    ProfileRule::new(0x0040A402, "Observation Subject UID (Trial)", ProfileAction::RemapUid),
-    ProfileRule::new(0x0040A730, "Content Sequence", ProfileAction::Dummy),
-    ProfileRule::new(0x0040B020, "Waveform Annotation Sequence", ProfileAction::Dummy),
-    ProfileRule::new(0x0040B034, "Annotation DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x0040B036, "Segment Definition DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x0040B03B, "Montage Name", ProfileAction::Remove),
-    ProfileRule::new(0x0040B03F, "Montage Channel Label", ProfileAction::Remove),
-    ProfileRule::new(0x0040DB06, "Template Version", ProfileAction::Clean),
-    ProfileRule::new(0x0040DB07, "Template Local Version", ProfileAction::Clean),
-    ProfileRule::new(0x0040DB0C, "Template Extension Organization UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x0040DB0D, "Template Extension Creator UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x0040E004, "HL7 Document Effective Time", ProfileAction::Clean),
-    ProfileRule::new(0x0040E012, "Display URI", ProfileAction::Remove),
-    ProfileRule::new(0x00420011, "Encapsulated Document", ProfileAction::Dummy),
-    ProfileRule::new(0x00440004, "Approval Status DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x0044000B, "Product Expiration DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x00440010, "Substance Administration DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x00440104, "Assertion DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x00440105, "Assertion Expiration DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x0050001B, "Container Component ID", ProfileAction::Remove),
-    ProfileRule::new(0x00500020, "Device Description", ProfileAction::Remove),
-    ProfileRule::new(0x00500021, "Long Device Description", ProfileAction::Remove),
-    ProfileRule::new(0x00620021, "Tracking UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x00640003, "Source Frame of Reference UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x00686226, "Effective DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x00686270, "Information Issue DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x006A0003, "Annotation Group UID", ProfileAction::Dummy),
-    ProfileRule::new(0x006A0005, "Annotation Group Label", ProfileAction::Dummy),
-    ProfileRule::new(0x006A0006, "Annotation Group Description", ProfileAction::Remove),
-    ProfileRule::new(0x00700001, "Graphic Annotation Sequence", ProfileAction::Dummy),
-    ProfileRule::new(0x00700006, "Unformatted Text Value", ProfileAction::Dummy),
-    ProfileRule::new(0x00700082, "Presentation Creation Date", ProfileAction::Clean),
-    ProfileRule::new(0x00700083, "Presentation Creation Time", ProfileAction::Clean),
-    ProfileRule::new(0x00700084, "Content Creator's Name", ProfileAction::Dummy),
-    ProfileRule::new(0x00700086, "Content Creator's Identification Code Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x0070031A, "Fiducial UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x00701101, "Presentation Display Collection UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x00701102, "Presentation Sequence Collection UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x0072000A, "Hanging Protocol Creation DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x0072005E, "Selector AE Value", ProfileAction::Dummy),
-    ProfileRule::new(0x0072005F, "Selector AS Value", ProfileAction::Dummy),
-    ProfileRule::new(0x00720061, "Selector DA Value", ProfileAction::Clean),
-    ProfileRule::new(0x00720063, "Selector DT Value", ProfileAction::Clean),
-    ProfileRule::new(0x00720065, "Selector OB Value", ProfileAction::Dummy),
-    ProfileRule::new(0x00720066, "Selector LO Value", ProfileAction::Dummy),
-    ProfileRule::new(0x00720068, "Selector LT Value", ProfileAction::Dummy),
-    ProfileRule::new(0x0072006A, "Selector PN Value", ProfileAction::Dummy),
-    ProfileRule::new(0x0072006B, "Selector TM Value", ProfileAction::Clean),
-    ProfileRule::new(0x0072006C, "Selector SH Value", ProfileAction::Dummy),
-    ProfileRule::new(0x0072006D, "Selector UN Value", ProfileAction::Dummy),
-    ProfileRule::new(0x0072006E, "Selector ST Value", ProfileAction::Dummy),
-    ProfileRule::new(0x00720070, "Selector UT Value", ProfileAction::Dummy),
-    ProfileRule::new(0x00720071, "Selector UR Value", ProfileAction::Dummy),
-    ProfileRule::new(0x00741234, "Receiving AE", ProfileAction::Remove),
-    ProfileRule::new(0x00741236, "Requesting AE", ProfileAction::Remove),
-    ProfileRule::new(0x00880140, "Storage Media File-set UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x00880200, "Icon Image Sequence (see Note 11)", ProfileAction::Remove),
-    ProfileRule::new(0x00880904, "Topic Title", ProfileAction::Remove),
-    ProfileRule::new(0x00880906, "Topic Subject", ProfileAction::Remove),
-    ProfileRule::new(0x00880910, "Topic Author", ProfileAction::Remove),
-    ProfileRule::new(0x00880912, "Topic Keywords", ProfileAction::Remove),
-    ProfileRule::new(0x01000420, "SOP Authorization DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x04000100, "Digital Signature UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x04000105, "Digital Signature DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x04000115, "Certificate of Signer", ProfileAction::Dummy),
-    ProfileRule::new(0x04000310, "Certified Timestamp", ProfileAction::Clean),
-    ProfileRule::new(0x04000402, "Referenced Digital Signature Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x04000403, "Referenced SOP Instance MAC Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x04000404, "MAC", ProfileAction::Remove),
-    ProfileRule::new(0x04000550, "Modified Attributes Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x04000551, "Nonconforming Modified Attributes Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x04000552, "Nonconforming Data Element Value", ProfileAction::Remove),
-    ProfileRule::new(0x04000561, "Original Attributes Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x04000562, "Attribute Modification DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x04000563, "Modifying System", ProfileAction::Dummy),
-    ProfileRule::new(0x04000564, "Source of Previous Values", ProfileAction::Empty),
-    ProfileRule::new(0x04000565, "Reason for the Attribute Modification", ProfileAction::Dummy),
-    ProfileRule::new(0x04000600, "Instance Origin Status", ProfileAction::Remove),
-    ProfileRule::new(0x20300020, "Text String", ProfileAction::Remove),
-    ProfileRule::new(0x21000040, "Creation Date", ProfileAction::Clean),
-    ProfileRule::new(0x21000050, "Creation Time", ProfileAction::Clean),
-    ProfileRule::new(0x21000070, "Originator", ProfileAction::Remove),
-    ProfileRule::new(0x21000140, "Destination AE", ProfileAction::Dummy),
-    ProfileRule::new(0x22000002, "Label Text", ProfileAction::Empty),
-    ProfileRule::new(0x22000005, "Barcode Value", ProfileAction::Empty),
-    ProfileRule::new(0x30020121, "Position Acquisition Template Name", ProfileAction::Remove),
-    ProfileRule::new(0x30020123, "Position Acquisition Template Description", ProfileAction::Remove),
-    ProfileRule::new(0x30060002, "Structure Set Label", ProfileAction::Dummy),
-    ProfileRule::new(0x30060004, "Structure Set Name", ProfileAction::Remove),
-    ProfileRule::new(0x30060006, "Structure Set Description", ProfileAction::Remove),
-    ProfileRule::new(0x30060008, "Structure Set Date", ProfileAction::Clean),
-    ProfileRule::new(0x30060009, "Structure Set Time", ProfileAction::Clean),
-    ProfileRule::new(0x30060024, "Referenced Frame of Reference UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x30060026, "ROI Name", ProfileAction::Empty),
-    ProfileRule::new(0x30060028, "ROI Description", ProfileAction::Remove),
-    ProfileRule::new(0x3006002D, "ROI DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x3006002E, "ROI Observation DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x30060038, "ROI Generation Description", ProfileAction::Remove),
-    ProfileRule::new(0x3006004D, "ROI Creator Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x3006004E, "ROI Interpreter Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x30060085, "ROI Observation Label", ProfileAction::Remove),
-    ProfileRule::new(0x30060088, "ROI Observation Description", ProfileAction::Remove),
-    ProfileRule::new(0x300600A6, "ROI Interpreter", ProfileAction::Empty),
-    ProfileRule::new(0x300600C2, "Related Frame of Reference UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x30080024, "Treatment Control Point Date", ProfileAction::Clean),
-    ProfileRule::new(0x30080025, "Treatment Control Point Time", ProfileAction::Clean),
-    ProfileRule::new(0x30080054, "First Treatment Date", ProfileAction::Clean),
-    ProfileRule::new(0x30080056, "Most Recent Treatment Date", ProfileAction::Clean),
-    ProfileRule::new(0x30080105, "Source Serial Number", ProfileAction::Empty),
-    ProfileRule::new(0x30080162, "Safe Position Exit Date", ProfileAction::Clean),
-    ProfileRule::new(0x30080164, "Safe Position Exit Time", ProfileAction::Clean),
-    ProfileRule::new(0x30080166, "Safe Position Return Date", ProfileAction::Clean),
-    ProfileRule::new(0x30080168, "Safe Position Return Time", ProfileAction::Clean),
-    ProfileRule::new(0x30080250, "Treatment Date", ProfileAction::Clean),
-    ProfileRule::new(0x30080251, "Treatment Time", ProfileAction::Clean),
-    ProfileRule::new(0x300A0002, "RT Plan Label", ProfileAction::Dummy),
-    ProfileRule::new(0x300A0003, "RT Plan Name", ProfileAction::Remove),
-    ProfileRule::new(0x300A0004, "RT Plan Description", ProfileAction::Remove),
-    ProfileRule::new(0x300A0006, "RT Plan Date", ProfileAction::Clean),
-    ProfileRule::new(0x300A0007, "RT Plan Time", ProfileAction::Clean),
-    ProfileRule::new(0x300A000B, "Treatment Sites", ProfileAction::Remove),
-    ProfileRule::new(0x300A000E, "Prescription Description", ProfileAction::Remove),
-    ProfileRule::new(0x300A0013, "Dose Reference UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x300A0016, "Dose Reference Description", ProfileAction::Remove),
-    ProfileRule::new(0x300A0054, "Table Top Position Alignment UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x300A0072, "Fraction Group Description", ProfileAction::Remove),
-    ProfileRule::new(0x300A0083, "Referenced Dose Reference UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x300A00B2, "Treatment Machine Name", ProfileAction::Empty),
-    ProfileRule::new(0x300A00C3, "Beam Description", ProfileAction::Remove),
-    ProfileRule::new(0x300A00DD, "Bolus Description", ProfileAction::Remove),
-    ProfileRule::new(0x300A0196, "Fixation Device Description", ProfileAction::Remove),
-    ProfileRule::new(0x300A01A6, "Shielding Device Description", ProfileAction::Remove),
-    ProfileRule::new(0x300A01B2, "Setup Technique Description", ProfileAction::Remove),
-    ProfileRule::new(0x300A0216, "Source Manufacturer", ProfileAction::Remove),
-    ProfileRule::new(0x300A022C, "Source Strength Reference Date", ProfileAction::Clean),
-    ProfileRule::new(0x300A022E, "Source Strength Reference Time", ProfileAction::Clean),
-    ProfileRule::new(0x300A02EB, "Compensator Description", ProfileAction::Remove),
-    ProfileRule::new(0x300A0608, "Treatment Position Group Label", ProfileAction::Dummy),
-    ProfileRule::new(0x300A0609, "Treatment Position Group UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x300A0611, "RT Accessory Holder Slot ID", ProfileAction::Empty),
-    ProfileRule::new(0x300A0615, "RT Accessory Device Slot ID", ProfileAction::Empty),
-    ProfileRule::new(0x300A0619, "Radiation Dose Identification Label", ProfileAction::Dummy),
-    ProfileRule::new(0x300A0623, "Radiation Dose In-Vivo Measurement Label", ProfileAction::Dummy),
-    ProfileRule::new(0x300A062A, "RT Tolerance Set Label", ProfileAction::Dummy),
-    ProfileRule::new(0x300A0650, "Patient Setup UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x300A0676, "Equipment Frame of Reference Description", ProfileAction::Remove),
-    ProfileRule::new(0x300A067C, "Radiation Generation Mode Label", ProfileAction::Dummy),
-    ProfileRule::new(0x300A067D, "Radiation Generation Mode Description", ProfileAction::Empty),
-    ProfileRule::new(0x300A0700, "Treatment Session UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x300A0734, "Treatment Tolerance Violation Description", ProfileAction::Dummy),
-    ProfileRule::new(0x300A0736, "Treatment Tolerance Violation DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x300A073A, "Recorded RT Control Point DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x300A0741, "Interlock DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x300A0742, "Interlock Description", ProfileAction::Dummy),
-    ProfileRule::new(0x300A0760, "Override DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x300A0783, "Interlock Origin Description", ProfileAction::Dummy),
-    ProfileRule::new(0x300A0785, "Referenced Treatment Position Group UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x300A078E, "Patient Treatment Preparation Procedure Parameter Description", ProfileAction::Remove),
-    ProfileRule::new(0x300A0792, "Patient Treatment Preparation Method Description", ProfileAction::Remove),
-    ProfileRule::new(0x300A0794, "Patient Setup Photo Description", ProfileAction::Remove),
-    ProfileRule::new(0x300A079A, "Displacement Reference Label", ProfileAction::Remove),
-    ProfileRule::new(0x300C0113, "Reason for Omission Description", ProfileAction::Remove),
-    ProfileRule::new(0x300C0127, "Beam Hold Transition DateTime", ProfileAction::Clean),
-    ProfileRule::new(0x300E0004, "Review Date", ProfileAction::Clean),
-    ProfileRule::new(0x300E0005, "Review Time", ProfileAction::Clean),
-    ProfileRule::new(0x300E0008, "Reviewer Name", ProfileAction::Empty),
-    ProfileRule::new(0x30100006, "Conceptual Volume UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x3010000B, "Referenced Conceptual Volume UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x3010000F, "Conceptual Volume Combination Description", ProfileAction::Empty),
-    ProfileRule::new(0x30100013, "Constituent Conceptual Volume UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x30100015, "Source Conceptual Volume UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x30100017, "Conceptual Volume Description", ProfileAction::Empty),
-    ProfileRule::new(0x3010001B, "Device Alternate Identifier", ProfileAction::Empty),
-    ProfileRule::new(0x3010002D, "Device Label", ProfileAction::Dummy),
-    ProfileRule::new(0x30100031, "Referenced Fiducials UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x30100033, "User Content Label", ProfileAction::Dummy),
-    ProfileRule::new(0x30100034, "User Content Long Label", ProfileAction::Dummy),
-    ProfileRule::new(0x30100035, "Entity Label", ProfileAction::Dummy),
-    ProfileRule::new(0x30100036, "Entity Name", ProfileAction::Remove),
-    ProfileRule::new(0x30100037, "Entity Description", ProfileAction::Remove),
-    ProfileRule::new(0x30100038, "Entity Long Label", ProfileAction::Dummy),
-    ProfileRule::new(0x3010003B, "RT Treatment Phase UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x30100043, "Manufacturer's Device Identifier", ProfileAction::Empty),
-    ProfileRule::new(0x3010004C, "Intended Phase Start Date", ProfileAction::Clean),
-    ProfileRule::new(0x3010004D, "Intended Phase End Date", ProfileAction::Clean),
-    ProfileRule::new(0x30100054, "RT Prescription Label", ProfileAction::Dummy),
-    ProfileRule::new(0x30100056, "RT Treatment Approach Label", ProfileAction::Dummy),
-    ProfileRule::new(0x3010005A, "RT Physician Intent Narrative", ProfileAction::Empty),
-    ProfileRule::new(0x3010005C, "Reason for Superseding", ProfileAction::Empty),
-    ProfileRule::new(0x30100061, "Prior Treatment Dose Description", ProfileAction::Remove),
-    ProfileRule::new(0x3010006E, "Dosimetric Objective UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x3010006F, "Referenced Dosimetric Objective UID", ProfileAction::RemapUid),
-    ProfileRule::new(0x30100077, "Treatment Site", ProfileAction::Dummy),
-    ProfileRule::new(0x3010007A, "Treatment Technique Notes", ProfileAction::Empty),
-    ProfileRule::new(0x3010007B, "Prescription Notes", ProfileAction::Empty),
-    ProfileRule::new(0x3010007F, "Fractionation Notes", ProfileAction::Empty),
-    ProfileRule::new(0x30100081, "Prescription Notes Sequence", ProfileAction::Empty),
-    ProfileRule::new(0x30100085, "Intended Fraction Start Time", ProfileAction::Clean),
-    ProfileRule::new(0x40000010, "Arbitrary", ProfileAction::Remove),
-    ProfileRule::new(0x40004000, "Text Comments", ProfileAction::Remove),
-    ProfileRule::new(0x40080040, "Results ID", ProfileAction::Remove),
-    ProfileRule::new(0x40080042, "Results ID Issuer", ProfileAction::Remove),
-    ProfileRule::new(0x40080100, "Interpretation Recorded Date", ProfileAction::Clean),
-    ProfileRule::new(0x40080101, "Interpretation Recorded Time", ProfileAction::Clean),
-    ProfileRule::new(0x40080102, "Interpretation Recorder", ProfileAction::Remove),
-    ProfileRule::new(0x40080108, "Interpretation Transcription Date", ProfileAction::Clean),
-    ProfileRule::new(0x40080109, "Interpretation Transcription Time", ProfileAction::Clean),
-    ProfileRule::new(0x4008010A, "Interpretation Transcriber", ProfileAction::Remove),
-    ProfileRule::new(0x4008010B, "Interpretation Text", ProfileAction::Remove),
-    ProfileRule::new(0x4008010C, "Interpretation Author", ProfileAction::Remove),
-    ProfileRule::new(0x40080111, "Interpretation Approver Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x40080112, "Interpretation Approval Date", ProfileAction::Clean),
-    ProfileRule::new(0x40080113, "Interpretation Approval Time", ProfileAction::Clean),
-    ProfileRule::new(0x40080114, "Physician Approving Interpretation", ProfileAction::Remove),
-    ProfileRule::new(0x40080115, "Interpretation Diagnosis Description", ProfileAction::Remove),
-    ProfileRule::new(0x40080118, "Results Distribution List Sequence", ProfileAction::Remove),
-    ProfileRule::new(0x40080119, "Distribution Name", ProfileAction::Remove),
-    ProfileRule::new(0x4008011A, "Distribution Address", ProfileAction::Remove),
-    ProfileRule::new(0x40080200, "Interpretation ID", ProfileAction::Remove),
-    ProfileRule::new(0x40080202, "Interpretation ID Issuer", ProfileAction::Remove),
-    ProfileRule::new(0x40080300, "Impressions", ProfileAction::Remove),
-    ProfileRule::new(0x40084000, "Results Comments", ProfileAction::Remove),
-    ProfileRule::new(0xFFFAFFFA, "Digital Signatures Sequence", ProfileAction::Remove),
-    ProfileRule::new(0xFFFCFFFC, "Data Set Trailing Padding", ProfileAction::Remove),
-];
+/// Find the effective rule for the default configuration.
+#[must_use]
+pub fn profile_rule(tag: Tag) -> Option<&'static ProfileRule> {
+    raw_profile_rule(tag)
+}
+
+/// Resolve a rule for an explicit configuration.
+pub fn profile_rule_for(
+    tag: Tag,
+    configuration: &ProfileConfiguration,
+) -> Result<Option<ResolvedProfileRule>> {
+    raw_profile_rule(tag)
+        .map(|rule| {
+            Ok(ResolvedProfileRule {
+                name: rule.name,
+                action: rule.resolve(configuration)?,
+                tag,
+            })
+        })
+        .transpose()
+}
+
+/// Return the action contributed by one option column for a tag.
+#[must_use]
+pub(crate) fn profile_option_action(tag: Tag, option: DicomOption) -> Option<ProfileAction> {
+    raw_profile_rule(tag).and_then(|rule| rule.option_action(option))
+}
+
+/// Return the Basic Profile action before option-column overrides.
+#[must_use]
+pub(crate) fn profile_basic_action(tag: Tag) -> Option<ProfileAction> {
+    raw_profile_rule(tag).map(|rule| rule.basic_action)
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn profile_is_sorted_and_unique() {
+    fn profile_is_sorted_unique_and_complete() {
         assert_eq!(PROFILE_RULES.len(), 652);
         assert!(PROFILE_RULES
             .windows(2)
@@ -803,18 +637,32 @@ mod tests {
             counts[index] += 1;
             counts
         });
-        assert_eq!(counts, [312, 43, 71, 57, 0, 169]);
+        assert_eq!(counts, [200, 29, 41, 57, 14, 311]);
+        assert_eq!(SAFE_PRIVATE_ATTRIBUTES.len(), 457);
+        assert!(SAFE_PRIVATE_ATTRIBUTES
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]));
+        assert_eq!(OPTION_CONFLICTS.len(), 2);
+        for rule in PROFILE_RULES {
+            assert!(profile_rule_group(rule.tag().0)
+                .iter()
+                .any(|candidate| candidate.tag == rule.tag));
+        }
     }
 
     #[test]
-    fn options_override_basic_actions() {
+    fn default_options_override_basic_actions() {
         assert_eq!(
             profile_rule(Tag(0x0008, 0x0020)).unwrap().action,
             ProfileAction::Clean
         );
         assert_eq!(
-            profile_rule(Tag(0x0010, 0x0010)).unwrap().action,
-            ProfileAction::Empty
+            profile_rule(Tag(0x0010, 0x1010)).unwrap().action,
+            ProfileAction::Keep
+        );
+        assert_eq!(
+            profile_rule(Tag(0x0008, 0x1030)).unwrap().action,
+            ProfileAction::Clean
         );
         assert_eq!(
             profile_rule(Tag(0x0020, 0x000D)).unwrap().action,
@@ -824,18 +672,206 @@ mod tests {
             profile_rule(Tag(0x5002, 0x1234)).unwrap().name,
             "Curve Data"
         );
-        assert_eq!(
-            profile_rule(Tag(0x6002, 0x3000)).unwrap().name,
-            "Overlay Data"
-        );
-        assert_eq!(
-            profile_rule(Tag(0x6004, 0x4000)).unwrap().name,
-            "Overlay Comments"
-        );
         assert!(profile_rule(Tag(0x7776, 0x0001)).is_none());
+    }
+
+    #[test]
+    fn default_configuration_enables_requested_options() {
+        let configuration = ProfileConfiguration::default();
+        assert_eq!(configuration.policy, DeidentificationPolicy::Dicom);
         assert_eq!(
-            profile_rule(Tag(0x0010, 0x0010)).unwrap().tag(),
-            Tag(0x0010, 0x0010)
+            configuration.options,
+            [
+                DicomOption::CleanDescriptors,
+                DicomOption::RetainModifiedDates,
+                DicomOption::RetainPatientCharacteristics,
+            ]
+            .into_iter()
+            .collect()
         );
+    }
+
+    #[test]
+    fn safe_harbor_configuration_has_privacy_preserving_defaults() {
+        let configuration = ProfileConfiguration::safe_harbor();
+        assert_eq!(
+            configuration.policy,
+            DeidentificationPolicy::SafeHarborMetadata
+        );
+        assert!(configuration.has(DicomOption::CleanGraphics));
+        assert!(configuration.has(DicomOption::CleanStructuredContent));
+        assert!(configuration.validate().is_ok());
+    }
+
+    #[test]
+    fn configuration_rejects_unsupported_and_conflicting_options() {
+        let mut unsupported = ProfileConfiguration::default();
+        unsupported.options.insert(DicomOption::CleanPixelData);
+        assert!(unsupported.validate().is_err());
+
+        let mut conflicting = ProfileConfiguration::default();
+        conflicting.options.insert(DicomOption::RetainFullDates);
+        assert!(conflicting.validate().is_err());
+
+        let mut device_dates = ProfileConfiguration::default();
+        device_dates
+            .options
+            .insert(DicomOption::RetainDeviceIdentity);
+        assert!(device_dates.validate().is_err());
+    }
+
+    #[test]
+    fn configuration_rejects_malformed_external_registries() {
+        let mut descriptor = ProfileConfiguration::default();
+        descriptor
+            .descriptor_mappings
+            .insert("0008-1030".to_owned(), BTreeMap::new());
+        assert!(matches!(
+            descriptor.validate(),
+            Err(Error::InvalidProfileConfiguration(_))
+        ));
+
+        let mut safe_private = ProfileConfiguration::default();
+        safe_private
+            .safe_private_allowlist
+            .insert(SafePrivateElement {
+                creator: String::new(),
+                element_offset: 1,
+            });
+        assert!(matches!(
+            safe_private.validate(),
+            Err(Error::InvalidProfileConfiguration(_))
+        ));
+
+        let mut uid_map = ProfileConfiguration::default();
+        uid_map
+            .uid_mappings
+            .insert("01.invalid".to_owned(), "2.25.1".to_owned());
+        assert!(matches!(
+            uid_map.validate(),
+            Err(Error::InvalidSafeHarborUidMapping(_))
+        ));
+
+        let mut retained_uid = ProfileConfiguration::safe_harbor();
+        retained_uid
+            .uid_mappings
+            .insert("1.2.3".to_owned(), "1.2.3".to_owned());
+        assert!(matches!(
+            retained_uid.validate(),
+            Err(Error::InvalidSafeHarborUidMapping(_))
+        ));
+
+        let mut cross_mapping_collision = ProfileConfiguration::safe_harbor();
+        cross_mapping_collision.uid_mappings = [
+            ("1.2.3".to_owned(), "1.2.4".to_owned()),
+            ("1.2.4".to_owned(), "2.25.1".to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        assert!(matches!(
+            cross_mapping_collision.validate(),
+            Err(Error::InvalidSafeHarborUidMapping(_))
+        ));
+    }
+
+    #[test]
+    fn metadata_options_resolve_representative_table_actions() {
+        let mut configuration = ProfileConfiguration::default();
+        configuration.options.clear();
+        assert_eq!(
+            profile_rule_for(Tag(0x0008, 0x1030), &configuration)
+                .unwrap()
+                .unwrap()
+                .action,
+            ProfileAction::Remove
+        );
+        assert_eq!(
+            profile_rule_for(Tag(0x0010, 0x1010), &configuration)
+                .unwrap()
+                .unwrap()
+                .action,
+            ProfileAction::Remove
+        );
+
+        configuration.options.insert(DicomOption::RetainFullDates);
+        assert_eq!(
+            profile_rule_for(Tag(0x0008, 0x0020), &configuration)
+                .unwrap()
+                .unwrap()
+                .action,
+            ProfileAction::Keep
+        );
+        configuration.options.clear();
+        configuration.options.insert(DicomOption::RetainUids);
+        assert_eq!(
+            profile_rule_for(Tag(0x0020, 0x000D), &configuration)
+                .unwrap()
+                .unwrap()
+                .action,
+            ProfileAction::Keep
+        );
+        configuration.options.clear();
+        configuration
+            .options
+            .insert(DicomOption::RetainInstitutionIdentity);
+        assert_eq!(
+            profile_rule_for(Tag(0x0008, 0x0080), &configuration)
+                .unwrap()
+                .unwrap()
+                .action,
+            ProfileAction::Keep
+        );
+        configuration.options.clear();
+        configuration
+            .options
+            .insert(DicomOption::CleanStructuredContent);
+        assert_eq!(
+            profile_rule_for(Tag(0x0040, 0xA730), &configuration)
+                .unwrap()
+                .unwrap()
+                .action,
+            ProfileAction::Clean
+        );
+        configuration.options.clear();
+        configuration.options.insert(DicomOption::CleanGraphics);
+        assert_eq!(
+            profile_rule_for(Tag(0x6000, 0x3000), &configuration)
+                .unwrap()
+                .unwrap()
+                .action,
+            ProfileAction::Clean
+        );
+    }
+
+    #[test]
+    fn every_metadata_option_column_is_populated_and_valid_independently() {
+        for option in [
+            DicomOption::CleanGraphics,
+            DicomOption::CleanStructuredContent,
+            DicomOption::CleanDescriptors,
+            DicomOption::RetainFullDates,
+            DicomOption::RetainModifiedDates,
+            DicomOption::RetainPatientCharacteristics,
+            DicomOption::RetainDeviceIdentity,
+            DicomOption::RetainInstitutionIdentity,
+            DicomOption::RetainUids,
+            DicomOption::RetainSafePrivate,
+        ] {
+            let configuration = ProfileConfiguration {
+                options: [option].into_iter().collect(),
+                ..ProfileConfiguration::default()
+            };
+            assert!(configuration.validate().is_ok(), "{option:?}");
+            if option == DicomOption::RetainSafePrivate {
+                assert!(!SAFE_PRIVATE_ATTRIBUTES.is_empty());
+            } else {
+                assert!(
+                    PROFILE_RULES
+                        .iter()
+                        .any(|rule| rule.option_action(option).is_some()),
+                    "empty option column for {option:?}"
+                );
+            }
+        }
     }
 }

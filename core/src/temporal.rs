@@ -262,11 +262,10 @@ fn numeric_range(value: &str, minimum: u8, maximum: u8) -> bool {
         .is_ok_and(|value| (minimum..=maximum).contains(&value))
 }
 
-fn invalid_temporal(tag: Tag, vr: &'static str, value: &str) -> Error {
+fn invalid_temporal(tag: Tag, vr: &'static str, _value: &str) -> Error {
     Error::InvalidTemporal {
         tag: format!("({:04X},{:04X})", tag.0, tag.1),
         vr,
-        value: value.to_owned(),
     }
 }
 

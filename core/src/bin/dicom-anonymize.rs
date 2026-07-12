@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{ArgAction, Parser};
-use dicom_anon::cli_common::{load_key, ColorMode, Styles};
+use dicom_anon::cli_common::{load_key, ColorMode, ProfileArgs, Styles};
 use dicom_anon::{anonymize_file, anonymize_reader, Anonymizer, Options};
 
 #[derive(Debug, Parser)]
@@ -17,6 +17,8 @@ use dicom_anon::{anonymize_file, anonymize_reader, Anonymizer, Options};
     after_help = "Exit status: 0 success, 2 usage or runtime error. DICOM output goes to stdout when OUTPUT is omitted or '-'."
 )]
 struct Args {
+    #[command(flatten)]
+    profile: ProfileArgs,
     /// Input DICOM Part 10 file, or '-' for stdin.
     #[arg(value_name = "INPUT")]
     input: String,
@@ -81,6 +83,7 @@ fn main() -> ExitCode {
 fn run(args: &Args) -> Result<dicom_anon::AnonymizationReport, String> {
     let secret = load_key(args.key_file.clone(), &args.key_env)?;
     let mut options = Options::new(secret);
+    options.profile = args.profile.load()?;
     options.patient_scope.clone_from(&args.patient_scope);
     options.uid_root.clone_from(&args.uid_root);
     options.reject_already_deidentified = !args.allow_reanonymize;

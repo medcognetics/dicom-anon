@@ -8,7 +8,10 @@ use dicom_object::mem::{InMemDicomObject, InMemElement};
 use dicom_object::{DefaultDicomObject, FileMetaTableBuilder};
 use serde::{Deserialize, Serialize};
 
-use crate::profile::{profile_rule, ProfileAction, PROFILE_VERSION};
+use crate::profile::{
+    profile_basic_action, profile_option_action, profile_rule_for, safe_private_tags,
+    DeidentificationPolicy, DicomOption, ProfileAction, ProfileConfiguration, PROFILE_VERSION,
+};
 use crate::temporal::{
     shift_date_values, shift_date_values_with_adjustments, shift_datetime_values, shift_time_values,
 };
@@ -32,6 +35,8 @@ pub struct Options {
     pub reject_already_deidentified: bool,
     /// Maximum absolute patient-specific date shift.
     pub date_shift_range_days: i32,
+    /// Confidentiality profile and enabled options.
+    pub profile: ProfileConfiguration,
 }
 
 impl Options {
@@ -44,6 +49,7 @@ impl Options {
             patient_scope: None,
             reject_already_deidentified: true,
             date_shift_range_days: DEFAULT_DATE_SHIFT_RANGE_DAYS,
+            profile: ProfileConfiguration::default(),
         }
     }
 }
@@ -53,6 +59,10 @@ impl Options {
 pub struct AnonymizationReport {
     /// DICOM edition used by the rule table.
     pub profile_version: String,
+    /// High-level transformation policy.
+    pub policy: DeidentificationPolicy,
+    /// Sorted DICOM options applied to the output.
+    pub active_options: Vec<DicomOption>,
     /// Deterministic replacement Patient ID.
     pub patient_pseudonym: String,
     /// Patient-scoped whole-day temporal shift.
@@ -71,12 +81,21 @@ pub struct AnonymizationReport {
     pub remapped_uid_attributes: u64,
     /// Date, DateTime, or Time attributes processed by the modified-dates option.
     pub shifted_temporal_attributes: u64,
+    /// Temporal attributes generalized to year-level Safe Harbor values.
+    pub generalized_temporal_attributes: u64,
 }
 
 impl AnonymizationReport {
-    fn new(patient_pseudonym: String, date_shift_days: i32, time_shift_hours: i8) -> Self {
+    fn new(
+        patient_pseudonym: String,
+        date_shift_days: i32,
+        time_shift_hours: i8,
+        profile: &ProfileConfiguration,
+    ) -> Self {
         Self {
             profile_version: PROFILE_VERSION.to_owned(),
+            policy: profile.policy,
+            active_options: profile.options.iter().copied().collect(),
             patient_pseudonym,
             date_shift_days,
             time_shift_hours,
@@ -86,6 +105,7 @@ impl AnonymizationReport {
             replaced_attributes: 0,
             remapped_uid_attributes: 0,
             shifted_temporal_attributes: 0,
+            generalized_temporal_attributes: 0,
         }
     }
 }
@@ -105,6 +125,12 @@ impl Anonymizer {
         if !valid_uid_root(&options.uid_root) {
             return Err(Error::InvalidUidRoot(options.uid_root));
         }
+        options.profile.validate()?;
+        if options.profile.policy == DeidentificationPolicy::SafeHarborMetadata
+            && options.patient_scope.as_deref().is_none_or(str::is_empty)
+        {
+            return Err(Error::SafeHarborPatientScopeRequired);
+        }
         Ok(Self { options })
     }
 
@@ -122,12 +148,20 @@ impl Anonymizer {
 
         let patient_scope = self.patient_scope(source)?;
         let patient_pseudonym = self.options.secret.patient_id(&patient_scope);
-        let (date_shift_days, time_shift_hours) = self
-            .options
-            .secret
-            .temporal_shifts(&patient_scope, self.options.date_shift_range_days);
-        let mut report =
-            AnonymizationReport::new(patient_pseudonym.clone(), date_shift_days, time_shift_hours);
+        let (date_shift_days, time_shift_hours) =
+            if self.options.profile.policy == DeidentificationPolicy::SafeHarborMetadata {
+                (0, 0)
+            } else {
+                self.options
+                    .secret
+                    .temporal_shifts(&patient_scope, self.options.date_shift_range_days)
+            };
+        let mut report = AnonymizationReport::new(
+            patient_pseudonym.clone(),
+            date_shift_days,
+            time_shift_hours,
+            &self.options.profile,
+        );
         let context = Context {
             patient_pseudonym: &patient_pseudonym,
             date_shift_days,
@@ -135,7 +169,7 @@ impl Anonymizer {
         };
 
         let mut output = self.process_dataset(source, &context, &mut report)?;
-        add_deidentification_markers(&mut output);
+        add_deidentification_markers(&mut output, &self.options.profile, &patient_pseudonym);
         let meta = FileMetaTableBuilder::new()
             .transfer_syntax(source.meta().transfer_syntax().trim_end_matches('\0'))
             .implementation_class_uid(IMPLEMENTATION_CLASS_UID)
@@ -176,10 +210,19 @@ impl Anonymizer {
     ) -> Result<InMemDicomObject> {
         let mut output = InMemDicomObject::new_empty();
         let mut date_adjustments = Vec::new();
+        let safe_private_tags = safe_private_tags(source, &self.options.profile);
         for element in source.iter() {
             let tag = element.tag();
             if is_private(tag) {
-                report.removed_private_attributes += 1;
+                if !safe_private_tags.contains(&tag) {
+                    report.removed_private_attributes += 1;
+                    continue;
+                }
+                if let Some(processed) =
+                    self.process_element(element, ProfileAction::Keep, context, report)?
+                {
+                    output.put(processed);
+                }
                 continue;
             }
             if tag.0 == 0x0004 {
@@ -187,13 +230,29 @@ impl Anonymizer {
                 continue;
             }
 
-            let action = profile_rule(tag)
+            let mut action = profile_rule_for(tag, &self.options.profile)?
                 .map(|rule| rule.action)
                 .or_else(|| {
-                    matches!(element.vr(), VR::DA | VR::DT | VR::TM).then_some(ProfileAction::Clean)
+                    matches!(element.vr(), VR::DA | VR::DT | VR::TM).then_some(
+                        if self.options.profile.has(DicomOption::RetainFullDates) {
+                            ProfileAction::Keep
+                        } else if self.options.profile.has(DicomOption::RetainModifiedDates) {
+                            ProfileAction::Clean
+                        } else {
+                            ProfileAction::Remove
+                        },
+                    )
                 })
-                .unwrap_or(ProfileAction::Keep);
-            if action == ProfileAction::Clean && element.vr() == VR::TM {
+                .unwrap_or_else(|| self.unknown_action(tag, element.vr()));
+            if self.options.profile.has(DicomOption::CleanGraphics)
+                && profile_option_action(tag, DicomOption::CleanGraphics).is_some()
+            {
+                action = ProfileAction::Remove;
+            }
+            if action == ProfileAction::Clean
+                && element.vr() == VR::TM
+                && self.options.profile.policy == DeidentificationPolicy::Dicom
+            {
                 if let Some(adjustment) =
                     paired_day_adjustment(source, element, context.time_shift_hours)?
                 {
@@ -211,7 +270,6 @@ impl Anonymizer {
             let original = source_date.to_str().map_err(|_| Error::InvalidTemporal {
                 tag: format_tag(date_tag),
                 vr: "DA",
-                value: "<non-text value>".to_owned(),
             })?;
             let shifted = shift_date_values_with_adjustments(
                 &original,
@@ -233,6 +291,10 @@ impl Anonymizer {
     ) -> Result<Option<InMemElement>> {
         let tag = element.tag();
         if tag == tags::PATIENT_ID {
+            if self.options.profile.policy == DeidentificationPolicy::SafeHarborMetadata {
+                report.emptied_attributes += 1;
+                return Ok(Some(InMemElement::empty(tag, element.vr())));
+            }
             report.replaced_attributes += 1;
             return Ok(Some(InMemElement::new(
                 tag,
@@ -241,9 +303,22 @@ impl Anonymizer {
             )));
         }
         if tag == tags::PATIENT_NAME {
+            if self.options.profile.policy == DeidentificationPolicy::SafeHarborMetadata {
+                report.emptied_attributes += 1;
+                return Ok(Some(InMemElement::empty(tag, element.vr())));
+            }
             report.replaced_attributes += 1;
             let name = format!("ANON^{}", &context.patient_pseudonym[4..16]);
             return Ok(Some(InMemElement::new(tag, element.vr(), name)));
+        }
+        if tag == tags::PATIENT_AGE
+            && self
+                .options
+                .profile
+                .has(DicomOption::RetainPatientCharacteristics)
+        {
+            report.replaced_attributes += 1;
+            return clean_patient_age(element).map(Some);
         }
         match action {
             ProfileAction::Remove => {
@@ -270,8 +345,8 @@ impl Anonymizer {
                     .map_err(|_| Error::MissingAttribute("UID value"))?;
                 let remapped = original
                     .split('\\')
-                    .map(|uid| self.options.secret.uid(&self.options.uid_root, uid))
-                    .collect::<Vec<_>>()
+                    .map(|uid| self.remap_uid(uid))
+                    .collect::<Result<Vec<_>>>()?
                     .join("\\");
                 Ok(Some(InMemElement::new(tag, VR::UI, remapped)))
             }
@@ -280,6 +355,25 @@ impl Anonymizer {
                 .map(Some),
             ProfileAction::Clean => {
                 if element.vr() == VR::SQ {
+                    let clean_structured = self
+                        .options
+                        .profile
+                        .has(DicomOption::CleanStructuredContent)
+                        && profile_option_action(tag, DicomOption::CleanStructuredContent)
+                            .is_some();
+                    let clean_descriptor = self.options.profile.has(DicomOption::CleanDescriptors)
+                        && profile_option_action(tag, DicomOption::CleanDescriptors).is_some();
+                    if clean_descriptor
+                        && !clean_structured
+                        && profile_basic_action(tag) == Some(ProfileAction::Remove)
+                    {
+                        report.removed_attributes += 1;
+                        return Ok(None);
+                    }
+                    if clean_descriptor || clean_structured {
+                        report.replaced_attributes += 1;
+                        return self.dummy_sequence(element, context, report).map(Some);
+                    }
                     return self
                         .clean_sequence_or_clone(element, context, report)
                         .map(Some);
@@ -288,8 +382,12 @@ impl Anonymizer {
                     let original = element.to_str().map_err(|_| Error::InvalidTemporal {
                         tag: format_tag(tag),
                         vr: vr_name(element.vr()),
-                        value: "<non-text value>".to_owned(),
                     })?;
+                    if self.options.profile.policy == DeidentificationPolicy::SafeHarborMetadata {
+                        let generalized = generalize_date_values(&original, tag)?;
+                        report.generalized_temporal_attributes += 1;
+                        return Ok(Some(InMemElement::new(tag, element.vr(), generalized)));
+                    }
                     let shifted = shift_date_values(&original, context.date_shift_days, tag, "DA")?;
                     report.shifted_temporal_attributes += 1;
                     return Ok(Some(InMemElement::new(tag, element.vr(), shifted)));
@@ -298,8 +396,12 @@ impl Anonymizer {
                     let original = element.to_str().map_err(|_| Error::InvalidTemporal {
                         tag: format_tag(tag),
                         vr: "DT",
-                        value: "<non-text value>".to_owned(),
                     })?;
+                    if self.options.profile.policy == DeidentificationPolicy::SafeHarborMetadata {
+                        let generalized = generalize_datetime_values(&original, tag)?;
+                        report.generalized_temporal_attributes += 1;
+                        return Ok(Some(InMemElement::new(tag, element.vr(), generalized)));
+                    }
                     let shifted = shift_datetime_values(
                         &original,
                         context.date_shift_days,
@@ -313,16 +415,78 @@ impl Anonymizer {
                     let value = element.to_str().map_err(|_| Error::InvalidTemporal {
                         tag: format_tag(tag),
                         vr: "TM",
-                        value: "<non-text value>".to_owned(),
                     })?;
+                    if self.options.profile.policy == DeidentificationPolicy::SafeHarborMetadata {
+                        let generalized = generalize_time_values(&value, tag)?;
+                        report.generalized_temporal_attributes += 1;
+                        return Ok(Some(InMemElement::new(tag, VR::TM, generalized)));
+                    }
                     let (shifted, _) = shift_time_values(&value, context.time_shift_hours, tag)?;
                     report.shifted_temporal_attributes += 1;
                     return Ok(Some(InMemElement::new(tag, VR::TM, shifted)));
+                }
+                if let Ok(source) = element.to_str() {
+                    if let Some(replacement) =
+                        self.options.profile.descriptor_replacement(tag, &source)
+                    {
+                        validate_descriptor_replacement(element.vr(), replacement)?;
+                        report.replaced_attributes += 1;
+                        return Ok(Some(InMemElement::new(tag, element.vr(), replacement)));
+                    }
+                }
+                if self.options.profile.has(DicomOption::CleanDescriptors)
+                    && profile_option_action(tag, DicomOption::CleanDescriptors).is_some()
+                    && profile_basic_action(tag) == Some(ProfileAction::Remove)
+                {
+                    report.removed_attributes += 1;
+                    return Ok(None);
                 }
                 report.replaced_attributes += 1;
                 self.dummy_element(element, context, report).map(Some)
             }
         }
+    }
+
+    fn unknown_action(&self, tag: Tag, vr: VR) -> ProfileAction {
+        if vr == VR::UI && is_nonidentifying_uid_tag(tag) {
+            return ProfileAction::Keep;
+        }
+        if self.options.profile.policy == DeidentificationPolicy::SafeHarborMetadata
+            && matches!(
+                vr,
+                VR::AE
+                    | VR::LO
+                    | VR::LT
+                    | VR::PN
+                    | VR::SH
+                    | VR::ST
+                    | VR::UC
+                    | VR::UR
+                    | VR::UT
+                    | VR::UI
+            )
+        {
+            return if vr == VR::UI {
+                ProfileAction::RemapUid
+            } else {
+                ProfileAction::Clean
+            };
+        }
+        ProfileAction::Keep
+    }
+
+    fn remap_uid(&self, original: &str) -> Result<String> {
+        let original = original.trim_end_matches('\0');
+        if self.options.profile.policy == DeidentificationPolicy::SafeHarborMetadata {
+            return self
+                .options
+                .profile
+                .uid_mappings
+                .get(original)
+                .cloned()
+                .ok_or(Error::MissingSafeHarborUidMapping);
+        }
+        Ok(self.options.secret.uid(&self.options.uid_root, original))
     }
 
     fn clean_sequence_or_clone(
@@ -455,12 +619,10 @@ fn paired_day_adjustment(
     let time_value = time_element.to_str().map_err(|_| Error::InvalidTemporal {
         tag: format_tag(time_tag),
         vr: "TM",
-        value: "<non-text value>".to_owned(),
     })?;
     let date_value = date_element.to_str().map_err(|_| Error::InvalidTemporal {
         tag: format_tag(date_tag),
         vr: "DA",
-        value: "<non-text value>".to_owned(),
     })?;
     let (_, day_adjustments) = shift_time_values(&time_value, time_shift_hours, time_tag)?;
     if date_value.split('\\').count() != day_adjustments.len() {
@@ -523,40 +685,121 @@ const fn paired_date_tag(time_tag: Tag) -> Option<Tag> {
     Some(tag)
 }
 
-fn add_deidentification_markers(output: &mut InMemDicomObject) {
+fn add_deidentification_markers(
+    output: &mut InMemDicomObject,
+    profile: &ProfileConfiguration,
+    patient_pseudonym: &str,
+) {
     output.put_str(tags::PATIENT_IDENTITY_REMOVED, VR::CS, "YES");
-    output.put_str(
-        tags::DEIDENTIFICATION_METHOD,
-        VR::LO,
-        format!("DICOM PS3.15 Basic Profile\\Modified Dates Option\\dicom-anon {PROFILE_VERSION}"),
-    );
+    let method = profile.deidentification_method();
+    output.put_str(tags::DEIDENTIFICATION_METHOD, VR::LO, method);
     output.put_str(
         tags::LONGITUDINAL_TEMPORAL_INFORMATION_MODIFIED,
         VR::CS,
-        "MODIFIED",
+        if profile.has(DicomOption::RetainFullDates) {
+            "UNMODIFIED"
+        } else if profile.has(DicomOption::RetainModifiedDates) {
+            "MODIFIED"
+        } else {
+            "REMOVED"
+        },
     );
+    if profile.policy == DeidentificationPolicy::SafeHarborMetadata {
+        output.put_str(tags::CLINICAL_TRIAL_SUBJECT_ID, VR::LO, patient_pseudonym);
+    }
 
-    let codes: Vec<_> = [
-        ("113100", "Basic Application Confidentiality Profile"),
-        (
-            "113107",
-            "Retain Longitudinal Temporal Information Modified Dates Option",
-        ),
-    ]
-    .into_iter()
-    .map(|(code, meaning)| {
-        let mut item = InMemDicomObject::new_empty();
-        item.put_str(tags::CODE_VALUE, VR::SH, code);
-        item.put_str(tags::CODING_SCHEME_DESIGNATOR, VR::SH, "DCM");
-        item.put_str(tags::CODE_MEANING, VR::LO, meaning);
-        item
-    })
-    .collect();
+    let codes: Vec<_> = std::iter::once(("113100", "Basic Application Confidentiality Profile"))
+        .chain(profile.options.iter().map(|option| option.method_code()))
+        .map(|(code, meaning)| {
+            let mut item = InMemDicomObject::new_empty();
+            item.put_str(tags::CODE_VALUE, VR::SH, code);
+            item.put_str(tags::CODING_SCHEME_DESIGNATOR, VR::SH, "DCM");
+            item.put_str(tags::CODE_MEANING, VR::LO, meaning);
+            item
+        })
+        .collect();
     output.put(InMemElement::new(
         tags::DEIDENTIFICATION_METHOD_CODE_SEQUENCE,
         VR::SQ,
         DataSetSequence::from(codes),
     ));
+}
+
+fn clean_patient_age(element: &InMemElement) -> Result<InMemElement> {
+    let value = element.to_str().map_err(|_| Error::InvalidPatientAge)?;
+    if value.contains('\\') || value.len() != 4 {
+        return Err(Error::InvalidPatientAge);
+    }
+    let bytes = value.as_bytes();
+    if !bytes[..3].iter().all(u8::is_ascii_digit) || !matches!(bytes[3], b'D' | b'W' | b'M' | b'Y')
+    {
+        return Err(Error::InvalidPatientAge);
+    }
+    let cleaned = if bytes[3] == b'Y'
+        && value[..3]
+            .parse::<u16>()
+            .map_err(|_| Error::InvalidPatientAge)?
+            >= 90
+    {
+        "090Y"
+    } else {
+        &value
+    };
+    Ok(InMemElement::new(element.tag(), VR::AS, cleaned))
+}
+
+fn generalize_date_values(value: &str, tag: Tag) -> Result<String> {
+    let validated = shift_date_values(value, 0, tag, "DA")?;
+    Ok(validated
+        .split('\\')
+        .map(|date| format!("{}0101", &date[..4]))
+        .collect::<Vec<_>>()
+        .join("\\"))
+}
+
+fn generalize_datetime_values(value: &str, tag: Tag) -> Result<String> {
+    let validated = shift_datetime_values(value, 0, 0, tag)?;
+    Ok(validated
+        .split('\\')
+        .map(|datetime| datetime[..4].to_owned())
+        .collect::<Vec<_>>()
+        .join("\\"))
+}
+
+fn generalize_time_values(value: &str, tag: Tag) -> Result<String> {
+    let (validated, _) = shift_time_values(value, 0, tag)?;
+    Ok(validated
+        .split('\\')
+        .map(|_| "000000")
+        .collect::<Vec<_>>()
+        .join("\\"))
+}
+
+fn validate_descriptor_replacement(vr: VR, value: &str) -> Result<()> {
+    let maximum = match vr {
+        VR::AE => 16,
+        VR::CS | VR::SH => 16,
+        VR::LO => 64,
+        VR::ST => 1_024,
+        VR::LT => 10_240,
+        _ => usize::MAX,
+    };
+    if value.is_empty() || value.len() > maximum || value.contains('\0') {
+        return Err(Error::MissingAttribute("valid descriptor replacement"));
+    }
+    Ok(())
+}
+
+const fn is_nonidentifying_uid_tag(tag: Tag) -> bool {
+    matches!(
+        (tag.0, tag.1),
+        (0x0002, 0x0002)
+            | (0x0002, 0x0010)
+            | (0x0008, 0x0016)
+            | (0x0008, 0x001A)
+            | (0x0008, 0x001B)
+            | (0x0008, 0x1150)
+    )
 }
 
 fn element_text(object: &InMemDicomObject, tag: Tag) -> Option<String> {
@@ -677,6 +920,56 @@ mod tests {
             element_text(&first, tags::PATIENT_IDENTITY_REMOVED).as_deref(),
             Some("YES")
         );
+        let method_codes = first
+            .get(tags::DEIDENTIFICATION_METHOD_CODE_SEQUENCE)
+            .unwrap()
+            .value()
+            .items()
+            .unwrap()
+            .iter()
+            .map(|item| element_text(item, tags::CODE_VALUE).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(method_codes, ["113100", "113105", "113107", "113108"]);
+    }
+
+    #[test]
+    fn retain_safe_private_uses_registry_and_embedded_declarations() {
+        let mut source = test_object("PATIENT-1", "20200101", "1.2.3.1");
+        source.put_str(Tag(0x0011, 0x0010), VR::LO, "GEMS_ACQU_01");
+        source.put_str(Tag(0x0011, 0x1023), VR::DS, "1.25");
+        source.put_str(Tag(0x0011, 0x1025), VR::LO, "UNSAFE");
+        source.put_str(Tag(0x0013, 0x0010), VR::LO, "DECLARED_SAFE");
+        source.put_str(Tag(0x0013, 0x1010), VR::LO, "SAFE VALUE");
+
+        let mut declaration = InMemDicomObject::new_empty();
+        declaration.put(InMemElement::new(
+            tags::PRIVATE_GROUP_REFERENCE,
+            VR::US,
+            PrimitiveValue::from(0x0013_u16),
+        ));
+        declaration.put_str(tags::PRIVATE_CREATOR_REFERENCE, VR::LO, "DECLARED_SAFE");
+        declaration.put_str(tags::BLOCK_IDENTIFYING_INFORMATION_STATUS, VR::CS, "SAFE");
+        source.put(InMemElement::new(
+            tags::PRIVATE_DATA_ELEMENT_CHARACTERISTICS_SEQUENCE,
+            VR::SQ,
+            DataSetSequence::from(vec![declaration]),
+        ));
+
+        let mut options = Options::new(SecretKey::new(KEY).unwrap());
+        options
+            .profile
+            .options
+            .insert(DicomOption::RetainSafePrivate);
+        let (output, _) = Anonymizer::new(options)
+            .unwrap()
+            .anonymize(&source)
+            .unwrap();
+
+        assert!(output.get(Tag(0x0011, 0x0010)).is_some());
+        assert!(output.get(Tag(0x0011, 0x1023)).is_some());
+        assert!(output.get(Tag(0x0011, 0x1025)).is_none());
+        assert!(output.get(Tag(0x0013, 0x0010)).is_some());
+        assert!(output.get(Tag(0x0013, 0x1010)).is_some());
     }
 
     #[test]
@@ -860,7 +1153,10 @@ mod tests {
         source.put_str(Tag(0x7776, 0x0002), VR::DA, "20200102");
 
         let (output, report) = anonymizer().anonymize(&source).unwrap();
-        assert!(output.get(tags::STUDY_DESCRIPTION).is_none());
+        assert_eq!(
+            element_text(&output, tags::STUDY_DESCRIPTION).as_deref(),
+            None
+        );
         assert_eq!(
             element_text(&output, tags::ACCESSION_NUMBER).as_deref(),
             Some("")
@@ -878,9 +1174,173 @@ mod tests {
             element_text(&output, Tag(0x7776, 0x0002)).as_deref(),
             Some("20200102")
         );
-        assert!(report.removed_attributes >= 2);
+        assert!(report.removed_attributes >= 1);
         assert!(report.emptied_attributes >= 1);
         assert!(report.shifted_temporal_attributes >= 3);
+    }
+
+    #[test]
+    fn unknown_temporal_attributes_follow_the_selected_temporal_option() {
+        let unknown_date = Tag(0x7776, 0x0002);
+        let mut source = test_object("PATIENT-1", "20200101", "1.2.3.1");
+        source.put_str(unknown_date, VR::DA, "20200102");
+
+        let mut full_options = Options::new(SecretKey::new(KEY).unwrap());
+        full_options
+            .profile
+            .options
+            .remove(&DicomOption::RetainModifiedDates);
+        full_options
+            .profile
+            .options
+            .insert(DicomOption::RetainFullDates);
+        let (full, _) = Anonymizer::new(full_options)
+            .unwrap()
+            .anonymize(&source)
+            .unwrap();
+        assert_eq!(
+            element_text(&full, unknown_date).as_deref(),
+            Some("20200102")
+        );
+
+        let mut removed_options = Options::new(SecretKey::new(KEY).unwrap());
+        removed_options
+            .profile
+            .options
+            .remove(&DicomOption::RetainModifiedDates);
+        let (removed, _) = Anonymizer::new(removed_options)
+            .unwrap()
+            .anonymize(&source)
+            .unwrap();
+        assert!(removed.get(unknown_date).is_none());
+    }
+
+    #[test]
+    fn default_profile_retains_and_caps_patient_age() {
+        for (source_age, expected_age) in [
+            ("089Y", "089Y"),
+            ("090Y", "090Y"),
+            ("091Y", "090Y"),
+            ("999Y", "090Y"),
+            ("018M", "018M"),
+        ] {
+            let mut source = test_object("PATIENT-1", "20200101", "1.2.3.1");
+            source.put_str(tags::PATIENT_AGE, VR::AS, source_age);
+            let (output, _) = anonymizer().anonymize(&source).unwrap();
+            assert_eq!(
+                element_text(&output, tags::PATIENT_AGE).as_deref(),
+                Some(expected_age),
+                "source age {source_age}"
+            );
+        }
+    }
+
+    #[test]
+    fn clean_descriptors_uses_exact_mapping_and_safe_fallback() {
+        let mut options = Options::new(SecretKey::new(KEY).unwrap());
+        options
+            .profile
+            .descriptor_mappings
+            .entry("00081030".to_owned())
+            .or_default()
+            .insert(
+                "MAMMO SCRN BIL W/CAD TOMO".to_owned(),
+                "MAMMO SCREENING BILATERAL".to_owned(),
+            );
+        let anonymizer = Anonymizer::new(options).unwrap();
+
+        let mut source = test_object("PATIENT-1", "20200101", "1.2.3.1");
+        source.put_str(tags::STUDY_DESCRIPTION, VR::LO, "MAMMO SCRN BIL W/CAD TOMO");
+        source.put_str(tags::SERIES_DESCRIPTION, VR::LO, "Private protocol");
+        let (output, _) = anonymizer.anonymize(&source).unwrap();
+
+        assert_eq!(
+            element_text(&output, tags::STUDY_DESCRIPTION).as_deref(),
+            Some("MAMMO SCREENING BILATERAL")
+        );
+        assert!(output.get(tags::SERIES_DESCRIPTION).is_none());
+    }
+
+    #[test]
+    fn safe_harbor_requires_external_linkage_and_generalizes_temporal_values() {
+        let mut options = Options::new(SecretKey::new(KEY).unwrap());
+        options.profile = ProfileConfiguration::safe_harbor();
+        options.patient_scope = Some("independent-subject-001".to_owned());
+        options.profile.uid_mappings = [
+            ("1.2.3.1", "2.25.101"),
+            ("1.2.3.1.1", "2.25.102"),
+            ("1.2.3.1.2", "2.25.103"),
+        ]
+        .into_iter()
+        .map(|(source, replacement)| (source.to_owned(), replacement.to_owned()))
+        .collect();
+        let anonymizer = Anonymizer::new(options).unwrap();
+
+        let mut source = test_object("PATIENT-1", "20200615", "1.2.3.1");
+        source.put_str(tags::STUDY_TIME, VR::TM, "121314");
+        source.put_str(tags::PATIENT_BIRTH_DATE, VR::DA, "19100102");
+        source.put_str(tags::PATIENT_AGE, VR::AS, "115Y");
+        let (output, report) = anonymizer.anonymize(&source).unwrap();
+
+        assert_eq!(element_text(&output, tags::PATIENT_ID).as_deref(), Some(""));
+        assert_eq!(
+            element_text(&output, tags::PATIENT_NAME).as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            element_text(&output, tags::CLINICAL_TRIAL_SUBJECT_ID).as_deref(),
+            Some(report.patient_pseudonym.as_str())
+        );
+        assert_eq!(
+            element_text(&output, tags::PATIENT_BIRTH_DATE).as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            element_text(&output, tags::PATIENT_AGE).as_deref(),
+            Some("090Y")
+        );
+        assert_eq!(
+            element_text(&output, tags::STUDY_DATE).as_deref(),
+            Some("20200101")
+        );
+        assert_eq!(
+            element_text(&output, tags::STUDY_TIME).as_deref(),
+            Some("000000")
+        );
+        assert_eq!(report.generalized_temporal_attributes, 2);
+    }
+
+    #[test]
+    fn safe_harbor_rejects_missing_and_colliding_uid_mappings() {
+        let source = test_object("PATIENT-1", "20200615", "1.2.3.1");
+        let mut no_scope = Options::new(SecretKey::new(KEY).unwrap());
+        no_scope.profile = ProfileConfiguration::safe_harbor();
+        assert!(matches!(
+            Anonymizer::new(no_scope),
+            Err(Error::SafeHarborPatientScopeRequired)
+        ));
+
+        let mut missing = Options::new(SecretKey::new(KEY).unwrap());
+        missing.profile = ProfileConfiguration::safe_harbor();
+        missing.patient_scope = Some("independent-subject-001".to_owned());
+        assert!(matches!(
+            Anonymizer::new(missing).unwrap().anonymize(&source),
+            Err(Error::MissingSafeHarborUidMapping)
+        ));
+
+        let mut colliding = Options::new(SecretKey::new(KEY).unwrap());
+        colliding.profile = ProfileConfiguration::safe_harbor();
+        colliding.patient_scope = Some("independent-subject-001".to_owned());
+        colliding.profile.uid_mappings = [
+            ("1.2.3.1".to_owned(), "2.25.101".to_owned()),
+            ("1.2.3.1.1".to_owned(), "2.25.101".to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        assert!(matches!(
+            Anonymizer::new(colliding),
+            Err(Error::InvalidSafeHarborUidMapping(_))
+        ));
     }
 
     #[test]
@@ -892,7 +1352,12 @@ mod tests {
             date_shift_days: 1,
             time_shift_hours: 1,
         };
-        let mut report = AnonymizationReport::new(patient_pseudonym.to_owned(), 1, 1);
+        let mut report = AnonymizationReport::new(
+            patient_pseudonym.to_owned(),
+            1,
+            1,
+            &ProfileConfiguration::default(),
+        );
         let value_representations = [
             VR::AE,
             VR::CS,

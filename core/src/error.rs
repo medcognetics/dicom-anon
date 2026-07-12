@@ -35,14 +35,12 @@ pub enum Error {
     #[error("input already declares Patient Identity Removed=YES")]
     AlreadyDeidentified,
     /// A temporal value could not be transformed safely.
-    #[error("invalid {vr} value in {tag}: {value:?}")]
+    #[error("invalid {vr} value in {tag}")]
     InvalidTemporal {
         /// DICOM tag rendered as `(gggg,eeee)`.
         tag: String,
         /// Value representation.
         vr: &'static str,
-        /// Original value.
-        value: String,
     },
     /// A paired DA/TM value had incompatible multiplicity.
     #[error("paired temporal attributes {date_tag} and {time_tag} have different multiplicities")]
@@ -64,4 +62,28 @@ pub enum Error {
     /// Date-shift range was not positive.
     #[error("date shift range must be at least one day")]
     InvalidDateShiftRange,
+    /// A requested DICOM option requires unsupported pixel processing.
+    #[error("unsupported DICOM confidentiality option: {0}")]
+    UnsupportedProfileOption(String),
+    /// Enabled option columns specify incompatible actions.
+    #[error("conflicting DICOM confidentiality options: {0}")]
+    ConflictingProfileOptions(String),
+    /// A serialized profile mapping or registry entry was malformed.
+    #[error("invalid profile configuration: {0}")]
+    InvalidProfileConfiguration(String),
+    /// An option would weaken the Safe Harbor metadata policy.
+    #[error("option is not permitted by the Safe Harbor metadata policy: {0}")]
+    UnsupportedSafeHarborOption(String),
+    /// Safe Harbor mode requires an independently assigned patient scope.
+    #[error("Safe Harbor metadata mode requires an explicit independently assigned patient scope")]
+    SafeHarborPatientScopeRequired,
+    /// Safe Harbor mode lacked an independently assigned UID replacement.
+    #[error("Safe Harbor UID mapping is missing a required source UID")]
+    MissingSafeHarborUidMapping,
+    /// A configured UID replacement was invalid or collided with another mapping.
+    #[error("invalid Safe Harbor UID mapping: {0}")]
+    InvalidSafeHarborUidMapping(String),
+    /// Patient's Age did not contain a valid DICOM AS value.
+    #[error("invalid Patient's Age value")]
+    InvalidPatientAge,
 }

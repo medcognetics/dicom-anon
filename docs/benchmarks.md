@@ -44,3 +44,17 @@ The D-sequence replacement and coordinated TM shifting changes added work to ano
 The final implementation measured 35.263 to 35.633 µs, 148.37 to 149.30 µs, and 2.2605 to 2.2682 µs for those workloads, respectively. The end-to-end interval is consistent with the selected implementation recorded above. The smaller parsed-object and validation changes are close enough to run-to-run noise that they should not be treated as independent optimization claims. The correctness behavior differs from the pre-fix implementation, so its narrower microbenchmark timings are not a valid candidate for release.
 
 Run on stable hardware with background work minimized before comparing future changes. Keep the fixture size, transfer syntax, sample counts, and release profile unchanged.
+
+## Configurable option-matrix check
+
+The 2026c configurable-option change increases each generated rule from one effective action to the Basic action plus ten metadata option columns. The first implementation searched the full 652-row matrix and rechecked every row for configuration conflicts during each candidate validation. Measurements on July 11, 2026 showed 88.102 to 88.292 ns for six common lookups and 14.444 to 14.463 µs for candidate validation.
+
+The selected implementation generates the exact group ranges and the two conflicting option pairs with the normative data. It searches only the applicable group and validates the active option set against the generated pair list. Six lookups measured 59.236 to 59.339 ns, 32.8% faster than the first configurable implementation. Candidate validation measured 4.0022 to 4.0171 µs, 72.2% faster than the first configurable implementation.
+
+With the selected dispatch, parsed-object anonymization measured 37.421 to 37.548 µs and parse/anonymize/write measured 1.8542 to 1.8586 ms. These end-to-end measurements were within Criterion's noise threshold compared with the immediately preceding configurable implementation. The remaining lookup and validation cost above the former fixed profile is accepted because resolving and validating caller-selected option columns is required behavior; the generated dispatch bounds that cost without weakening configuration checks.
+
+## Exact-marker validation follow-up
+
+Exact validation of De-identification Method text, DCM code values, coding schemes, meanings, duplicates, and the Safe Harbor subject-token format initially increased candidate validation from 4.0022 to 4.0171 µs to 4.6564 to 4.6901 µs. The first correct implementation allocated a map and set for every candidate.
+
+The selected implementation compares the ordered method text and uses a fixed bit mask plus the configured option iterator for code membership. It measured 4.2424 to 4.2985 µs, 8.4% faster than the first correct implementation and about 6.5% slower than the pre-fix validator. The remaining cost is accepted because the previous validator allowed malformed or identifying attestation content to pass. The benchmark performs no disk or network I/O, and this change does not affect those resources. Decision: ship the allocation-free exact validation.

@@ -7,6 +7,7 @@ use zeroize::Zeroize;
 use crate::{Error, Result};
 
 const MINIMUM_KEY_LENGTH: usize = 32;
+const PATIENT_ID_PREFIX: &str = "ANON";
 const PATIENT_ID_HEX_LENGTH: usize = 24;
 const TIME_SHIFT_BOUND_HOURS: i8 = 12;
 
@@ -38,7 +39,7 @@ impl SecretKey {
     pub(crate) fn patient_id(&self, patient_scope: &str) -> String {
         let digest = self.digest("dicom-anon/patient-id/v1", patient_scope.as_bytes());
         let encoded = digest.to_hex();
-        format!("ANON{}", &encoded[..PATIENT_ID_HEX_LENGTH])
+        format!("{PATIENT_ID_PREFIX}{}", &encoded[..PATIENT_ID_HEX_LENGTH])
     }
 
     pub(crate) fn uid(&self, uid_root: &str, original: &str) -> String {
@@ -68,6 +69,14 @@ impl SecretKey {
         };
         (day_shift, time_shift)
     }
+}
+
+pub(crate) fn is_patient_id(value: &str) -> bool {
+    value.len() == PATIENT_ID_PREFIX.len() + PATIENT_ID_HEX_LENGTH
+        && value.starts_with(PATIENT_ID_PREFIX)
+        && value[PATIENT_ID_PREFIX.len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 impl fmt::Debug for SecretKey {

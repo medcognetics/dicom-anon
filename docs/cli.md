@@ -10,6 +10,29 @@ dicom-anonymize [OPTIONS] INPUT [OUTPUT]
 
 The command reads key material from `--key-file PATH`. If that option is absent, it reads the environment variable named by `--key-env`, which defaults to `DICOM_ANON_KEY`. There is no raw `--key` argument because command-line arguments are commonly visible through process inspection.
 
+Anonymization and validation share these profile arguments:
+
+| Argument | Meaning |
+|---|---|
+| `--policy dicom\|safe-harbor-metadata` | Select the normal DICOM preset or strict Safe Harbor metadata preset. |
+| `--enable-option OPTION` | Enable an option; repeat for multiple options. |
+| `--disable-option OPTION` | Disable a preset option; repeat for multiple options. |
+| `--descriptor-map PATH` | Load a JSON object keyed by canonical eight-digit tag, then exact source value and safe output value. |
+| `--safe-private-allowlist PATH` | Load a JSON array of `{ "creator": STRING, "element_offset": INTEGER }`. |
+| `--uid-map PATH` | Load a JSON object from original UID to replacement UID. Required for Safe Harbor anonymization. |
+
+The default DICOM options are `clean-descriptors`, `retain-modified-dates`, and `retain-patient-characteristics`. The Safe Harbor preset additionally enables `clean-graphics` and `clean-structured-content`. `clean-pixel-data` and `clean-recognizable-visual-features` are accepted names but produce unsupported-option errors.
+
+Example descriptor map:
+
+```json
+{
+  "00081030": {
+    "MAMMO SCRN BIL W/CAD TOMO": "MAMMO SCREENING BILATERAL"
+  }
+}
+```
+
 The default successful invocation writes no text. `--verbose` writes the JSON anonymization report to stderr. DICOM bytes are the only stdout content. `--quiet` and `--verbose` are mutually exclusive. Color affects diagnostics only; `--no-color` overrides `--color`. Auto mode tests stderr because diagnostics are written there.
 
 Exit status:
@@ -29,6 +52,8 @@ dicom-validate [OPTIONS] [INPUT]
 
 `--format text` is the default. It prints a status line, summary, and findings. `--quiet` limits text to the status and summary. `--verbose` adds the profile edition and checked-attribute count. `--format json` writes one pretty-printed JSON document, ignores color, and retains deterministic finding order.
 
+Candidate-only validation reports `validation_mode=candidate_only` and one aggregate `source_not_compared` warning. Add `--source ORIGINAL --key-file KEY` for exact source comparison. `--source` must be a file path, so the candidate may still be read from stdin. `--key-env` is also available. Safe Harbor source comparison additionally requires the same `--patient-scope` and `--uid-map` used during anonymization.
+
 Color policy is `--color auto|always|never`; `--no-color` wins if both flags are present. Auto mode enables color only for terminal stdout.
 
 Exit status:
@@ -45,6 +70,22 @@ No progress option is provided. Each invocation processes one file, and progress
 dicom-anonymize input.dcm - --key-file deidentification.key \
   | dicom-validate - --format json \
   | jq -e '.conformant'
+```
+
+```console
+dicom-validate candidate.dcm \
+  --source original.dcm \
+  --key-file deidentification.key \
+  --descriptor-map descriptor-map.json \
+  --format json
+```
+
+```console
+dicom-anonymize input.dcm output.dcm \
+  --policy safe-harbor-metadata \
+  --patient-scope SUBJECT-42 \
+  --uid-map uid-map.json \
+  --key-file deidentification.key
 ```
 
 ```console

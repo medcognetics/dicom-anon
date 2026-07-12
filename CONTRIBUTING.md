@@ -23,7 +23,13 @@ rustup component add llvm-tools-preview
 7. Run `make release` before handoff.
 8. Run `make bench` when a hot path or rule-dispatch structure changes.
 
-Changes to profile actions need a DICOM PS3.15 edition and table citation in the pull request description. Update `docs/conformance.md`, the rule count, and representative nested-sequence tests in the same change.
+Changes to profile actions need a DICOM PS3.15 edition and table citation in the pull request description. Regenerate the frozen Table E.1-1 matrix and safe-private registry with:
+
+```console
+uv run --with pandas==2.3.3 --with lxml==6.0.2 tools/generate_profile.py
+```
+
+The generator refuses to run against an edition other than 2026c. Review the generated diff, update `docs/conformance.md`, and update row-count, option-column, safe-private, repeating-group, and representative nested-sequence tests in the same change.
 
 ## Test expectations
 
