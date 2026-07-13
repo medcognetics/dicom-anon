@@ -2,11 +2,13 @@
 
 ## Profile and configuration
 
-The implementation targets DICOM PS3.15 2026c Table E.1-1 and Table E.1-1a. The default is the Basic Application Level Confidentiality Profile with these options:
+The implementation targets DICOM PS3.15 2026c Table E.1-1 and Table E.1-1a. The `dicom` preset applies the Basic Application Level Confidentiality Profile with no option columns. The default `dicom-extended` preset adds these options:
 
 - Clean Descriptors, DCM `113105`;
 - Retain Longitudinal Temporal Information With Modified Dates, DCM `113107`;
 - Retain Patient Characteristics, DCM `113108`.
+
+Both presets use the DICOM policy. Serialized reports identify the selected behavior through `policy: "dicom"` and the exact `active_options` list. The Safe Harbor metadata preset remains a separate policy because it applies additional transformations and requires external linkage mappings.
 
 The frozen matrix contains all 652 exact-tag rows and every metadata option column. The generator also freezes the 457 unique creator/offset entries in Table E.3.10-1. `tools/generate_profile.py` checks that its source identifies itself as PS3.15 2026c before replacing `core/src/profile_generated.rs`.
 
@@ -50,7 +52,7 @@ The month, day, and time are synthetic or removed. Only the source year is retai
 
 ## Strict Safe Harbor metadata policy
 
-The Safe Harbor preset enables Clean Graphics, Clean Structured Content, Clean Descriptors, Retain Patient Characteristics, and Retain Modified Dates. These options may be disabled for more conservative Basic Profile output. The policy rejects Full Dates, Retain Device Identity, Retain Institution Identity, Retain UIDs, and both unsupported pixel options.
+The Safe Harbor preset enables Clean Graphics, Clean Structured Content, Clean Descriptors, Retain Patient Characteristics, and Retain Modified Dates. These options may be disabled for more conservative option-column actions; the Safe Harbor-specific transformations still apply. The policy rejects Full Dates, Retain Device Identity, Retain Institution Identity, Retain UIDs, and both unsupported pixel options.
 
 The caller must provide an independently assigned non-PHI patient scope. The tool derives a keyed stable subject token from it, stores the token in Clinical Trial Subject ID, and empties Patient ID and Patient Name. The caller must also provide a complete original-to-output UID map. Invalid UIDs, duplicate outputs, replacements equal to any source UID, and missing source mappings fail before an output is written.
 

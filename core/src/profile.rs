@@ -12,12 +12,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result};
 
-/// Human-readable name of the default profile.
+/// Human-readable name of the default extended DICOM profile.
 pub const PROFILE_NAME: &str = "DICOM PS3.15 Basic Application Confidentiality Profile + Clean Descriptors + Modified Dates + Retain Patient Characteristics";
 /// DICOM edition used to construct the rule table.
 pub const PROFILE_VERSION: &str = "2026c";
 
 const OPTION_COLUMN_COUNT: usize = 10;
+const DICOM_EXTENDED_OPTIONS: [DicomOption; 3] = [
+    DicomOption::CleanDescriptors,
+    DicomOption::RetainModifiedDates,
+    DicomOption::RetainPatientCharacteristics,
+];
 
 /// High-level transformation policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ValueEnum)]
@@ -138,23 +143,32 @@ pub struct ProfileConfiguration {
 
 impl Default for ProfileConfiguration {
     fn default() -> Self {
+        Self::dicom_extended()
+    }
+}
+
+impl ProfileConfiguration {
+    /// Construct the DICOM Basic Application Level Confidentiality Profile without options.
+    #[must_use]
+    pub fn dicom() -> Self {
         Self {
             policy: DeidentificationPolicy::Dicom,
-            options: [
-                DicomOption::CleanDescriptors,
-                DicomOption::RetainModifiedDates,
-                DicomOption::RetainPatientCharacteristics,
-            ]
-            .into_iter()
-            .collect(),
+            options: BTreeSet::new(),
             descriptor_mappings: BTreeMap::new(),
             safe_private_allowlist: BTreeSet::new(),
             uid_mappings: BTreeMap::new(),
         }
     }
-}
 
-impl ProfileConfiguration {
+    /// Construct the default extended DICOM profile.
+    #[must_use]
+    pub fn dicom_extended() -> Self {
+        Self {
+            options: DICOM_EXTENDED_OPTIONS.into_iter().collect(),
+            ..Self::dicom()
+        }
+    }
+
     /// Construct the strict Safe Harbor metadata defaults.
     #[must_use]
     pub fn safe_harbor() -> Self {
@@ -280,20 +294,17 @@ impl ProfileConfiguration {
     }
 
     pub(crate) fn deidentification_method(&self) -> String {
-        let option_names = self
-            .options
-            .iter()
-            .map(|option| option.method_code().1)
+        let implementation = match self.policy {
+            DeidentificationPolicy::Dicom => format!("dicom-anon {PROFILE_VERSION}"),
+            DeidentificationPolicy::SafeHarborMetadata => {
+                format!("dicom-anon safe-harbor-metadata {PROFILE_VERSION}")
+            }
+        };
+        std::iter::once("DICOM PS3.15 Basic Profile")
+            .chain(self.options.iter().map(|option| option.method_code().1))
+            .chain(std::iter::once(implementation.as_str()))
             .collect::<Vec<_>>()
-            .join("\\");
-        match self.policy {
-            DeidentificationPolicy::Dicom => format!(
-                "DICOM PS3.15 Basic Profile\\{option_names}\\dicom-anon {PROFILE_VERSION}"
-            ),
-            DeidentificationPolicy::SafeHarborMetadata => format!(
-                "DICOM PS3.15 Basic Profile\\{option_names}\\dicom-anon safe-harbor-metadata {PROFILE_VERSION}"
-            ),
-        }
+            .join("\\")
     }
 
     pub(crate) fn allows_safe_private(&self, creator: &str, element_offset: u8) -> bool {
@@ -333,7 +344,7 @@ pub enum ProfileAction {
 pub struct ProfileRule {
     tag: u32,
     pub name: &'static str,
-    /// Effective action for `ProfileConfiguration::default()`.
+    /// Effective action for `ProfileConfiguration::dicom_extended()`.
     pub action: ProfileAction,
     basic_action: ProfileAction,
     option_actions: [Option<ProfileAction>; OPTION_COLUMN_COUNT],
@@ -651,7 +662,7 @@ mod tests {
     }
 
     #[test]
-    fn default_options_override_basic_actions() {
+    fn default_extended_options_override_basic_actions() {
         assert_eq!(
             profile_rule(Tag(0x0008, 0x0020)).unwrap().action,
             ProfileAction::Clean
@@ -676,19 +687,18 @@ mod tests {
     }
 
     #[test]
-    fn default_configuration_enables_requested_options() {
-        let configuration = ProfileConfiguration::default();
-        assert_eq!(configuration.policy, DeidentificationPolicy::Dicom);
+    fn dicom_presets_select_expected_options() {
+        let basic = ProfileConfiguration::dicom();
+        assert_eq!(basic.policy, DeidentificationPolicy::Dicom);
+        assert!(basic.options.is_empty());
+
+        let extended = ProfileConfiguration::dicom_extended();
+        assert_eq!(extended.policy, DeidentificationPolicy::Dicom);
         assert_eq!(
-            configuration.options,
-            [
-                DicomOption::CleanDescriptors,
-                DicomOption::RetainModifiedDates,
-                DicomOption::RetainPatientCharacteristics,
-            ]
-            .into_iter()
-            .collect()
+            extended.options,
+            DICOM_EXTENDED_OPTIONS.into_iter().collect()
         );
+        assert_eq!(ProfileConfiguration::default(), extended);
     }
 
     #[test]
@@ -776,8 +786,7 @@ mod tests {
 
     #[test]
     fn metadata_options_resolve_representative_table_actions() {
-        let mut configuration = ProfileConfiguration::default();
-        configuration.options.clear();
+        let mut configuration = ProfileConfiguration::dicom();
         assert_eq!(
             profile_rule_for(Tag(0x0008, 0x1030), &configuration)
                 .unwrap()

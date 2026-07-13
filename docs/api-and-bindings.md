@@ -57,7 +57,17 @@ assert!(validation_report.conformant);
 
 `AnonymizationReport` is serializable and records the patient pseudonym, whole-day date offset, whole-hour time offset, and action counts. `ValidationReport` contains a Boolean result and structured findings. `DefaultDicomObject` is re-exported for callers that do not otherwise depend on `dicom-object`.
 
-`Options::new` uses `ProfileConfiguration::default()`, which enables Clean Descriptors, Retain Modified Dates, and Retain Patient Characteristics. Configuration can be changed before constructing the anonymizer:
+`Options::new`, `ValidationOptions::default()`, and binding calls without configuration JSON select `dicom-extended`. It enables Clean Descriptors, Retain Modified Dates, and Retain Patient Characteristics. Use `ProfileConfiguration::dicom()` for the Basic Profile without option columns:
+
+```rust
+# use dicom_anon::ProfileConfiguration;
+let basic = ProfileConfiguration::dicom();
+let extended = ProfileConfiguration::dicom_extended();
+assert!(basic.options.is_empty());
+assert_eq!(extended, ProfileConfiguration::default());
+```
+
+Configuration can be changed before constructing the anonymizer:
 
 ```rust
 # use dicom_anon::{DicomOption, Options, ProfileConfiguration, SecretKey};
@@ -116,6 +126,8 @@ exact, exact_json = dicom_anon_python.validate_with_source(
     source, output, key, None, configuration_json
 )
 ```
+
+The configuration JSON above is the explicit form of the `dicom-extended` preset. Omitting `configuration_json` selects the same options. Use `"policy": "dicom"` with an empty `options` array for the option-free Basic Profile.
 
 `anonymize` accepts optional `patient_scope` and `configuration_json` arguments. `validate` accepts optional configuration JSON. `validate_with_source` is a separate function so candidate-only `validate` retains its original meaning. Errors become `ValueError`. The JSON fields match the Rust report models.
 

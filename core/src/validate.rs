@@ -681,8 +681,11 @@ fn format_tag(tag: Tag) -> String {
 
 fn profile_name(profile: &ProfileConfiguration) -> String {
     match profile.policy {
-        DeidentificationPolicy::Dicom if *profile == ProfileConfiguration::default() => {
+        DeidentificationPolicy::Dicom if *profile == ProfileConfiguration::dicom_extended() => {
             PROFILE_NAME.to_owned()
+        }
+        DeidentificationPolicy::Dicom if *profile == ProfileConfiguration::dicom() => {
+            "DICOM PS3.15 Basic Application Level Confidentiality Profile".to_owned()
         }
         DeidentificationPolicy::Dicom => {
             "Configured DICOM PS3.15 Basic Application Confidentiality Profile".to_owned()

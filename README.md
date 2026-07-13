@@ -2,7 +2,7 @@
 
 `dicom-anon` de-identifies individual DICOM Part 10 files and checks metadata against the same confidentiality profile. The workspace provides a Rust library, two Unix-style commands, a Python extension, and a Node.js N-API module.
 
-The default policy implements the metadata actions from the [DICOM PS3.15 2026c Basic Application Level Confidentiality Profile](https://dicom.nema.org/medical/dicom/current/output/chtml/part15/chapter_E.html) with Clean Descriptors, Retain Patient Characteristics, and Retain Longitudinal Temporal Information With Modified Dates. Patient identifiers and UIDs receive keyed deterministic replacements. Dates and times move by patient-specific whole-day and whole-hour offsets. Patient ages from `090Y` through `999Y` are categorized as `090Y`. Study and Series Description are retained only when an exact caller-supplied mapping approves a safe replacement; otherwise they receive a safe dummy.
+The default `dicom-extended` preset implements the metadata actions from the [DICOM PS3.15 2026c Basic Application Level Confidentiality Profile](https://dicom.nema.org/medical/dicom/current/output/chtml/part15/chapter_E.html) with Clean Descriptors, Retain Patient Characteristics, and Retain Longitudinal Temporal Information With Modified Dates. Patient identifiers and UIDs receive keyed deterministic replacements. Dates and times move by patient-specific whole-day and whole-hour offsets. Patient ages from `090Y` through `999Y` are categorized as `090Y`. Study and Series Description are retained only when an exact caller-supplied mapping approves a safe replacement; otherwise they receive a safe dummy. The `dicom` preset applies the Basic Profile without optional columns.
 
 This software does not inspect pixel data for burned-in text or recognizable faces. It does not claim the Clean Pixel Data or Clean Recognizable Visual Features options. Read [Conformance and scope](docs/conformance.md) before using output outside a controlled environment.
 
@@ -62,11 +62,19 @@ Every metadata option in Table E.1-1 can be enabled or disabled. For example:
 ```console
 target/release/dicom-anonymize input.dcm output.dcm \
   --key-file deidentification.key \
-  --enable-option retain-device-identity \
-  --disable-option clean-descriptors
+  --policy dicom \
+  --enable-option retain-device-identity
 ```
 
 `clean-pixel-data` and `clean-recognizable-visual-features` are represented but rejected because this tool does not process pixels. Conflicting option columns are rejected before input is processed.
+
+The anonymizer and validator use the same presets:
+
+| `--policy` value | Enabled options |
+|---|---|
+| `dicom` | None |
+| `dicom-extended` (default) | `clean-descriptors`, `retain-modified-dates`, `retain-patient-characteristics` |
+| `safe-harbor-metadata` | `clean-graphics`, `clean-structured-content`, `clean-descriptors`, `retain-modified-dates`, `retain-patient-characteristics` |
 
 The separate `safe-harbor-metadata` policy applies strict Safe Harbor transformations to metadata controlled by the tool. It requires an independently assigned non-PHI patient scope and a complete original-to-output UID map:
 

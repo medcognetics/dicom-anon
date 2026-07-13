@@ -2,7 +2,7 @@
 
 ## Project purpose
 
-This workspace implements deterministic, configurable DICOM metadata de-identification and validation. Normative behavior comes from DICOM PS3.15 2026c Table E.1-1 and the selected option columns. Defaults are Clean Descriptors, Retain Patient Characteristics, and Retain Longitudinal Temporal Information With Modified Dates. A separate strict Safe Harbor metadata policy is available.
+This workspace implements deterministic, configurable DICOM metadata de-identification and validation. Normative behavior comes from DICOM PS3.15 2026c Table E.1-1 and the selected option columns. The default `dicom-extended` preset enables Clean Descriptors, Retain Patient Characteristics, and Retain Longitudinal Temporal Information With Modified Dates. The `dicom` preset enables no option columns. A separate strict Safe Harbor metadata policy is available.
 
 ## Repository map
 

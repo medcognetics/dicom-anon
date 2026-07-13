@@ -4,20 +4,31 @@ use std::path::PathBuf;
 
 use clap::{Args, ValueEnum};
 
-use crate::{
-    DeidentificationPolicy, DicomOption, ProfileConfiguration, SafePrivateElement, SecretKey,
-};
+use crate::{DicomOption, ProfileConfiguration, SafePrivateElement, SecretKey};
+
+/// Named profile presets exposed by both bundled commands.
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum ProfilePreset {
+    /// DICOM Basic Profile with no options enabled.
+    Dicom,
+    /// DICOM Basic Profile with clean-descriptors, retain-modified-dates, and retain-patient-characteristics.
+    #[default]
+    DicomExtended,
+    /// Safe Harbor metadata preset with clean-graphics, clean-structured-content, clean-descriptors, retain-modified-dates, and retain-patient-characteristics.
+    SafeHarborMetadata,
+}
 
 /// Shared confidentiality-profile command-line options.
 #[derive(Debug, Clone, Args)]
 pub struct ProfileArgs {
-    /// High-level de-identification policy.
-    #[arg(long, value_enum, default_value = "dicom")]
-    pub policy: DeidentificationPolicy,
+    /// Profile preset. dicom-extended is the default.
+    #[arg(long, value_enum, default_value_t)]
+    pub policy: ProfilePreset,
     /// Enable one DICOM confidentiality option; repeat as needed.
     #[arg(long, value_enum)]
     pub enable_option: Vec<DicomOption>,
-    /// Disable one default DICOM confidentiality option; repeat as needed.
+    /// Disable one option enabled by the selected preset; repeat as needed.
     #[arg(long, value_enum)]
     pub disable_option: Vec<DicomOption>,
     /// JSON exact descriptor source-to-safe-output mappings.
@@ -34,8 +45,9 @@ pub struct ProfileArgs {
 impl ProfileArgs {
     pub fn load(&self) -> Result<ProfileConfiguration, String> {
         let mut profile = match self.policy {
-            DeidentificationPolicy::Dicom => ProfileConfiguration::default(),
-            DeidentificationPolicy::SafeHarborMetadata => ProfileConfiguration::safe_harbor(),
+            ProfilePreset::Dicom => ProfileConfiguration::dicom(),
+            ProfilePreset::DicomExtended => ProfileConfiguration::dicom_extended(),
+            ProfilePreset::SafeHarborMetadata => ProfileConfiguration::safe_harbor(),
         };
         for option in &self.enable_option {
             if self.disable_option.contains(option) {
