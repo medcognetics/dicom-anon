@@ -14,14 +14,22 @@ Anonymization and validation share these profile arguments:
 
 | Argument | Meaning |
 |---|---|
-| `--policy dicom\|safe-harbor-metadata` | Select the normal DICOM preset or strict Safe Harbor metadata preset. |
+| `--policy dicom\|dicom-extended\|safe-harbor-metadata` | Select a profile preset. The default is `dicom-extended`. |
 | `--enable-option OPTION` | Enable an option; repeat for multiple options. |
-| `--disable-option OPTION` | Disable a preset option; repeat for multiple options. |
+| `--disable-option OPTION` | Disable an option enabled by the selected preset; repeat for multiple options. |
 | `--descriptor-map PATH` | Load a JSON object keyed by canonical eight-digit tag, then exact source value and safe output value. |
 | `--safe-private-allowlist PATH` | Load a JSON array of `{ "creator": STRING, "element_offset": INTEGER }`. |
 | `--uid-map PATH` | Load a JSON object from original UID to replacement UID. Required for Safe Harbor anonymization. |
 
-The default DICOM options are `clean-descriptors`, `retain-modified-dates`, and `retain-patient-characteristics`. The Safe Harbor preset additionally enables `clean-graphics` and `clean-structured-content`. `clean-pixel-data` and `clean-recognizable-visual-features` are accepted names but produce unsupported-option errors.
+The presets enable these options before applying `--enable-option` and `--disable-option`:
+
+| Preset | Enabled options |
+|---|---|
+| `dicom` | None. This is the DICOM Basic Application Level Confidentiality Profile. |
+| `dicom-extended` | `clean-descriptors`, `retain-modified-dates`, `retain-patient-characteristics` |
+| `safe-harbor-metadata` | `clean-graphics`, `clean-structured-content`, `clean-descriptors`, `retain-modified-dates`, `retain-patient-characteristics` |
+
+Both commands default to `dicom-extended`. The `dicom` and `dicom-extended` presets use the serialized policy value `dicom`; reports distinguish them through `active_options`. `clean-pixel-data` and `clean-recognizable-visual-features` are accepted names but produce unsupported-option errors.
 
 Example descriptor map:
 

@@ -40,7 +40,7 @@ OPTION_COLUMNS = (
     "Clean Struct. Cont. Opt.",
     "Clean Graph. Opt.",
 )
-DEFAULT_COLUMNS = {
+DICOM_EXTENDED_COLUMNS = {
     "Rtn. Pat. Chars. Opt.",
     "Rtn. Long. Modif. Dates Opt.",
     "Clean Desc. Opt.",
@@ -101,15 +101,15 @@ def main() -> None:
         tag = "".join(match.groups()).upper()
         basic = action(str(row["Basic Prof."]).strip())
         options = []
-        default_actions = []
+        extended_actions = []
         for column in OPTION_COLUMNS:
             value = str(row[column]).strip()
             options.append("None" if not value else f"Some({action(value)})")
-            if column in DEFAULT_COLUMNS and value:
-                default_actions.append(action(value))
-        if len(set(default_actions)) > 1:
-            raise ValueError(f"conflicting default actions for {row['Attribute Name']}")
-        effective = default_actions[0] if default_actions else basic
+            if column in DICOM_EXTENDED_COLUMNS and value:
+                extended_actions.append(action(value))
+        if len(set(extended_actions)) > 1:
+            raise ValueError(f"conflicting extended actions for {row['Attribute Name']}")
+        effective = extended_actions[0] if extended_actions else basic
         name = rust_string(str(row["Attribute Name"]))
         option_text = ", ".join(options)
         generated_rows.append((int(tag, 16), name, effective, basic, options))

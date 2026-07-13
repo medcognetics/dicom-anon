@@ -7,6 +7,12 @@ use dicom_object::{FileMetaTableBuilder, InMemDicomObject};
 
 const KEY_ENV: &str = "DICOM_ANON_TEST_KEY";
 const KEY: &str = "0123456789abcdef0123456789abcdef";
+const BASIC_PROFILE_NAME: &str = "DICOM PS3.15 Basic Application Level Confidentiality Profile";
+const DICOM_EXTENDED_OPTIONS: [&str; 3] = [
+    "clean-descriptors",
+    "retain-modified-dates",
+    "retain-patient-characteristics",
+];
 
 fn source_bytes() -> Vec<u8> {
     let mut object = InMemDicomObject::new_empty();
@@ -42,6 +48,119 @@ fn run_with_stdin(command: &mut Command, input: &[u8]) -> Output {
 }
 
 #[test]
+fn help_describes_the_default_dicom_extended_profile() {
+    for binary in ["dicom-anonymize", "dicom-validate"] {
+        let executable = match binary {
+            "dicom-anonymize" => env!("CARGO_BIN_EXE_dicom-anonymize"),
+            "dicom-validate" => env!("CARGO_BIN_EXE_dicom-validate"),
+            _ => unreachable!(),
+        };
+        let output = Command::new(executable).arg("--help").output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        let help = String::from_utf8(output.stdout).unwrap();
+        assert!(help.contains("[default: dicom-extended]"), "{binary}");
+        assert!(
+            help.contains("DICOM Basic Profile with no options enabled"),
+            "{binary}"
+        );
+        let extended_help = help
+            .split("- dicom-extended:")
+            .nth(1)
+            .expect("dicom-extended help entry")
+            .split("- safe-harbor-metadata:")
+            .next()
+            .unwrap();
+        for option in DICOM_EXTENDED_OPTIONS {
+            assert!(extended_help.contains(option), "{binary}: {option}");
+        }
+    }
+}
+
+#[test]
+fn implicit_and_explicit_dicom_extended_profiles_match() {
+    let default = run_with_stdin(
+        Command::new(env!("CARGO_BIN_EXE_dicom-anonymize"))
+            .args(["-", "--key-env", KEY_ENV, "--verbose"])
+            .env(KEY_ENV, KEY),
+        &source_bytes(),
+    );
+    let explicit = run_with_stdin(
+        Command::new(env!("CARGO_BIN_EXE_dicom-anonymize"))
+            .args([
+                "-",
+                "--policy",
+                "dicom-extended",
+                "--key-env",
+                KEY_ENV,
+                "--verbose",
+            ])
+            .env(KEY_ENV, KEY),
+        &source_bytes(),
+    );
+
+    assert_eq!(default.status.code(), Some(0));
+    assert_eq!(explicit.status.code(), Some(0));
+    assert_eq!(default.stdout, explicit.stdout);
+    let default_report: serde_json::Value = serde_json::from_slice(&default.stderr).unwrap();
+    let explicit_report: serde_json::Value = serde_json::from_slice(&explicit.stderr).unwrap();
+    assert_eq!(default_report, explicit_report);
+    assert_eq!(default_report["policy"], "dicom");
+    assert_eq!(
+        default_report["active_options"],
+        serde_json::json!(DICOM_EXTENDED_OPTIONS)
+    );
+}
+
+#[test]
+fn explicit_dicom_profile_uses_no_options() {
+    let anonymized = run_with_stdin(
+        Command::new(env!("CARGO_BIN_EXE_dicom-anonymize"))
+            .args(["-", "--policy", "dicom", "--key-env", KEY_ENV, "--verbose"])
+            .env(KEY_ENV, KEY),
+        &source_bytes(),
+    );
+    assert_eq!(anonymized.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&anonymized.stderr).unwrap();
+    assert_eq!(report["policy"], "dicom");
+    assert_eq!(report["active_options"], serde_json::json!([]));
+
+    let object = dicom_anon::read_dicom(&anonymized.stdout[..]).unwrap();
+    assert_eq!(
+        object
+            .element(tags::LONGITUDINAL_TEMPORAL_INFORMATION_MODIFIED)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "REMOVED"
+    );
+    assert_eq!(
+        object.element(tags::STUDY_DATE).unwrap().to_str().unwrap(),
+        ""
+    );
+
+    let basic_validation = run_with_stdin(
+        Command::new(env!("CARGO_BIN_EXE_dicom-validate"))
+            .args(["-", "--policy", "dicom", "--format", "json"]),
+        &anonymized.stdout,
+    );
+    assert_eq!(
+        basic_validation.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&basic_validation.stdout)
+    );
+    let basic_report: serde_json::Value = serde_json::from_slice(&basic_validation.stdout).unwrap();
+    assert_eq!(basic_report["profile"], BASIC_PROFILE_NAME);
+    assert_eq!(basic_report["active_options"], serde_json::json!([]));
+
+    let extended_validation = run_with_stdin(
+        Command::new(env!("CARGO_BIN_EXE_dicom-validate")).args(["-", "--format", "json"]),
+        &anonymized.stdout,
+    );
+    assert_eq!(extended_validation.status.code(), Some(1));
+}
+
+#[test]
 fn anonymize_stdout_pipes_into_json_validation() {
     let anonymized = run_with_stdin(
         Command::new(env!("CARGO_BIN_EXE_dicom-anonymize"))
@@ -62,6 +181,11 @@ fn anonymize_stdout_pipes_into_json_validation() {
     assert!(validated.stderr.is_empty());
     let report: serde_json::Value = serde_json::from_slice(&validated.stdout).unwrap();
     assert_eq!(report["conformant"], true);
+    assert_eq!(report["policy"], "dicom");
+    assert_eq!(
+        report["active_options"],
+        serde_json::json!(DICOM_EXTENDED_OPTIONS)
+    );
     assert!(report["findings"]
         .as_array()
         .unwrap()
