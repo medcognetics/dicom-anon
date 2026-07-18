@@ -72,6 +72,43 @@ Exit status:
 
 No progress option is provided. Each invocation processes one file, and progress output would add noise without a bounded multi-item workload.
 
+## `report-anon`
+
+```text
+report-anon anonymize [OPTIONS] [INPUT] [OUTPUT]
+report-anon model install [OPTIONS]
+report-anon model path
+```
+
+`INPUT` accepts UTF-8 plaintext or a PDF and defaults to stdin. `OUTPUT` defaults to stdout. `--input-format auto` treats a `.pdf` file or input containing `%PDF-` within its first 1,024 bytes as PDF. The bounded header scan recognizes PDF data with leading transport bytes. `--input-format pdf` forces PDF parsing. `--input-format text` forces UTF-8 plaintext processing even when the filename or content matches the PDF heuristic.
+
+`--in-place` requires a file path that is not a symbolic link and replaces it atomically only after model inference and output construction succeed. It rejects a symbolic-link input because an atomic rename would replace the link entry instead of its target. A positional `OUTPUT` that resolves to the input is rejected, including relative-path and symbolic-link aliases, so replacing the source always requires the explicit flag. The command reads the complete bounded input before writing sanitized bytes. A model, PDF, OCR, linkage, or primary-output write error therefore produces no partial primary output. The primary output is persisted and flushed before either sidecar. If a later sidecar write fails, the complete primary output remains and the command returns status 2.
+
+Sanitized text or PDF bytes are the primary output. They are the only stdout content. `--report PATH` writes a pretty-printed JSON transformation report. `--verbose` writes the same safe report to stderr. A `--format` option is not provided because the primary output can be binary PDF data; JSON is secondary data and always uses an explicit sidecar or stderr.
+
+`--progress auto|always|never` controls a spinner on stderr. Auto mode requires a terminal stderr. `--quiet` disables progress and other non-error diagnostics. `--color` and `--no-color` apply only to errors. `--no-color` takes precedence.
+
+`--device auto` uses an installed CUDA runtime when the bundle contains the Q4 model and otherwise selects CPU. `--device cpu`, `--device cuda`, and `--device cuda:N` select an explicit execution provider. `--runtime-library PATH` requires one of those explicit device values because filenames do not identify provider capabilities reliably. `--model-dir`, `--runtime-library`, and `--pdfium-library` override the installed paths. Equivalent environment variables are available for service processes.
+
+`--max-input-bytes` bounds the buffered source document. `--max-input-tokens` defaults to 65,536 and rejects tokenizer output above that count before inference logits and decoder state are allocated. For PDFs, the token limit applies independently to each embedded-text or OCR pass on a page. A zero token limit is a usage error. `--max-render-pixels` defaults to 100,000,000 pixels for one PDF page. `--max-total-render-pixels` defaults to 250,000,000 pixels across the complete PDF. The command checks the cumulative limit before rendering each page.
+
+PDF input defaults to `--pdf-text-mode auto`. Auto mode uses character geometry from usable embedded text and also applies Tesseract to every rendered page so an incomplete text layer cannot hide text stored in an image. `embedded` uses only embedded text and fails when a page has none. `ocr` uses only Tesseract. Every output page is a raster image inside a new PDF document. In auto mode, aggregate detection counts describe both localization passes and can count the same visible span twice.
+
+Repeat `--dicom PATH` to derive source-to-output identifier mappings from related original DICOMs. All selected DICOMs must resolve to one patient scope. Linkage requires the same key and DICOM profile arguments used by `dicom-anonymize`. DICOM profile, mapping, key, patient-scope, UID-root, and re-anonymization options are rejected unless at least one `--dicom` is present. File output defaults to `OUTPUT.association.json`; stdout output requires `--association PATH`. The association JSON never shares stdout with sanitized data.
+
+`OUTPUT`, `--report`, and `--association` cannot replace a DICOM, key file, descriptor map, safe-private allowlist, UID map, or file inventoried by an installed bundle's `asset-manifest.json`. Required model paths and resolved ONNX Runtime and PDFium libraries receive the same protection when no installed manifest is present. The sidecars must also use distinct paths and cannot replace the primary document output or source report. Existing paths and parent directories are canonicalized before comparison so relative and symbolic-link aliases receive the same check.
+
+Exit status:
+
+- `0`: the complete sanitized output and requested sidecars were written;
+- `2`: invalid arguments, missing assets, model failure, PDF or OCR failure, linkage failure, or output failure.
+
+The command has no exit-1 result because it does not implement a pass/fail validation outcome. Every successful output still sets `human_review_required` in its report.
+
+`report-anon model install` currently packages Linux x86-64 native runtimes. It downloads one immutable OpenAI Privacy Filter revision, the selected CPU/CUDA ONNX Runtime 1.27.1 archive, and PDFium 7881 unless `--without-pdfium` is set. SHA-256 checks precede extraction. Model graph, external-weight, tokenizer, configuration, and calibration digests are checked again before every model load. The target path must be unoccupied; an existing file, directory, symbolic link, or dangling symbolic link is rejected. The successful command prints the installed path to stdout; `--quiet` suppresses it. Download progress uses stderr.
+
+A plaintext-only build is available with `cargo build -p dicom-anon-report --no-default-features --release`. That binary rejects detected or explicit PDF input before model loading. Its help omits PDF-specific runtime and OCR flags.
+
 ## Pipeline examples
 
 ```console
@@ -94,6 +131,25 @@ dicom-anonymize input.dcm output.dcm \
   --patient-scope SUBJECT-42 \
   --uid-map uid-map.json \
   --key-file deidentification.key
+```
+
+```console
+set -o pipefail
+report-anon anonymize --progress never < request-with-phi.txt \
+  | cloud-agent-client
+```
+
+```console
+report-anon anonymize report.pdf report.safe.pdf \
+  --pdf-text-mode auto \
+  --report report.safe.json
+```
+
+```console
+report-anon anonymize report.txt report.safe.txt \
+  --dicom source.dcm \
+  --key-file deidentification.key \
+  --association report.safe.association.json
 ```
 
 ```console

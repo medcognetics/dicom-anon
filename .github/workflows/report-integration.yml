@@ -1,0 +1,57 @@
+name: Report integration
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: report-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cpu-model-pdf:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Install native build and OCR dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libleptonica-dev libtesseract-dev tesseract-ocr-eng
+
+      - name: Select Rust toolchain
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Restore pinned report assets
+        id: report-assets
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684
+        with:
+          path: target/report-assets
+          key: report-assets-${{ runner.os }}-${{ hashFiles('report/src/install.rs') }}
+
+      - name: Install pinned CPU model and native libraries
+        if: steps.report-assets.outputs.cache-hit != 'true'
+        run: >-
+          cargo run -p dicom-anon-report --bin report-anon --
+          model install --target target/report-assets --backend cpu --progress never
+
+      - name: Run asset-backed integration coverage
+        env:
+          DICOM_ANON_REPORT_MODEL_DIR: ${{ github.workspace }}/target/report-assets
+          DICOM_ANON_REPORT_ORT_LIBRARY: ${{ github.workspace }}/target/report-assets/runtime/cpu/lib/libonnxruntime.so.1.27.1
+          DICOM_ANON_REPORT_PDFIUM_LIBRARY: ${{ github.workspace }}/target/report-assets/runtime/pdfium/lib/libpdfium.so
+        run: make report-integration-coverage

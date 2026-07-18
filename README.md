@@ -1,6 +1,6 @@
 # dicom-anon
 
-`dicom-anon` de-identifies individual DICOM Part 10 files and checks metadata against the same confidentiality profile. The workspace provides a Rust library, two Unix-style commands, a Python extension, and a Node.js N-API module.
+`dicom-anon` de-identifies DICOM Part 10 files, plaintext reports, and PDFs. The workspace provides Rust libraries, three Unix-style commands, a Python extension, and a Node.js N-API module. Report filtering runs OpenAI Privacy Filter locally through ONNX Runtime.
 
 The default `dicom-extended` preset implements the metadata actions from the [DICOM PS3.15 2026c Basic Application Level Confidentiality Profile](https://dicom.nema.org/medical/dicom/current/output/chtml/part15/chapter_E.html) with Clean Descriptors, Retain Patient Characteristics, and Retain Longitudinal Temporal Information With Modified Dates. Patient identifiers and UIDs receive keyed deterministic replacements. Dates and times move by patient-specific whole-day and whole-hour offsets. Patient ages from `090Y` through `999Y` are categorized as `090Y`. Study and Series Description are retained only when an exact caller-supplied mapping approves a safe replacement; otherwise they receive a safe dummy. The `dicom` preset applies the Basic Profile without optional columns.
 
@@ -8,17 +8,42 @@ This software does not inspect pixel data for burned-in text or recognizable fac
 
 ## Install and build
 
-The workspace requires Rust 1.88 or newer.
+The workspace requires Rust 1.88 or newer. PDF support also requires Tesseract 5, Leptonica, and the development headers needed by the `leptess` crate. On Debian or Ubuntu:
+
+```console
+sudo apt-get install libleptonica-dev libtesseract-dev tesseract-ocr-eng
+```
 
 ```console
 cargo build --workspace --release
 ```
 
-The two commands are written to `target/release/`:
+For a plaintext-only binary without Tesseract, Leptonica, or PDFium support:
+
+```console
+cargo build -p dicom-anon-report --no-default-features --release
+```
+
+The three commands are written to `target/release/`:
 
 ```text
 dicom-anonymize
 dicom-validate
+report-anon
+```
+
+Install the pinned CPU model, ONNX Runtime 1.27.1, and PDFium 7881 after the build. The installer verifies every download with SHA-256 and refuses to replace an existing bundle. The model loader verifies the graph, external weights, tokenizer, configuration, and calibration against the pinned digests before each load.
+
+```console
+target/release/report-anon model install --backend cpu
+```
+
+CUDA 12 and CUDA 13 packages use the same checksum-verified Q4 model with a matching ONNX Runtime release. CUDA and cuDNN remain system dependencies.
+
+When `--runtime-library PATH` overrides runtime resolution, also pass `--device cpu`, `--device cuda`, or `--device cuda:N`. The tool does not infer an execution provider from a filename.
+
+```console
+target/release/report-anon model install --backend cuda13
 ```
 
 Run formatting, lint, tests, Rustdoc, and binding type checks with:
@@ -28,6 +53,8 @@ make check
 ```
 
 `make check` also checks the TypeScript declaration and Python stub. It requires Node.js, npm, and `uv` in addition to Rust.
+
+The pull-request report integration workflow installs or restores the pinned CPU bundle and runs real ONNX Runtime, PDFium, OCR, CLI, and rendered-redaction tests. Its combined coverage gate requires 84% line coverage. With an installed bundle and the three `DICOM_ANON_REPORT_*` paths configured, run the same gate locally with `make report-integration-coverage`.
 
 ## De-identify a file
 
@@ -113,6 +140,38 @@ target/release/dicom-validate output.dcm \
   --key-file deidentification.key
 ```
 
+## Filter plaintext and PDF reports
+
+Plaintext works as a Unix filter. Sanitized data is the only stdout content; progress and errors use stderr.
+
+```console
+printf '%s\n' 'Patient Alice Smith has MRN 123456.' \
+  | target/release/report-anon anonymize --device cpu \
+  > report.safe.txt
+```
+
+PDF input is detected from a `.pdf` filename or a `%PDF-` header within the first 1,024 bytes, including stdin with leading transport bytes. Use `--input-format text|pdf` to override automatic typing; explicit text mode treats the input as UTF-8 plaintext even when it matches the PDF heuristic. The output is a newly constructed image-only PDF, so the source text layer, attachments, metadata, and incremental history are not copied. Auto mode uses embedded text geometry when available and also runs Tesseract on every rendered page.
+
+PDF rendering is limited per page and across the complete document. The defaults are 100,000,000 pixels per page and 250,000,000 total pixels; use `--max-render-pixels` and `--max-total-render-pixels` to reduce them. A detected span fails the PDF operation unless every non-whitespace character maps to a paintable page rectangle.
+
+```console
+target/release/report-anon anonymize report.pdf report.safe.pdf \
+  --report report.safe.report.json
+```
+
+Add one or more original DICOM files to replace matching report identifiers with the same patient pseudonym and UIDs used by DICOM anonymization:
+
+```console
+target/release/report-anon anonymize report.txt report.safe.txt \
+  --dicom source-1.dcm \
+  --dicom source-2.dcm \
+  --key-file deidentification.key
+```
+
+This writes `report.safe.txt.association.json`. The manifest contains only output identifiers and a SHA-256 digest of the sanitized report. Use the same key, profile, patient scope, UID root, and mapping files for `dicom-anonymize`. Read [Report and PDF anonymization](docs/report-anonymization.md) for the exact workflow, Safe Harbor behavior, and limitations.
+
+Every file destination is normalized before comparison. A positional output cannot alias the input unless `--in-place` is present, and in-place mode rejects a symbolic-link input instead of replacing the link entry. Primary and sidecar outputs cannot replace DICOM inputs, key or mapping files, or files inventoried in an installed model and runtime bundle.
+
 ## Rust API
 
 ```rust
@@ -134,6 +193,7 @@ The public API also supports readers, writers, parsed `dicom-rs` objects, and va
 | Path | Contents |
 |---|---|
 | `core/` | Rust library, commands, tests, examples, and Criterion benchmarks |
+| `report/` | Rust Privacy Filter runtime, plaintext/PDF anonymization, DICOM linkage, installer, and CLI |
 | `bindings/python/` | PyO3 extension and Python type stub |
 | `bindings/node/` | N-API module and TypeScript declaration |
 | `docs/` | CLI, conformance, security, API, and benchmark documentation |
@@ -142,6 +202,7 @@ The public API also supports readers, writers, parsed `dicom-rs` objects, and va
 
 - [CLI contract](docs/cli.md)
 - [Conformance and scope](docs/conformance.md)
+- [Report and PDF anonymization](docs/report-anonymization.md)
 - [Rust API and bindings](docs/api-and-bindings.md)
 - [Key management and disclosure safety](docs/security.md)
 - [Benchmarks](docs/benchmarks.md)

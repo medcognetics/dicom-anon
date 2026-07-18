@@ -58,3 +58,16 @@ With the selected dispatch, parsed-object anonymization measured 37.421 to 37.54
 Exact validation of De-identification Method text, DCM code values, coding schemes, meanings, duplicates, and the Safe Harbor subject-token format initially increased candidate validation from 4.0022 to 4.0171 µs to 4.6564 to 4.6901 µs. The first correct implementation allocated a map and set for every candidate.
 
 The selected implementation compares the ordered method text and uses a fixed bit mask plus the configured option iterator for code membership. It measured 4.2424 to 4.2985 µs, 8.4% faster than the first correct implementation and about 6.5% slower than the pre-fix validator. The remaining cost is accepted because the previous validator allowed malformed or identifying attestation content to pass. The benchmark performs no disk or network I/O, and this change does not affect those resources. Decision: ship the allocation-free exact validation.
+
+## Report PDF resource-guard check
+
+The cumulative PDF pixel limit adds one checked multiplication and addition per page in the report crate. The existing Criterion suite does not load the native PDF stack, so it cannot measure that page loop directly. A before-and-after run on July 18, 2026 verifies that the unrelated DICOM hot paths remain stable:
+
+| Workload | Baseline 95% interval | Candidate 95% interval | Criterion result |
+|---|---:|---:|---|
+| Six common rule lookups | 58.541 to 58.698 ns | 58.698 to 58.902 ns | Within noise threshold |
+| Anonymize parsed 1 MiB object | 37.248 to 37.285 µs | 37.229 to 37.276 µs | Within noise threshold |
+| Parse, anonymize, and write 1 MiB | 156.83 to 161.38 µs | 156.52 to 156.77 µs | No change detected |
+| Validate parsed 1 MiB object | 4.2551 to 4.2610 µs | 4.2824 to 4.2894 µs | Within noise threshold |
+
+Decision: ship the resource guard. Its fixed per-page accounting prevents unbounded aggregate rendering work, and no core DICOM benchmark showed a meaningful regression. The asset-backed report integration target remains the functional gate for native model, OCR, and PDFium execution.
