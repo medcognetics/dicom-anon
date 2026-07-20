@@ -16,6 +16,20 @@ ANY_ACTION_PATTERN = re.compile(r"^\s*uses:\s*[^\s@]+@([^\s#]+)", re.MULTILINE)
 BERYL_RUNNER = "[self-hosted, linux, x64, beryl]"
 NODE_ENGINE = ">=22"
 SETUP_GO_SHA = "4a3601121dd01d1626a1e23e37211e3254c1c06c"
+CI_CONTAINER_IMAGE = "ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90"
+CI_CONTAINER_PACKAGES = (
+    "build-essential",
+    "ca-certificates",
+    "clang",
+    "curl",
+    "git",
+    "libclang-dev",
+    "libleptonica-dev",
+    "libtesseract-dev",
+    "pkg-config",
+    "tesseract-ocr",
+    "tesseract-ocr-eng",
+)
 
 
 def read_workflow(name: str) -> str:
@@ -57,6 +71,27 @@ def test_linux_ci_contract() -> None:
     assert "make ${{ matrix.make_target }}" in workflow
     assert "needs: supported-versions" in workflow
     assert "if: always()" in workflow
+
+
+def test_self_hosted_jobs_use_a_pinned_ci_container() -> None:
+    for workflow_name in ("linux-ci.yml", "nightly.yml"):
+        workflow = read_workflow(workflow_name)
+        prerequisite_step = workflow.partition(
+            "      - name: Install container prerequisites\n"
+        )[2].partition("\n      - name:")[0]
+
+        assert f"image: {CI_CONTAINER_IMAGE}" in workflow
+        assert "shell: bash" in workflow
+        assert prerequisite_step
+        assert "apt-get update" in prerequisite_step
+        assert "pkg-config --exists lept tesseract" in prerequisite_step
+        assert "sudo" not in prerequisite_step
+        for package in CI_CONTAINER_PACKAGES:
+            assert re.search(
+                rf"^[ \t]+{re.escape(package)}(?:[ \t]+\\)?[ \t]*$",
+                prerequisite_step,
+                re.MULTILINE,
+            )
 
 
 def test_scheduled_workflow_contracts() -> None:

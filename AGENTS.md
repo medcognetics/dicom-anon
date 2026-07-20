@@ -2,7 +2,7 @@
 
 ## Project purpose
 
-This workspace implements deterministic, configurable DICOM metadata de-identification and validation. Normative behavior comes from DICOM PS3.15 2026c Table E.1-1 and the selected option columns. The default `dicom-extended` preset enables Clean Descriptors, Retain Patient Characteristics, and Retain Longitudinal Temporal Information With Modified Dates. The `dicom` preset enables no option columns. A separate strict Safe Harbor metadata policy is available.
+This workspace implements deterministic, configurable DICOM metadata de-identification and validation, plus local plaintext and PDF privacy filtering. Normative DICOM behavior comes from DICOM PS3.15 2026c Table E.1-1 and the selected option columns. The default `dicom-extended` preset enables Clean Descriptors, Retain Patient Characteristics, and Retain Longitudinal Temporal Information With Modified Dates. The `dicom` preset enables no option columns. A separate strict Safe Harbor metadata policy is available. Report filtering uses the pinned OpenAI Privacy Filter model and always requires human review.
 
 ## Repository map
 
@@ -16,6 +16,13 @@ This workspace implements deterministic, configurable DICOM metadata de-identifi
 - `core/src/io.rs`: stream and atomic file operations
 - `core/src/bin/`: command implementations
 - `core/tests/cli.rs`: process-level CLI contract tests
+- `report/src/model.rs`: pinned ONNX model loading and constrained Viterbi decoding
+- `report/src/redact.rs`: deterministic plaintext span replacement
+- `report/src/pdf.rs`: PDFium rendering, embedded text geometry, OCR fallback, and image-only output
+- `report/src/linkage.rs`: sensitive in-memory DICOM mappings and safe association manifests
+- `report/src/install.rs`: checksum-verified model and native-runtime packaging
+- `report/src/bin/report-anon.rs`: pipe-safe report CLI
+- `report/tests/`: text, model, linkage, PDF, and process-level CLI tests
 - `bindings/python/`: PyO3 API and Python stub
 - `bindings/node/`: N-API API and TypeScript declaration
 - `core/benches/anonymization.rs`: Criterion workloads
@@ -37,6 +44,20 @@ This workspace implements deterministic, configurable DICOM metadata de-identifi
 - Keep the patient-scoped time offset stable and apply TM midnight rollover to its known paired DA attribute.
 - Never include originals, key material, patient scope, UID-map contents, or identifying mismatch values in validation reports or logs.
 - In Safe Harbor metadata mode, require an external non-PHI patient scope and a complete collision-free UID map; empty Patient ID, Patient Name, and Birth Date; and retain no temporal detail below year.
+- Pin the report model by immutable revision and validate its exact label taxonomy before inference.
+- Verify the model graph, external weights, tokenizer, configuration, and calibration against their pinned SHA-256 digests before loading them.
+- Bound tokenizer output before allocating inference logits or decoder state.
+- Keep CPU and CUDA on the Q4 graph unless semantic fixtures pass on every supported execution provider for a replacement graph.
+- Keep report source spans and DICOM source-to-output mappings in memory only. Do not implement `Debug` or `Serialize` for sensitive linkage maps.
+- Never include source report text, source identifiers, source hashes, or detector logits in report or association JSON.
+- DICOM-linked report output must use the same anonymizer options and reject inputs that resolve to different patient scopes.
+- Rebuild sanitized PDFs from rendered pages. Do not copy source text layers, metadata, attachments, forms, or incremental history.
+- Fail PDF processing when any non-whitespace character in a protected span lacks paintable coordinates, and bound both per-page and cumulative rendered pixels.
+- Serialize PDFium document operations. Concurrent use of the native library can corrupt process state.
+- Normalize every report output path. Require `--in-place` when the primary output aliases the input, reject symbolic-link inputs in that mode, and reject destinations that alias another input, mapping, key, installed bundle file, primary output, or sidecar.
+- Persist and flush the sanitized primary output before writing report or association sidecars.
+- Treat OCR and model detection as fallible. Keep `human_review_required=true` and do not make HIPAA, GDPR, or regulatory compliance claims.
+- Verify downloaded report assets before extraction and never overwrite an occupied install target, including a dangling symbolic link.
 
 ## Development sequence
 
@@ -73,6 +94,8 @@ make bench
 ```
 
 Keep the workload and sample size unchanged when comparing results. Record the baseline, candidate, confidence interval, and decision in `docs/benchmarks.md`.
+
+Native report integration requires the three `DICOM_ANON_REPORT_*` asset paths. Run `make report-integration-coverage`; it combines the self-contained suite with CPU ONNX Runtime, PDFium, OCR, CLI, and rendered-redaction fixtures and enforces the asset-backed coverage floor. Standard Linux and nightly jobs run in an Ubuntu container pinned by immutable manifest digest. Install missing compiler, Tesseract, and Leptonica prerequisites inside that container without mutating the self-hosted runner. The asset-backed target remains excluded from GitHub Actions until its runner and artifact contracts are approved.
 
 ## Profile changes
 

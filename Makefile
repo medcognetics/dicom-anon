@@ -1,8 +1,15 @@
 .PHONY: check ci ci-minimum format lint python-quality test coverage docs node-dependencies \
-	binding-types test-python test-node test-ci audit deprecations release bench
+	binding-types test-python test-node test-ci audit deprecations release bench \
+	report-integration report-integration-coverage
 
 CI_UV_RUN = uv run --project tools/ci --frozen
 ACTIONLINT ?= actionlint
+
+CORE_MIN_LINE_COVERAGE := 90
+# Native model, OCR, and PDFium paths use the asset-backed report-integration target. This floor
+# covers the self-contained report suite, including model decoding and PDF geometry seams.
+REPORT_MIN_LINE_COVERAGE := 67
+REPORT_INTEGRATION_MIN_LINE_COVERAGE := 84
 
 check: format lint test docs binding-types
 
@@ -15,6 +22,7 @@ format:
 
 lint:
 	cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+	cargo check --locked -p dicom-anon-report --no-default-features
 
 python-quality:
 	$(CI_UV_RUN) ruff check tools/ci tests
@@ -26,7 +34,8 @@ test:
 
 # profile.rs is generated normative data with exhaustive table-invariant tests.
 coverage:
-	cargo llvm-cov --locked -p dicom-anon --all-targets --ignore-filename-regex 'profile.rs' --fail-under-lines 90
+	cargo llvm-cov --locked -p dicom-anon --all-targets --ignore-filename-regex 'profile.rs' --fail-under-lines $(CORE_MIN_LINE_COVERAGE)
+	cargo llvm-cov --locked -p dicom-anon-report --all-targets --fail-under-lines $(REPORT_MIN_LINE_COVERAGE)
 
 docs:
 	RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
@@ -61,3 +70,20 @@ release:
 
 bench:
 	cargo bench --locked -p dicom-anon --bench anonymization -- --sample-size 100
+
+report-integration:
+	@test -d "$$DICOM_ANON_REPORT_MODEL_DIR" -a -f "$$DICOM_ANON_REPORT_ORT_LIBRARY" -a -f "$$DICOM_ANON_REPORT_PDFIUM_LIBRARY" || (echo "report integration asset paths are not configured" >&2; exit 2)
+	cargo test --locked -p dicom-anon-report --test model -- --ignored
+	cargo test --locked -p dicom-anon-report --test cli -- --ignored
+	cargo test --locked -p dicom-anon-report --test pdf -- --ignored --test-threads=1
+	cargo test --locked -p dicom-anon-report --lib sanitized_pdf_renders_black_pixels_over_detected_text -- --ignored --test-threads=1
+
+report-integration-coverage:
+	@test -d "$$DICOM_ANON_REPORT_MODEL_DIR" -a -f "$$DICOM_ANON_REPORT_ORT_LIBRARY" -a -f "$$DICOM_ANON_REPORT_PDFIUM_LIBRARY" || (echo "report integration asset paths are not configured" >&2; exit 2)
+	cargo llvm-cov clean --workspace
+	env -u DICOM_ANON_REPORT_MODEL_DIR -u DICOM_ANON_REPORT_ORT_LIBRARY -u DICOM_ANON_REPORT_PDFIUM_LIBRARY cargo llvm-cov --locked --no-report -p dicom-anon-report --all-targets
+	cargo llvm-cov --locked --no-clean -p dicom-anon-report --test model -- --ignored
+	cargo llvm-cov --locked --no-clean -p dicom-anon-report --test cli -- --ignored --test-threads=1
+	cargo llvm-cov --locked --no-clean -p dicom-anon-report --test pdf -- --ignored --test-threads=1
+	cargo llvm-cov --locked --no-clean -p dicom-anon-report --lib -- --ignored --test-threads=1
+	cargo llvm-cov report -p dicom-anon-report --fail-under-lines $(REPORT_INTEGRATION_MIN_LINE_COVERAGE)
