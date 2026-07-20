@@ -51,10 +51,20 @@ make test
 make coverage
 make docs
 make binding-types
+make test-python
+make test-node
+make test-ci
+make ci
+make ci-minimum
 make audit
+make deprecations
 make check
 make release
 ```
+
+`make ci` is the canonical latest-toolchain gate. `make ci-minimum` checks Rust 1.88, Python 3.10, and Node.js 22 when those runtimes are selected by the caller or CI. `make audit` deliberately returns nonzero for every security finding after writing all reports to `target/ci-reports/security/`; do not suppress the known RustSec warning to make the gate green. `make deprecations` keeps findings informational and fails only when a check is incomplete.
+
+GitHub Actions uses the persistent single-slot `beryl` runner only for trusted repository events. Keep the same-repository pull-request guard, read-only permissions, non-persisted checkout credentials, full-SHA action pins, and the stable `Linux / Required` aggregate check. Keep cross-platform, CUDA, publishing, and report-integration work out of these workflows until their runner and artifact contracts are approved.
 
 Run Criterion before and after any performance change:
 
