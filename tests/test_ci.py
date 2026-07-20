@@ -16,6 +16,11 @@ ANY_ACTION_PATTERN = re.compile(r"^\s*uses:\s*[^\s@]+@([^\s#]+)", re.MULTILINE)
 BERYL_RUNNER = "[self-hosted, linux, x64, beryl]"
 NODE_ENGINE = ">=22"
 SETUP_GO_SHA = "4a3601121dd01d1626a1e23e37211e3254c1c06c"
+REPORT_BUILD_PACKAGES = (
+    "libleptonica-dev",
+    "libtesseract-dev",
+    "tesseract-ocr-eng",
+)
 
 
 def read_workflow(name: str) -> str:
@@ -57,6 +62,18 @@ def test_linux_ci_contract() -> None:
     assert "make ${{ matrix.make_target }}" in workflow
     assert "needs: supported-versions" in workflow
     assert "if: always()" in workflow
+
+
+def test_linux_ci_installs_report_build_prerequisites() -> None:
+    workflow = read_workflow("linux-ci.yml")
+    install_step = workflow.partition(
+        "      - name: Install report build prerequisites\n"
+    )[2].partition("\n      - name:")[0]
+
+    assert install_step
+    assert "sudo apt-get update" in install_step
+    for package in REPORT_BUILD_PACKAGES:
+        assert package in install_step
 
 
 def test_scheduled_workflow_contracts() -> None:
