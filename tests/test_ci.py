@@ -64,16 +64,17 @@ def test_linux_ci_contract() -> None:
     assert "if: always()" in workflow
 
 
-def test_linux_ci_installs_report_build_prerequisites() -> None:
+def test_linux_ci_verifies_report_build_prerequisites() -> None:
     workflow = read_workflow("linux-ci.yml")
-    install_step = workflow.partition(
-        "      - name: Install report build prerequisites\n"
+    prerequisite_step = workflow.partition(
+        "      - name: Verify report build prerequisites\n"
     )[2].partition("\n      - name:")[0]
 
-    assert install_step
-    assert "sudo apt-get update" in install_step
+    assert prerequisite_step
+    assert "pkg-config --exists lept tesseract" in prerequisite_step
+    assert "sudo" not in prerequisite_step
     for package in REPORT_BUILD_PACKAGES:
-        assert package in install_step
+        assert package in prerequisite_step
 
 
 def test_scheduled_workflow_contracts() -> None:

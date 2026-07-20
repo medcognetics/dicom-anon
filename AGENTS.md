@@ -95,7 +95,7 @@ make bench
 
 Keep the workload and sample size unchanged when comparing results. Record the baseline, candidate, confidence interval, and decision in `docs/benchmarks.md`.
 
-Native report integration requires the three `DICOM_ANON_REPORT_*` asset paths. Run `make report-integration-coverage`; it combines the self-contained suite with CPU ONNX Runtime, PDFium, OCR, CLI, and rendered-redaction fixtures and enforces the asset-backed coverage floor. Standard Linux CI installs the Tesseract and Leptonica build prerequisites needed by all-features checks. The asset-backed target remains excluded from GitHub Actions until its runner and artifact contracts are approved.
+Native report integration requires the three `DICOM_ANON_REPORT_*` asset paths. Run `make report-integration-coverage`; it combines the self-contained suite with CPU ONNX Runtime, PDFium, OCR, CLI, and rendered-redaction fixtures and enforces the asset-backed coverage floor. Standard Linux CI verifies that its runner has the Tesseract and Leptonica build prerequisites needed by all-features checks. Pre-provision self-hosted runners with those system packages; workflows must not depend on interactive privilege escalation. The asset-backed target remains excluded from GitHub Actions until its runner and artifact contracts are approved.
 
 ## Profile changes
 
