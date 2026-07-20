@@ -1,0 +1,110 @@
+name: Dependency Health
+
+on:
+  schedule:
+    - cron: '37 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  security-audit:
+    name: Dependency / Security audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: "1.97.1"
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
+        with:
+          tool: cargo-audit@0.22.2
+      - name: Install Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          enable-cache: true
+          cache-dependency-glob: tools/ci/uv.lock
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.18.0"
+      - name: Synchronize CI tools
+        run: uv sync --project tools/ci --frozen --python "3.14"
+      - name: Run all security scanners
+        id: audit
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: make audit
+      - name: Upload security reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dependency-security-reports
+          path: target/ci-reports/security
+          if-no-files-found: error
+          retention-days: 7
+      - name: Enforce security policy
+        if: always()
+        env:
+          AUDIT_OUTCOME: ${{ steps.audit.outcome }}
+        run: test "${AUDIT_OUTCOME}" = "success"
+
+  deprecation-report:
+    name: Dependency / Deprecation report
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: "1.97.1"
+      - name: Install Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          enable-cache: true
+          cache-dependency-glob: tools/ci/uv.lock
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.18.0"
+      - name: Synchronize CI tools
+        run: uv sync --project tools/ci --frozen --python "3.14"
+      - name: Generate deprecation reports
+        id: deprecations
+        continue-on-error: true
+        run: make deprecations
+      - name: Upload deprecation reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dependency-deprecation-reports
+          path: target/ci-reports/deprecations
+          if-no-files-found: error
+          retention-days: 7
+      - name: Require a complete report
+        if: always()
+        env:
+          DEPRECATION_OUTCOME: ${{ steps.deprecations.outcome }}
+        run: test "${DEPRECATION_OUTCOME}" = "success"

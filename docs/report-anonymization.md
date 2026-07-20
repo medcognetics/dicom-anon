@@ -202,7 +202,7 @@ The initial package pins these components:
 
 Changing any pin requires CPU and CUDA inference tests, embedded-text and OCR PDF tests, checksum updates, and a review of the installed licenses and notices.
 
-After installing the CPU model and setting `DICOM_ANON_REPORT_MODEL_DIR`, `DICOM_ANON_REPORT_ORT_LIBRARY`, and `DICOM_ANON_REPORT_PDFIUM_LIBRARY`, run `make report-integration` for the asset-backed model, pipe, embedded-text, OCR, and rendered-output fixtures. Run `make report-integration-coverage` to combine those fixtures with the self-contained suite and enforce the 84% native line-coverage floor. The report integration workflow runs that coverage target on pull requests and `master` pushes. Run the CUDA fixture separately on the supported CUDA host:
+After installing the CPU model and setting `DICOM_ANON_REPORT_MODEL_DIR`, `DICOM_ANON_REPORT_ORT_LIBRARY`, and `DICOM_ANON_REPORT_PDFIUM_LIBRARY`, run `make report-integration` for the asset-backed model, pipe, embedded-text, OCR, and rendered-output fixtures. Run `make report-integration-coverage` to combine those fixtures with the self-contained suite and enforce the 84% native line-coverage floor. These asset-backed targets are intentionally excluded from the current GitHub Actions workflows until their runner and artifact contracts are approved. Run the CUDA fixture separately on the supported CUDA host:
 
 ```console
 cargo test -p dicom-anon-report --test model_cuda -- --ignored

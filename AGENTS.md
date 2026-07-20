@@ -23,7 +23,6 @@ This workspace implements deterministic, configurable DICOM metadata de-identifi
 - `report/src/install.rs`: checksum-verified model and native-runtime packaging
 - `report/src/bin/report-anon.rs`: pipe-safe report CLI
 - `report/tests/`: text, model, linkage, PDF, and process-level CLI tests
-- `.github/workflows/report-integration.yml`: cached CPU model, PDFium, OCR, and native integration coverage gate
 - `bindings/python/`: PyO3 API and Python stub
 - `bindings/node/`: N-API API and TypeScript declaration
 - `core/benches/anonymization.rs`: Criterion workloads
@@ -73,10 +72,20 @@ make test
 make coverage
 make docs
 make binding-types
+make test-python
+make test-node
+make test-ci
+make ci
+make ci-minimum
 make audit
+make deprecations
 make check
 make release
 ```
+
+`make ci` is the canonical latest-toolchain gate. `make ci-minimum` checks Rust 1.88, Python 3.10, and Node.js 22 when those runtimes are selected by the caller or CI. `make audit` deliberately returns nonzero for every security finding after writing all reports to `target/ci-reports/security/`; do not suppress the known RustSec warning to make the gate green. `make deprecations` keeps findings informational and fails only when a check is incomplete.
+
+GitHub Actions uses the persistent single-slot `beryl` runner only for trusted repository events. Keep the same-repository pull-request guard, read-only permissions, non-persisted checkout credentials, full-SHA action pins, and the stable `Linux / Required` aggregate check. Keep cross-platform, CUDA, publishing, and report-integration work out of these workflows until their runner and artifact contracts are approved.
 
 Run Criterion before and after any performance change:
 
@@ -86,7 +95,7 @@ make bench
 
 Keep the workload and sample size unchanged when comparing results. Record the baseline, candidate, confidence interval, and decision in `docs/benchmarks.md`.
 
-Native report integration requires the three `DICOM_ANON_REPORT_*` asset paths. Run `make report-integration-coverage`; it combines the self-contained suite with CPU ONNX Runtime, PDFium, OCR, CLI, and rendered-redaction fixtures and enforces the asset-backed coverage floor. The report integration workflow runs this target for pull requests and `master` pushes.
+Native report integration requires the three `DICOM_ANON_REPORT_*` asset paths. Run `make report-integration-coverage`; it combines the self-contained suite with CPU ONNX Runtime, PDFium, OCR, CLI, and rendered-redaction fixtures and enforces the asset-backed coverage floor. This target is intentionally excluded from the current GitHub Actions workflows until its runner and artifact contracts are approved.
 
 ## Profile changes
 

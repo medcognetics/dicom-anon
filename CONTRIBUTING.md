@@ -2,14 +2,16 @@
 
 ## Setup
 
-Install Rust 1.88 or newer, Node.js with npm, and `uv`. The Node development dependencies are pinned in `bindings/node/package-lock.json`; the Makefile runs a pinned `basedpyright` through `uvx`.
+Install Rust 1.88 or newer, Python 3.10 or newer, Node.js 22 or newer with npm, and uv 0.11.29. Python CI tools are pinned in `tools/ci/uv.lock`; Node development dependencies are pinned in `bindings/node/package-lock.json`.
 
-Install the pinned coverage runner before using `make coverage`:
+Install the pinned Rust and workflow tools before using the full gate:
 
 ```console
 cargo install cargo-llvm-cov --version 0.8.7 --locked
-cargo install cargo-audit --version 0.22.1 --locked
+cargo install cargo-audit --version 0.22.2 --locked
+go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 rustup component add llvm-tools-preview
+uv sync --project tools/ci --frozen
 ```
 
 ## Change workflow
@@ -17,9 +19,9 @@ rustup component add llvm-tools-preview
 1. Add or update a test that states the intended behavior.
 2. For a bug, run the focused test and confirm the failure before changing production code.
 3. Make the smallest behavior change that satisfies the test.
-4. Run `make check`.
-5. Run `make coverage` and keep executable-code line coverage above 90%. `profile.rs` is excluded because it is generated normative data with exhaustive table-invariant tests.
-6. Run `make audit` and review warnings as well as vulnerabilities.
+4. Run `make ci`. This runs formatting, linting, documentation, binding type and runtime checks, CI policy tests, and coverage. Keep executable-code line coverage above 90%; `profile.rs` is excluded because it is generated normative data with exhaustive table-invariant tests.
+5. Run `make audit` and inspect every report under `target/ci-reports/security/`. This command intentionally fails for any finding or incomplete scan, including informational RustSec advisories.
+6. Run `make deprecations`. Findings are informational, but incomplete checks fail.
 7. Run `make release` before handoff.
 8. Run `make bench` when a hot path or rule-dispatch structure changes.
 

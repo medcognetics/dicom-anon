@@ -1,5 +1,7 @@
 # dicom-anon
 
+[![Linux CI](https://github.com/TidalPaladin/dicom-anon/actions/workflows/linux-ci.yml/badge.svg?branch=master)](https://github.com/TidalPaladin/dicom-anon/actions/workflows/linux-ci.yml)
+
 `dicom-anon` de-identifies DICOM Part 10 files, plaintext reports, and PDFs. The workspace provides Rust libraries, three Unix-style commands, a Python extension, and a Node.js N-API module. Report filtering runs OpenAI Privacy Filter locally through ONNX Runtime.
 
 The default `dicom-extended` preset implements the metadata actions from the [DICOM PS3.15 2026c Basic Application Level Confidentiality Profile](https://dicom.nema.org/medical/dicom/current/output/chtml/part15/chapter_E.html) with Clean Descriptors, Retain Patient Characteristics, and Retain Longitudinal Temporal Information With Modified Dates. Patient identifiers and UIDs receive keyed deterministic replacements. Dates and times move by patient-specific whole-day and whole-hour offsets. Patient ages from `090Y` through `999Y` are categorized as `090Y`. Study and Series Description are retained only when an exact caller-supplied mapping approves a safe replacement; otherwise they receive a safe dummy. The `dicom` preset applies the Basic Profile without optional columns.
@@ -8,7 +10,7 @@ This software does not inspect pixel data for burned-in text or recognizable fac
 
 ## Install and build
 
-The workspace requires Rust 1.88 or newer. PDF support also requires Tesseract 5, Leptonica, and the development headers needed by the `leptess` crate. On Debian or Ubuntu:
+The workspace requires Rust 1.88 or newer. The Python binding supports Python 3.10 or newer, and the Node.js binding supports Node.js 22 or newer. PDF support also requires Tesseract 5, Leptonica, and the development headers needed by the `leptess` crate. On Debian or Ubuntu:
 
 ```console
 sudo apt-get install libleptonica-dev libtesseract-dev tesseract-ocr-eng
@@ -54,7 +56,16 @@ make check
 
 `make check` also checks the TypeScript declaration and Python stub. It requires Node.js, npm, and `uv` in addition to Rust.
 
-The pull-request report integration workflow installs or restores the pinned CPU bundle and runs real ONNX Runtime, PDFium, OCR, CLI, and rendered-redaction tests. Its combined coverage gate requires 84% line coverage. With an installed bundle and the three `DICOM_ANON_REPORT_*` paths configured, run the same gate locally with `make report-integration-coverage`.
+For the complete CI-equivalent gate, including native binding smoke tests, workflow policy tests, and at least 90% Rust line coverage, install actionlint 1.7.12 and cargo-llvm-cov 0.8.7, then run:
+
+```console
+uv sync --project tools/ci --frozen
+make ci
+```
+
+GitHub Actions runs the latest and minimum supported Linux toolchains on pull requests and `master` pushes using the trusted `beryl` runner. A release-profile build runs nightly at 06:17 UTC. Dependency security and deprecation reports run each Monday at 06:37 UTC on GitHub-hosted Linux. The scheduled security audit reports every scanner result before failing on any finding or incomplete scan.
+
+Asset-backed report integration remains a local gate. After installing the CPU bundle and setting the three `DICOM_ANON_REPORT_*` paths, run `make report-integration-coverage` to exercise real ONNX Runtime, PDFium, OCR, CLI, and rendered-redaction paths and enforce 84% report line coverage.
 
 ## De-identify a file
 
