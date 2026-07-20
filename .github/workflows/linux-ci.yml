@@ -22,6 +22,11 @@ jobs:
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, linux, x64, beryl]
+    container:
+      image: ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -43,16 +48,34 @@ jobs:
             make_target: ci-minimum
             cache_tier: minimum
     steps:
+      - name: Install container prerequisites
+        run: |
+          if ! command -v cc >/dev/null ||
+            ! command -v clang >/dev/null ||
+            ! command -v curl >/dev/null ||
+            ! command -v git >/dev/null ||
+            ! command -v pkg-config >/dev/null ||
+            ! pkg-config --exists lept tesseract; then
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+              build-essential \
+              ca-certificates \
+              clang \
+              curl \
+              git \
+              libclang-dev \
+              libleptonica-dev \
+              libtesseract-dev \
+              pkg-config \
+              tesseract-ocr \
+              tesseract-ocr-eng
+          fi
+          pkg-config --exists lept tesseract
+          tesseract --list-langs | grep --fixed-strings --line-regexp eng
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Verify report build prerequisites
-        run: |
-          if ! pkg-config --exists lept tesseract; then
-            echo "::error::Missing report build prerequisites. On Debian or Ubuntu, install libleptonica-dev libtesseract-dev tesseract-ocr-eng."
-            exit 1
-          fi
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
