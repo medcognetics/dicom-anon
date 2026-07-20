@@ -2,7 +2,11 @@
 
 from datetime import date
 
-from tools.ci.deprecation_report import build_manifest, exact_version, parse_year_month
+from tools.ci.deprecation_report import (
+    build_manifest,
+    exact_version,
+    parse_python_lifecycle_date,
+)
 from tools.ci.security_audit import classify_result
 
 
@@ -23,8 +27,12 @@ def test_exact_version_parsing() -> None:
 
 
 def test_year_month_uses_the_last_day() -> None:
-    assert parse_year_month("2026-10") == date(2026, 10, 31)
-    assert parse_year_month("2028-02") == date(2028, 2, 29)
+    assert parse_python_lifecycle_date("2026-10") == date(2026, 10, 31)
+    assert parse_python_lifecycle_date("2028-02") == date(2028, 2, 29)
+
+
+def test_python_lifecycle_parser_accepts_full_dates() -> None:
+    assert parse_python_lifecycle_date("2026-10-31") == date(2026, 10, 31)
 
 
 def test_deprecation_manifest_records_reproducibility_inputs() -> None:

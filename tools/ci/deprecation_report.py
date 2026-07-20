@@ -240,9 +240,17 @@ def check_python_dependencies() -> tuple[list[Finding], list[str]]:
     return findings, errors
 
 
-def parse_year_month(value: str) -> date:
-    year, month = (int(part) for part in value.split("-", maxsplit=1))
-    return date(year, month, calendar.monthrange(year, month)[1])
+def parse_python_lifecycle_date(value: str) -> date:
+    match = re.fullmatch(r"(\d{4})-(\d{2})(?:-(\d{2}))?", value)
+    if match is None:
+        raise ValueError(f"unsupported Python lifecycle date: {value}")
+    year, month = (int(part) for part in match.group(1, 2))
+    day = (
+        int(match.group(3))
+        if match.group(3) is not None
+        else calendar.monthrange(year, month)[1]
+    )
+    return date(year, month, day)
 
 
 def check_runtime_support() -> tuple[list[Finding], list[str]]:
@@ -313,7 +321,7 @@ def check_runtime_support() -> tuple[list[Finding], list[str]]:
         if len(cells) < 5:
             raise ValueError(f"Python {minimum} lifecycle row is incomplete")
         status = cells[2]
-        end = parse_year_month(cells[4])
+        end = parse_python_lifecycle_date(cells[4])
         days_remaining = (end - today).days
         report["python"] = {
             "claim": requirement,
