@@ -15,6 +15,7 @@ FULL_SHA_PATTERN = re.compile(
 ANY_ACTION_PATTERN = re.compile(r"^\s*uses:\s*[^\s@]+@([^\s#]+)", re.MULTILINE)
 BERYL_RUNNER = "[self-hosted, linux, x64, beryl]"
 NODE_ENGINE = ">=22"
+SETUP_GO_SHA = "4a3601121dd01d1626a1e23e37211e3254c1c06c"
 
 
 def read_workflow(name: str) -> str:
@@ -90,6 +91,19 @@ def test_workflows_are_read_only_and_actions_are_pinned() -> None:
         assert action_references
         assert len(action_references) == len(full_sha_references)
         assert "pull_request_target" not in workflow
+
+
+def test_actionlint_uses_a_supported_pinned_installer() -> None:
+    for workflow_name in ("linux-ci.yml", "nightly.yml"):
+        workflow = read_workflow(workflow_name)
+
+        assert f"actions/setup-go@{SETUP_GO_SHA} # v6.4.0" in workflow
+        assert 'go-version: "1.26.5"' in workflow
+        assert "cache: false" in workflow
+        assert (
+            "go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12" in workflow
+        )
+        assert "tool: actionlint@1.7.12" not in workflow
 
 
 def test_ci_is_linux_only() -> None:
