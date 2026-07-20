@@ -39,6 +39,14 @@ Core logic needs unit tests. File, stream, atomic replacement, and process behav
 
 Tests must not contain real patient data or production keys. Generate synthetic DICOM objects with `dicom-object`; `core/examples/generate_minimal.rs` is a small reference.
 
+On a CUDA 12 host with the pinned model and GPU ONNX Runtime installed, set `DICOM_ANON_REPORT_MODEL_DIR` and `DICOM_ANON_REPORT_CUDA_ORT_LIBRARY`, then run:
+
+```console
+make report-cuda-integration
+```
+
+This target verifies the installed asset manifest, compares CPU and CUDA spans from the same Q4 graph, and exercises the plaintext CLI with `--device cuda`. It does not run the PDF or OCR fixtures.
+
 ## Pull request notes
 
 State the selected DICOM profile and any option changes. Include the commands run and their results. For performance changes, include before and after confidence intervals and say whether the result exceeded observed noise.

@@ -81,11 +81,12 @@ make audit
 make deprecations
 make check
 make release
+make report-cuda-integration
 ```
 
 `make ci` is the canonical latest-toolchain gate. `make ci-minimum` checks Rust 1.88, Python 3.10, and Node.js 22 when those runtimes are selected by the caller or CI. `make audit` deliberately returns nonzero for every security finding after writing all reports to `target/ci-reports/security/`; do not suppress the known RustSec warning to make the gate green. `make deprecations` keeps findings informational and fails only when a check is incomplete.
 
-GitHub Actions uses the persistent single-slot `beryl` runner only for trusted repository events. Keep the same-repository pull-request guard, read-only permissions, non-persisted checkout credentials, full-SHA action pins, and the stable `Linux / Required` aggregate check. Keep cross-platform, CUDA, publishing, and report-integration work out of these workflows until their runner and artifact contracts are approved.
+GitHub Actions uses the persistent single-slot `beryl` runner only for trusted repository events. Keep the same-repository pull-request guard, read-only permissions, non-persisted checkout credentials, full-SHA action pins, and the stable `Linux / Required` aggregate check. Keep cross-platform builds, publishing, and full CPU/PDF/OCR report integration out of these workflows until their runner and artifact contracts are approved. The approved nightly CUDA job runs only after validation and release, requires the `cuda` runner label, and uses the pinned CUDA container and versioned `dicom-anon-report-cuda-assets` volume. GPU preflight, provider dependency or initialization, checksum, semantic parity, and CLI failures must fail the job.
 
 Run Criterion before and after any performance change:
 
@@ -95,7 +96,7 @@ make bench
 
 Keep the workload and sample size unchanged when comparing results. Record the baseline, candidate, confidence interval, and decision in `docs/benchmarks.md`.
 
-Native report integration requires the three `DICOM_ANON_REPORT_*` asset paths. Run `make report-integration-coverage`; it combines the self-contained suite with CPU ONNX Runtime, PDFium, OCR, CLI, and rendered-redaction fixtures and enforces the asset-backed coverage floor. Standard Linux and nightly jobs run in an Ubuntu container pinned by immutable manifest digest. Install missing compiler, Tesseract, and Leptonica prerequisites inside that container without mutating the self-hosted runner. The asset-backed target remains excluded from GitHub Actions until its runner and artifact contracts are approved.
+Full native report integration requires the three `DICOM_ANON_REPORT_*` asset paths. Run `make report-integration-coverage`; it combines the self-contained suite with CPU ONNX Runtime, PDFium, OCR, CLI, and rendered-redaction fixtures and enforces the asset-backed coverage floor. Standard Linux and validation jobs run in an Ubuntu container pinned by immutable manifest digest. Install missing compiler, Tesseract, and Leptonica prerequisites inside that container without mutating the self-hosted runner. The nightly `make report-cuda-integration` target is narrower: it verifies the cached CUDA bundle, compares CPU and CUDA semantic spans, and tests the plaintext CLI without PDF or OCR dependencies. Never delete or replace a failed CUDA cache automatically.
 
 ## Profile changes
 

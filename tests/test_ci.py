@@ -14,9 +14,19 @@ FULL_SHA_PATTERN = re.compile(
 )
 ANY_ACTION_PATTERN = re.compile(r"^\s*uses:\s*[^\s@]+@([^\s#]+)", re.MULTILINE)
 BERYL_RUNNER = "[self-hosted, linux, x64, beryl]"
+CUDA_BERYL_RUNNER = "[self-hosted, linux, x64, beryl, cuda]"
 NODE_ENGINE = ">=22"
 SETUP_GO_SHA = "4a3601121dd01d1626a1e23e37211e3254c1c06c"
 CI_CONTAINER_IMAGE = "ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90"
+CUDA_CONTAINER_IMAGE = (
+    "nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04@"
+    "sha256:2fcc4280646484290cc50dce5e65f388dd04352b07cbe89a635703bd1f9aedb6"
+)
+CUDA_ASSET_VOLUME = "dicom-anon-report-cuda-assets:/opt/dicom-anon-report-assets"
+CUDA_BUNDLE_DIRECTORY = (
+    "/opt/dicom-anon-report-assets/"
+    "privacy-filter-7ffa9a043d54d1be65afb281eddf0ffbe629385b-ort-1.27.1-cuda12"
+)
 CI_CONTAINER_PACKAGES = (
     "build-essential",
     "ca-certificates",
@@ -116,6 +126,44 @@ def test_scheduled_workflow_contracts() -> None:
     assert "GH_TOKEN: ${{ github.token }}" in audit_step
 
 
+def test_nightly_cuda_contract() -> None:
+    nightly = read_workflow("nightly.yml")
+    cuda_job = nightly.partition("  cuda-report:\n")[2]
+    actionlint = (REPOSITORY_ROOT / ".github" / "actionlint.yaml").read_text(
+        encoding="utf-8"
+    )
+    makefile = (REPOSITORY_ROOT / "Makefile").read_text(encoding="utf-8")
+
+    assert cuda_job
+    assert "name: Nightly / CUDA report integration" in cuda_job
+    assert "needs: validate-release" in cuda_job
+    assert f"runs-on: {CUDA_BERYL_RUNNER}" in cuda_job
+    assert f"image: {CUDA_CONTAINER_IMAGE}" in cuda_job
+    assert "options: --gpus all" in cuda_job
+    assert f"- {CUDA_ASSET_VOLUME}" in cuda_job
+    assert 'NVIDIA_VISIBLE_DEVICES: "0"' in cuda_job
+    assert "NVIDIA_DRIVER_CAPABILITIES: compute,utility" in cuda_job
+    assert 'CUDA_VISIBLE_DEVICES: "0"' in cuda_job
+    assert f"DICOM_ANON_REPORT_MODEL_DIR: {CUDA_BUNDLE_DIRECTORY}" in cuda_job
+    assert "DICOM_ANON_REPORT_CUDA_ORT_LIBRARY:" in cuda_job
+    assert "nightly-linux-x64-cuda12-rust-1.97.1-debug" in cuda_job
+    assert "timeout-minutes: 45" in cuda_job
+    assert (
+        "nvidia-smi --query-gpu=name,driver_version,memory.total,compute_cap"
+        in cuda_job
+    )
+    assert "model install --backend cuda12 --without-pdfium" in cuda_job
+    assert 'if [[ ! -d "${DICOM_ANON_REPORT_MODEL_DIR}" ]]' in cuda_job
+    assert "make report-cuda-integration" in cuda_job
+    assert "upload-artifact" not in cuda_job
+    assert "- cuda" in actionlint
+    assert "report-cuda-integration:" in makefile
+    assert "DICOM_ANON_REPORT_MODEL_DIR" in makefile
+    assert "DICOM_ANON_REPORT_CUDA_ORT_LIBRARY" in makefile
+    assert "--no-default-features --test model_cuda" in makefile
+    assert "--ignored --test-threads=1" in makefile
+
+
 def test_workflows_are_read_only_and_actions_are_pinned() -> None:
     for workflow_path in WORKFLOW_DIRECTORY.glob("*.yml"):
         workflow = workflow_path.read_text(encoding="utf-8")
@@ -141,13 +189,16 @@ def test_actionlint_uses_a_supported_pinned_installer() -> None:
         assert "tool: actionlint@1.7.12" not in workflow
 
 
-def test_ci_is_linux_only() -> None:
+def test_ci_omits_cross_platform_jobs_and_scopes_cuda_to_nightly() -> None:
     workflow_text = "\n".join(
         path.read_text(encoding="utf-8") for path in WORKFLOW_DIRECTORY.glob("*.yml")
     ).lower()
 
-    for unsupported_runner in ("windows-", "macos-", "cuda", "arm64"):
+    for unsupported_runner in ("windows-", "macos-", "arm64"):
         assert unsupported_runner not in workflow_text
+    assert "cuda" not in read_workflow("linux-ci.yml").lower()
+    assert "cuda" not in read_workflow("dependency-health.yml").lower()
+    assert "cuda" in read_workflow("nightly.yml").lower()
 
 
 def test_node_support_floor_is_consistent() -> None:

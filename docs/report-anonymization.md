@@ -202,8 +202,14 @@ The initial package pins these components:
 
 Changing any pin requires CPU and CUDA inference tests, embedded-text and OCR PDF tests, checksum updates, and a review of the installed licenses and notices.
 
-After installing the CPU model and setting `DICOM_ANON_REPORT_MODEL_DIR`, `DICOM_ANON_REPORT_ORT_LIBRARY`, and `DICOM_ANON_REPORT_PDFIUM_LIBRARY`, run `make report-integration` for the asset-backed model, pipe, embedded-text, OCR, and rendered-output fixtures. Run `make report-integration-coverage` to combine those fixtures with the self-contained suite and enforce the 84% native line-coverage floor. These asset-backed targets are intentionally excluded from the current GitHub Actions workflows until their runner and artifact contracts are approved. Run the CUDA fixture separately on the supported CUDA host:
+After installing the CPU model and setting `DICOM_ANON_REPORT_MODEL_DIR`, `DICOM_ANON_REPORT_ORT_LIBRARY`, and `DICOM_ANON_REPORT_PDFIUM_LIBRARY`, run `make report-integration` for the asset-backed model, pipe, embedded-text, OCR, and rendered-output fixtures. Run `make report-integration-coverage` to combine those fixtures with the self-contained suite and enforce the 84% native line-coverage floor. These full CPU, PDF, and OCR targets remain local because their runner and artifact contracts are not part of GitHub Actions.
+
+The nightly workflow runs focused CUDA 12 validation after the normal validation and release job. It uses a pinned CUDA 12.4 and cuDNN 9 container on the trusted `beryl` runner, installs the pinned model and GPU ONNX Runtime into the `dicom-anon-report-cuda-assets` Docker volume on first use, and reuses the versioned bundle on later runs. Every run verifies the bundle manifest and file checksums, compares CPU and CUDA spans from the same Q4 graph, and exercises the plaintext CLI with `--device cuda`. The workflow fails on missing GPU access, an incompatible driver, unresolved provider libraries, cache corruption, CUDA initialization failure, semantic differences, or CLI filtering failure.
+
+Run the same focused gate on a configured CUDA 12 host by setting `DICOM_ANON_REPORT_MODEL_DIR` and `DICOM_ANON_REPORT_CUDA_ORT_LIBRARY`:
 
 ```console
-cargo test -p dicom-anon-report --test model_cuda -- --ignored
+make report-cuda-integration
 ```
+
+The gate does not delete a corrupt cache. Inspect the failed bundle, remove only its versioned directory or the dedicated Docker volume, and rerun the workflow to reinstall it atomically.

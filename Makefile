@@ -1,6 +1,6 @@
 .PHONY: check ci ci-minimum format lint python-quality test coverage docs node-dependencies \
-	binding-types test-python test-node test-ci audit deprecations release bench \
-	report-integration report-integration-coverage
+		binding-types test-python test-node test-ci audit deprecations release bench \
+		report-integration report-integration-coverage report-cuda-integration
 
 CI_UV_RUN = uv run --project tools/ci --frozen
 ACTIONLINT ?= actionlint
@@ -87,3 +87,7 @@ report-integration-coverage:
 	cargo llvm-cov --locked --no-clean -p dicom-anon-report --test pdf -- --ignored --test-threads=1
 	cargo llvm-cov --locked --no-clean -p dicom-anon-report --lib -- --ignored --test-threads=1
 	cargo llvm-cov report -p dicom-anon-report --fail-under-lines $(REPORT_INTEGRATION_MIN_LINE_COVERAGE)
+
+report-cuda-integration:
+	@test -d "$$DICOM_ANON_REPORT_MODEL_DIR" -a -f "$$DICOM_ANON_REPORT_CUDA_ORT_LIBRARY" || (echo "CUDA report integration asset paths are not configured" >&2; exit 2)
+	cargo test --locked -p dicom-anon-report --no-default-features --test model_cuda -- --ignored --test-threads=1
