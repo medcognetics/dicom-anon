@@ -1,0 +1,115 @@
+name: Linux CI
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  supported-versions:
+    name: Linux / ${{ matrix.name }}
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, beryl]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - name: Latest
+            rust: "1.97.1"
+            python: "3.14"
+            node: "24.18.0"
+            rust_components: rustfmt, clippy, llvm-tools-preview
+            make_target: ci
+            cache_tier: latest
+          - name: Minimum
+            rust: "1.88.0"
+            python: "3.10"
+            node: "22.23.1"
+            rust_components: rustfmt, clippy
+            make_target: ci-minimum
+            cache_tier: minimum
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: ${{ matrix.rust_components }}
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: linux-x64-${{ matrix.cache_tier }}-rust-${{ matrix.rust }}-debug
+          cache-on-failure: false
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - name: Install Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          enable-cache: true
+          cache-dependency-glob: tools/ci/uv.lock
+          save-cache: ${{ github.event_name != 'pull_request' }}
+      - name: Install Node.js without a writable cache
+        if: github.event_name == 'pull_request'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - name: Install Node.js with a trusted cache
+        if: github.event_name != 'pull_request'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: bindings/node/package-lock.json
+      - name: Install actionlint
+        if: matrix.cache_tier == 'latest'
+        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
+        with:
+          tool: actionlint@1.7.12
+      - name: Install cargo-llvm-cov
+        if: matrix.cache_tier == 'latest'
+        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
+        with:
+          tool: cargo-llvm-cov@0.8.7
+      - name: Synchronize CI tools
+        run: uv sync --project tools/ci --frozen --python "${{ matrix.python }}"
+      - name: Run ${{ matrix.name }} checks
+        run: make ${{ matrix.make_target }}
+
+  required:
+    name: Linux / Required
+    if: always()
+    needs: supported-versions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require all supported versions
+        env:
+          SUPPORTED_VERSIONS_RESULT: ${{ needs.supported-versions.result }}
+        run: |
+          if [[ "${SUPPORTED_VERSIONS_RESULT}" != "success" ]]; then
+            echo "Latest and minimum Linux checks must pass on a trusted repository branch."
+            echo "Self-hosted CI intentionally does not execute code from fork pull requests."
+            exit 1
+          fi

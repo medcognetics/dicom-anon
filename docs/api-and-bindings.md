@@ -88,10 +88,9 @@ Use `validate_object_with_options` for configured candidate-only validation. Use
 Build and install the extension with maturin:
 
 ```console
-cd bindings/python
-uv venv
-source .venv/bin/activate
-uvx maturin develop --release
+uv sync --project tools/ci --frozen
+uv run --project tools/ci --frozen \
+  maturin develop --manifest-path bindings/python/Cargo.toml --release
 ```
 
 The binding is byte-oriented:
@@ -133,6 +132,8 @@ The configuration JSON above is the explicit form of the `dicom-extended` preset
 
 ## Node.js and TypeScript
 
+The Node.js binding requires Node.js 22 or newer.
+
 Build the platform module with the pinned N-API CLI:
 
 ```console
@@ -164,4 +165,4 @@ const exact = validateWithSource(source, result.data, key);
 
 ## Binding consistency
 
-Rust performs parsing, transformation, validation, and report serialization for every language. The wrappers do not contain independent tag policy. Runtime smoke tests load both native modules, process the same Part 10 fixture twice, compare the resulting bytes, and validate the result.
+Rust performs parsing, transformation, validation, and report serialization for every language. The wrappers do not contain independent tag policy. Runtime smoke tests load both native modules and verify that invalid Part 10 bytes return the documented structured language error instead of crashing or bypassing Rust parsing.
