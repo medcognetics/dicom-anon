@@ -1,0 +1,42 @@
+[package]
+name = "dicom-anon-parquet"
+description = "Streaming metadata-only DICOM to sharded Parquet conversion"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "dicom_anon_parquet"
+
+[dependencies]
+arrow.workspace = true
+clap.workspace = true
+dicom-core.workspace = true
+dicom-dictionary-std.workspace = true
+dicom-json.workspace = true
+dicom-object.workspace = true
+dicom-parser.workspace = true
+dicom-transfer-syntax-registry.workspace = true
+indicatif.workspace = true
+parquet.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+xxhash-rust.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+dicom-test-files = { version = "=0.3.1", features = ["zstd"] }
+
+[[bin]]
+name = "dicom-to-parquet"
+path = "src/bin/dicom-to-parquet.rs"
+
+[[bench]]
+name = "pipeline"
+harness = false

@@ -6,6 +6,7 @@ CI_UV_RUN = uv run --project tools/ci --frozen
 ACTIONLINT ?= actionlint
 
 CORE_MIN_LINE_COVERAGE := 90
+PARQUET_MIN_LINE_COVERAGE := 90
 # Native model, OCR, and PDFium paths use the asset-backed report-integration target. This floor
 # covers the self-contained report suite, including model decoding and PDF geometry seams.
 REPORT_MIN_LINE_COVERAGE := 67
@@ -35,6 +36,7 @@ test:
 # profile.rs is generated normative data with exhaustive table-invariant tests.
 coverage:
 	cargo llvm-cov --locked -p dicom-anon --all-targets --ignore-filename-regex 'profile.rs' --fail-under-lines $(CORE_MIN_LINE_COVERAGE)
+	cargo llvm-cov --locked -p dicom-anon-parquet --all-targets --fail-under-lines $(PARQUET_MIN_LINE_COVERAGE)
 	cargo llvm-cov --locked -p dicom-anon-report --all-targets --fail-under-lines $(REPORT_MIN_LINE_COVERAGE)
 
 docs:
@@ -70,6 +72,7 @@ release:
 
 bench:
 	cargo bench --locked -p dicom-anon --bench anonymization -- --sample-size 100
+	cargo bench --locked -p dicom-anon-parquet --bench pipeline
 
 report-integration:
 	@test -d "$$DICOM_ANON_REPORT_MODEL_DIR" -a -f "$$DICOM_ANON_REPORT_ORT_LIBRARY" -a -f "$$DICOM_ANON_REPORT_PDFIUM_LIBRARY" || (echo "report integration asset paths are not configured" >&2; exit 2)

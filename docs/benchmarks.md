@@ -1,5 +1,28 @@
 # Benchmark results
 
+## One-read DICOM-to-Parquet pipeline
+
+The Parquet harness compares one lazy parse with an equivalent two-read reference that separately materializes schema and row metadata. Native and encapsulated fixtures run with Pixel Data hashing both disabled and enabled. A second group converts eight native DICOM copies through discovery, parallel extraction, compact staging, Arrow conversion, Zstandard compression, and atomic shard publication.
+
+```console
+cargo bench -p dicom-anon-parquet --bench pipeline
+```
+
+Criterion uses 20 samples, a 3-second warm-up, and a 10-second measurement period. Measurements were taken on July 24, 2026, on Linux 7.0.10 with Rust 1.92.0 and an AMD Ryzen Threadripper 3960X. The native fixture is 31,300 bytes and the encapsulated fixture is 118,986 bytes. The intervals below are Criterion 95% confidence intervals for the mean.
+
+| Extraction workload | Two-read reference | One-read pipeline | Midpoint change | Decision |
+|---|---:|---:|---:|---|
+| Native, hash off | 69.454 to 70.152 µs | 52.217 to 52.511 µs | 25.0% faster | Ship |
+| Native, hash on | 76.188 to 76.551 µs | 54.611 to 54.770 µs | 28.4% faster | Ship |
+| Encapsulated, hash off | 205.835 to 206.666 µs | 154.829 to 155.185 µs | 24.9% faster | Ship |
+| Encapsulated, hash on | 234.676 to 235.895 µs | 161.594 to 161.939 µs | 31.2% faster | Ship |
+
+The eight-file end-to-end workload measured 15.431 to 15.527 ms with hashing disabled and 13.571 to 14.856 ms with hashing enabled. The overlapping sources of filesystem and temporary-output variance make the relative ordering of those two modes unsuitable as a hashing-cost claim. They serve as absolute regression budgets for the complete path.
+
+Decision: ship the one-read pipeline. It improves every equivalent extraction comparison and avoids reopening source DICOMs for schema inference. With hashing disabled, the extractor reports zero hashed pixel bytes and skips Pixel Data through the lazy reader. With hashing enabled, Pixel Data is streamed through XXH3 without being retained. Network operations are not applicable.
+
+A release-process check used one synthetic 16,777,824-byte Part 10 file with 16 MiB of native Pixel Data. Hash-off conversion completed in 0.02 seconds with 13,388 KiB peak resident memory; hash-on completed in 0.01 seconds with 12,520 KiB. The measurements ran against a warm page cache and are snapshots, not statistical timing comparisons. The respective compressed Parquet files were 8,143 and 8,521 bytes. Peak resident memory stayed below the Pixel Data size in both modes, consistent with skipping or streaming the value instead of retaining it.
+
 ## Target and method
 
 The optimization target is confidentiality-profile rule dispatch. It runs once for every data element and again for elements in nested sequence items. The harness also measures complete in-memory anonymization, parse/anonymize/write, and validation on an object with 1 MiB of native Pixel Data.
