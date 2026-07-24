@@ -167,6 +167,13 @@ Each source DICOM is parsed once. Metadata rows are staged in a compact unlinked
 
 Pixel Data is never stored in the output. By default its value is skipped through the lazy parser without being loaded. `--hash` streams Pixel Data through the baseline-compatible XXH3-64 calculation and adds `PixelDataHash` or `pixel_data_hash`, depending on the selected naming convention.
 
+Two intended uses are:
+
+- Store original DICOM metadata in encrypted, access-controlled storage. Enable `--hash` when the retained metadata may need to be reconnected to a separately stored DICOM or pixel object that uses the same Pixel Data hash contract.
+- Produce sharded Parquet for ingestion into a database or analytics system. Use `--column-naming snake-case` for systems that require names such as `sop_instance_uid`, or keep DICOM aliases with `--column-naming dicom`.
+
+Treat the Pixel Data hash as a linkage aid, not as an authoritative identifier or security control. XXH3-64 is non-cryptographic, identical Pixel Data values have the same hash, and changes to the pixel representation can change the hash. Keep DICOM UIDs or a separate controlled manifest when one-to-one linkage is required.
+
 The output contains source DICOM metadata and can contain protected health information. This command does not de-identify its input. Apply and validate the required de-identification policy before moving output outside its controlled environment.
 
 ## Filter plaintext and PDF reports
