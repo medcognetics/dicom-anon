@@ -248,16 +248,14 @@ fn rollback_shards(paths: &[PathBuf]) -> Option<(PathBuf, std::io::Error)> {
 }
 
 pub(crate) fn shard_path(output_path: &Path, index: usize) -> PathBuf {
-    output_path
-        .with_extension("")
-        .with_extension(format!("{index:05}.parquet"))
+    output_path.with_extension(format!("{index:05}.parquet"))
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{persist_shards, write_shards, PendingShard, WriteOptions};
+    use super::{persist_shards, shard_path, write_shards, PendingShard, WriteOptions};
     use crate::dicom::MetadataRow;
     use crate::error::Error;
     use crate::naming::ColumnNaming;
@@ -271,6 +269,14 @@ mod tests {
             ]),
             ..MetadataRow::default()
         }
+    }
+
+    #[test]
+    fn shard_paths_preserve_dotted_base_names() {
+        assert_eq!(
+            shard_path(std::path::Path::new("study.v1.parquet"), 0),
+            std::path::Path::new("study.v1.00000.parquet")
+        );
     }
 
     #[test]
