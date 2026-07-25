@@ -2,7 +2,7 @@
 
 [![Linux CI](https://github.com/TidalPaladin/dicom-anon/actions/workflows/linux-ci.yml/badge.svg?branch=master)](https://github.com/TidalPaladin/dicom-anon/actions/workflows/linux-ci.yml)
 
-`dicom-anon` de-identifies DICOM Part 10 files, plaintext reports, and PDFs. The workspace provides Rust libraries, three Unix-style commands, a Python extension, and a Node.js N-API module. Report filtering runs OpenAI Privacy Filter locally through ONNX Runtime.
+`dicom-anon` de-identifies DICOM Part 10 files, plaintext reports, and PDFs. It can also scan DICOM metadata directly into compressed Parquet shards. The workspace provides Rust libraries, four Unix-style commands, a Python extension, and a Node.js N-API module. Report filtering runs OpenAI Privacy Filter locally through ONNX Runtime.
 
 The default `dicom-extended` preset implements the metadata actions from the [DICOM PS3.15 2026c Basic Application Level Confidentiality Profile](https://dicom.nema.org/medical/dicom/current/output/chtml/part15/chapter_E.html) with Clean Descriptors, Retain Patient Characteristics, and Retain Longitudinal Temporal Information With Modified Dates. Patient identifiers and UIDs receive keyed deterministic replacements. Dates and times move by patient-specific whole-day and whole-hour offsets. Patient ages from `090Y` through `999Y` are categorized as `090Y`. Study and Series Description are retained only when an exact caller-supplied mapping approves a safe replacement; otherwise they receive a safe dummy. The `dicom` preset applies the Basic Profile without optional columns.
 
@@ -26,10 +26,11 @@ For a plaintext-only binary without Tesseract, Leptonica, or PDFium support:
 cargo build -p dicom-anon-report --no-default-features --release
 ```
 
-The three commands are written to `target/release/`:
+The four commands are written to `target/release/`:
 
 ```text
 dicom-anonymize
+dicom-to-parquet
 dicom-validate
 report-anon
 ```
@@ -151,6 +152,30 @@ target/release/dicom-validate output.dcm \
   --key-file deidentification.key
 ```
 
+## Convert DICOM metadata to Parquet
+
+`dicom-to-parquet` recursively scans a directory and writes compressed shards such as `output.00000.parquet`. It accepts `.dcm` and `.dicom` filenames without opening them during discovery, rejects other named extensions, and checks extensionless files for the Part 10 `DICM` prefix at byte offset 128.
+
+```console
+target/release/dicom-to-parquet input-directory output.parquet \
+  --column-naming snake-case \
+  --shard-size 128 \
+  --compression-level 6
+```
+
+Each source DICOM is parsed once. Metadata rows are staged in a compact unlinked temporary file while the union schema is collected, then reread to form Arrow batches. Source DICOMs are not reopened for schema inference. All Parquet columns use UTF-8 strings, and SOP Instance UID and Study Instance UID are required.
+
+Pixel Data is never stored in the output. By default its value is skipped through the lazy parser without being loaded. `--hash` streams Pixel Data through the baseline-compatible XXH3-64 calculation and adds `PixelDataHash` or `pixel_data_hash`, depending on the selected naming convention.
+
+Two intended uses are:
+
+- Store original DICOM metadata in encrypted, access-controlled storage. Enable `--hash` when the retained metadata may need to be reconnected to a separately stored DICOM or pixel object that uses the same Pixel Data hash contract.
+- Produce sharded Parquet for ingestion into a database or analytics system. Use `--column-naming snake-case` for systems that require names such as `sop_instance_uid`, or keep DICOM aliases with `--column-naming dicom`.
+
+Treat the Pixel Data hash as a linkage aid, not as an authoritative identifier or security control. XXH3-64 is non-cryptographic, identical Pixel Data values have the same hash, and changes to the pixel representation can change the hash. Keep DICOM UIDs or a separate controlled manifest when one-to-one linkage is required.
+
+The output contains source DICOM metadata and can contain protected health information. This command does not de-identify its input. Apply and validate the required de-identification policy before moving output outside its controlled environment.
+
 ## Filter plaintext and PDF reports
 
 Plaintext works as a Unix filter. Sanitized data is the only stdout content; progress and errors use stderr.
@@ -205,6 +230,7 @@ The public API also supports readers, writers, parsed `dicom-rs` objects, and va
 |---|---|
 | `core/` | Rust library, commands, tests, examples, and Criterion benchmarks |
 | `report/` | Rust Privacy Filter runtime, plaintext/PDF anonymization, DICOM linkage, installer, and CLI |
+| `parquet/` | One-read DICOM metadata extraction, compressed sharded Parquet writer, CLI, tests, and benchmarks |
 | `bindings/python/` | PyO3 extension and Python type stub |
 | `bindings/node/` | N-API module and TypeScript declaration |
 | `docs/` | CLI, conformance, security, API, and benchmark documentation |

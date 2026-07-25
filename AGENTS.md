@@ -23,6 +23,12 @@ This workspace implements deterministic, configurable DICOM metadata de-identifi
 - `report/src/install.rs`: checksum-verified model and native-runtime packaging
 - `report/src/bin/report-anon.rs`: pipe-safe report CLI
 - `report/tests/`: text, model, linkage, PDF, and process-level CLI tests
+- `parquet/src/dicom.rs`: one-read lazy metadata extraction and streaming Pixel Data hashing
+- `parquet/src/pipeline.rs`: parallel extraction, bounded staging, and conversion orchestration
+- `parquet/src/writer.rs`: Arrow batches, Zstandard compression, and atomic Parquet shards
+- `parquet/src/bin/dicom-to-parquet.rs`: directory-to-Parquet CLI
+- `parquet/tests/`: baseline compatibility, filesystem, Parquet, and process-level CLI tests
+- `parquet/benches/pipeline.rs`: one-read comparison and end-to-end Criterion workloads
 - `bindings/python/`: PyO3 API and Python stub
 - `bindings/node/`: N-API API and TypeScript declaration
 - `core/benches/anonymization.rs`: Criterion workloads
@@ -40,6 +46,10 @@ This workspace implements deterministic, configurable DICOM metadata de-identifi
 - Replace File Meta Information instead of copying source AE titles or private information.
 - Fail closed on invalid dates, missing patient scope, unsupported DICOM input, and already de-identified input unless the caller opts in.
 - Treat pixel data as unassessed. Do not claim a pixel-cleaning option without an implemented and tested pixel inspection path.
+- Keep Parquet output metadata-only. Never add Pixel Data to the schema or staged rows.
+- When Parquet pixel hashing is disabled, skip Pixel Data through the lazy parser without loading its value. When enabled, stream it through the baseline-compatible XXH3-64 calculation without retaining it.
+- Parse each Parquet input DICOM once. Schema discovery may reread the compact unlinked staging file, but must not reopen source DICOMs.
+- Reject named files without a `.dcm` or `.dicom` extension before opening them. Check extensionless files for `DICM` at byte offset 128.
 - Keep anonymization deterministic. Do not add timestamps, random UIDs, random date offsets, or nondeterministic report ordering.
 - Keep the patient-scoped time offset stable and apply TM midnight rollover to its known paired DA attribute.
 - Never include originals, key material, patient scope, UID-map contents, or identifying mismatch values in validation reports or logs.

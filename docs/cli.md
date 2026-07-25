@@ -1,5 +1,41 @@
 # CLI contract
 
+## `dicom-to-parquet`
+
+```text
+dicom-to-parquet [OPTIONS] SOURCE_DIR OUTPUT_PATH
+```
+
+The command recursively discovers regular files under `SOURCE_DIR`. A case-insensitive `.dcm` or `.dicom` extension makes a file a candidate without an open during discovery. Files with another named extension are rejected without opening. An extensionless file is opened only far enough to verify `DICM` at byte offset 128. Symbolic links are not followed.
+
+`OUTPUT_PATH` is a base name. For example, `data.parquet` produces `data.00000.parquet` and, when needed, later numbered shards. Shards use a uniform all-UTF-8 schema and Zstandard compression. `--shard-size MIB` defaults to 128 and is an approximate compressed-size boundary applied between Arrow record batches. `--compression-level LEVEL` accepts Zstandard levels 1 through 22 and defaults to 6. Existing target shards are never overwritten.
+
+Each DICOM is parsed once. File Meta Information and data-set metadata are staged in a compact unlinked temporary file while the union schema is collected; the staging file, not the source DICOM, is reread to build Arrow batches. Private elements and unknown dictionary aliases are omitted at every nesting level. Sequences retain the baseline representation as a JSON array whose entries are DICOM JSON strings. SOP Instance UID and Study Instance UID must be non-empty. Pixel Data is never included in Parquet.
+
+Pixel hashing is disabled by default. The lazy parser skips the value without loading it while continuing to parse attributes after Pixel Data. `--hash` streams native values through XXH3-64 with seed 0. Encapsulated values exclude the Basic Offset Table and use the wrapping sum of each fragment's seed-0 XXH3-64 hash. This matches the baseline `dicom-structs` tool. The hash is written as an unsigned decimal string.
+
+### Intended workflows
+
+For secure metadata retention, write the Parquet shards to encrypted, access-controlled storage and enable `--hash`. An exact hash match can later reconnect the retained original metadata to a separately stored DICOM or pixel object when both use this command's Pixel Data hash contract. The Parquet output can contain protected health information and must remain inside the controlled storage boundary.
+
+For database ingestion, use the shards as a uniform UTF-8 import source. `--column-naming snake-case` produces names suited to databases that require identifiers such as `sop_instance_uid`; `--column-naming dicom` preserves standard aliases such as `SOPInstanceUID`. The naming policy changes column names only. It does not de-identify values.
+
+The Pixel Data hash is a linkage aid, not an authoritative identifier or security control. XXH3-64 is non-cryptographic and 64-bit. Files with identical Pixel Data values have the same hash, while transcoding, refragmentation, or pixel edits can produce a different hash. Retain DICOM UIDs or a separate controlled manifest when the workflow requires unambiguous one-to-one linkage.
+
+`--column-naming dicom` preserves DICOM aliases such as `SOPInstanceUID`. `--column-naming snake-case` converts them to names such as `sop_instance_uid`; `-s` and `--snake-case` are compatibility aliases. Naming is a selectable policy so future database-specific conventions can be added without changing extraction behavior.
+
+Repeat `--tag TAG=VALUE` to set a standard DICOM attribute to a constant after extraction. `TAG` is a standard dictionary keyword such as `Modality`; Pixel Data cannot be overridden. `--sort inode` is the default and favors local filesystem locality; `path` gives deterministic lexical order; `none` retains traversal order.
+
+Invalid candidates are reported on stderr. The default best-effort mode converts valid files and returns status 1 if any candidate failed. `--strict` stops at the first failed candidate and publishes no shards. Diagnostics retain at most 20 failure samples.
+
+`--format text` prints the status and summary to stdout. `--format json` emits one pretty-printed JSON document and disables color and automatic progress. `--progress auto|always|never` controls the bounded processing indicator on stderr; auto mode requires a terminal stderr and text output. `--quiet` prints only status and counts and disables progress and failure details. `--verbose` adds conversion configuration and the number of pixel bytes streamed for hashing. `--color auto|always|never` affects text output and diagnostics; `--no-color` takes precedence.
+
+Exit status:
+
+- `0`: every discovered candidate was converted and all shards were published;
+- `1`: best-effort conversion published valid rows, but one or more candidates failed;
+- `2`: invalid arguments, discovery failure, strict-mode DICOM failure, no usable input, staging failure, or output failure.
+
 ## `dicom-anonymize`
 
 ```text

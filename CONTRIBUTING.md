@@ -19,11 +19,11 @@ uv sync --project tools/ci --frozen
 1. Add or update a test that states the intended behavior.
 2. For a bug, run the focused test and confirm the failure before changing production code.
 3. Make the smallest behavior change that satisfies the test.
-4. Run `make ci`. This runs formatting, linting, documentation, binding type and runtime checks, CI policy tests, and coverage. Keep executable-code line coverage above 90%; `profile.rs` is excluded because it is generated normative data with exhaustive table-invariant tests.
+4. Run `make ci`. This runs formatting, linting, documentation, binding type and runtime checks, CI policy tests, and coverage. Keep executable-code line coverage above 90% in the core and Parquet crates; `profile.rs` is excluded because it is generated normative data with exhaustive table-invariant tests.
 5. Run `make audit` and inspect every report under `target/ci-reports/security/`. This command intentionally fails for any finding or incomplete scan, including informational RustSec advisories.
 6. Run `make deprecations`. Findings are informational, but incomplete checks fail.
 7. Run `make release` before handoff.
-8. Run `make bench` when a hot path or rule-dispatch structure changes.
+8. Run `make bench` when a hot path, rule-dispatch structure, DICOM extraction path, or Parquet writer changes.
 
 Changes to profile actions need a DICOM PS3.15 edition and table citation in the pull request description. Regenerate the frozen Table E.1-1 matrix and safe-private registry with:
 
@@ -35,7 +35,7 @@ The generator refuses to run against an edition other than 2026c. Review the gen
 
 ## Test expectations
 
-Core logic needs unit tests. File, stream, atomic replacement, and process behavior need integration tests. Cover failure paths such as invalid DICOM input, invalid dates, missing patient scope, short keys, nested private tags, repeated anonymization, and non-conformant validation output.
+Core logic needs unit tests. File, stream, atomic replacement, and process behavior need integration tests. Cover failure paths such as invalid DICOM input, invalid dates, missing patient scope, short keys, nested private tags, repeated anonymization, non-conformant validation output, extensionless discovery, shard collisions, and partial best-effort conversion.
 
 Tests must not contain real patient data or production keys. Generate synthetic DICOM objects with `dicom-object`; `core/examples/generate_minimal.rs` is a small reference.
 
