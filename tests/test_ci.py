@@ -40,6 +40,14 @@ CI_CONTAINER_PACKAGES = (
     "tesseract-ocr",
     "tesseract-ocr-eng",
 )
+DEPRECATION_NATIVE_PACKAGES = (
+    "clang",
+    "libclang-dev",
+    "libleptonica-dev",
+    "libtesseract-dev",
+    "pkg-config",
+)
+ZIZMOR_VERSION = "1.29.0"
 
 
 def read_workflow(name: str) -> str:
@@ -124,6 +132,33 @@ def test_scheduled_workflow_contracts() -> None:
     assert "timeout-minutes: 20" in dependency_health
     assert "timeout-minutes: 30" in dependency_health
     assert "GH_TOKEN: ${{ github.token }}" in audit_step
+
+
+def test_deprecation_job_installs_native_build_dependencies() -> None:
+    dependency_health = read_workflow("dependency-health.yml")
+    deprecation_job = dependency_health.partition("  deprecation-report:\n")[2]
+    prerequisite_step = deprecation_job.partition(
+        "      - name: Install native build dependencies\n"
+    )[2].partition("\n      - name:")[0]
+
+    assert prerequisite_step
+    assert "apt-get update" in prerequisite_step
+    assert "pkg-config --exists lept tesseract" in prerequisite_step
+    for package in DEPRECATION_NATIVE_PACKAGES:
+        assert re.search(
+            rf"^[ \t]+{re.escape(package)}(?:[ \t]+\\)?[ \t]*$",
+            prerequisite_step,
+            re.MULTILINE,
+        )
+
+
+def test_zizmor_uses_the_non_vulnerable_pin() -> None:
+    ci_manifest = (REPOSITORY_ROOT / "tools" / "ci" / "pyproject.toml").read_text(
+        encoding="utf-8"
+    )
+
+    assert f'"zizmor=={ZIZMOR_VERSION}",' in ci_manifest
+    assert '"zizmor==1.27.0",' not in ci_manifest
 
 
 def test_nightly_cuda_contract() -> None:

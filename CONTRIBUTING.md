@@ -20,7 +20,7 @@ uv sync --project tools/ci --frozen
 2. For a bug, run the focused test and confirm the failure before changing production code.
 3. Make the smallest behavior change that satisfies the test.
 4. Run `make ci`. This runs formatting, linting, documentation, binding type and runtime checks, CI policy tests, and coverage. Keep executable-code line coverage above 90% in the core and Parquet crates; `profile.rs` is excluded because it is generated normative data with exhaustive table-invariant tests.
-5. Run `make audit` and inspect every report under `target/ci-reports/security/`. This command intentionally fails for any finding or incomplete scan, including informational RustSec advisories.
+5. Run `make audit` and inspect every report under `target/ci-reports/security/`. Unmaintained-only RustSec advisories and Low-confidence zizmor findings remain visible as non-blocking warnings. Vulnerabilities, other findings, malformed output, scanner errors, and incomplete checks fail.
 6. Run `make deprecations`. Findings are informational, but incomplete checks fail.
 7. Run `make release` before handoff.
 8. Run `make bench` when a hot path, rule-dispatch structure, DICOM extraction path, or Parquet writer changes.

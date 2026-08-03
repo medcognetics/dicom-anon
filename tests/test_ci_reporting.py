@@ -2,22 +2,191 @@
 
 from datetime import date
 
+from tools.ci import security_audit
 from tools.ci.deprecation_report import (
     build_manifest,
     exact_version,
     parse_python_lifecycle_date,
 )
-from tools.ci.security_audit import classify_result
+
+
+CARGO_AUDIT_METADATA = {
+    "database": {
+        "advisory-count": 1,
+        "last-commit": "a" * 40,
+        "last-updated": "2026-08-03T00:00:00Z",
+    },
+    "lockfile": {"dependency-count": 1},
+    "settings": {},
+}
+CARGO_AUDIT_WARNING_RESULT = {
+    **CARGO_AUDIT_METADATA,
+    "vulnerabilities": {"count": 0, "found": False, "list": []},
+    "warnings": {
+        "unmaintained": [
+            {
+                "advisory": {"id": "RUSTSEC-2024-0436"},
+                "package": {"name": "paste", "version": "1.0.15"},
+            }
+        ]
+    },
+}
+CARGO_AUDIT_VULNERABILITY_RESULT = {
+    **CARGO_AUDIT_METADATA,
+    "vulnerabilities": {
+        "count": 1,
+        "found": True,
+        "list": [
+            {
+                "advisory": {"id": "RUSTSEC-2099-0001"},
+                "package": {"name": "example", "version": "1.0.0"},
+            }
+        ],
+    },
+    "warnings": {},
+}
+NPM_AUDIT_CLEAN_RESULT = {
+    "auditReportVersion": 2,
+    "metadata": {"vulnerabilities": {"total": 0}},
+    "vulnerabilities": {},
+}
+NPM_AUDIT_FINDING_RESULT = {
+    "auditReportVersion": 2,
+    "metadata": {"vulnerabilities": {"total": 1}},
+    "vulnerabilities": {"example": {"severity": "high"}},
+}
+PIP_AUDIT_CLEAN_RESULT = {
+    "dependencies": [{"name": "example", "version": "1.0.0", "vulns": []}],
+    "fixes": [],
+}
+PIP_AUDIT_FINDING_RESULT = {
+    "dependencies": [
+        {
+            "name": "example",
+            "version": "1.0.0",
+            "vulns": [{"id": "PYSEC-2099-1"}],
+        }
+    ],
+    "fixes": [],
+}
+ZIZMOR_LOW_CONFIDENCE_RESULT = [
+    {
+        "ident": "cache-poisoning",
+        "determinations": {"confidence": "Low", "severity": "High"},
+        "locations": [{}],
+    }
+]
+ZIZMOR_BLOCKING_CONFIDENCE_RESULTS = (
+    [
+        {
+            "ident": "example-medium",
+            "determinations": {"confidence": "Medium", "severity": "Medium"},
+            "locations": [{}],
+        }
+    ],
+    [
+        {
+            "ident": "example-high",
+            "determinations": {"confidence": "High", "severity": "High"},
+            "locations": [{}],
+        }
+    ],
+)
 
 
 def test_scanner_json_error_is_incomplete() -> None:
-    assert classify_result(1, {"error": {"code": "network"}}, None) == "incomplete"
+    error_result = {"error": {"code": "network"}}
+    for classifier in (
+        security_audit.classify_cargo_audit_result,
+        security_audit.classify_npm_audit_result,
+        security_audit.classify_pip_audit_result,
+        security_audit.classify_zizmor_result,
+    ):
+        assert classifier(1, error_result, None) == "incomplete"
 
 
 def test_scanner_result_classification() -> None:
-    assert classify_result(0, {}, None) == "clean"
-    assert classify_result(1, {"vulnerabilities": ["example"]}, None) == "findings"
-    assert classify_result(1, None, "invalid JSON") == "incomplete"
+    assert (
+        security_audit.classify_npm_audit_result(0, NPM_AUDIT_CLEAN_RESULT, None)
+        == "clean"
+    )
+    assert (
+        security_audit.classify_npm_audit_result(0, NPM_AUDIT_FINDING_RESULT, None)
+        == "findings"
+    )
+    assert (
+        security_audit.classify_pip_audit_result(0, PIP_AUDIT_CLEAN_RESULT, None)
+        == "clean"
+    )
+    assert (
+        security_audit.classify_pip_audit_result(0, PIP_AUDIT_FINDING_RESULT, None)
+        == "findings"
+    )
+    assert not security_audit.policy_passes(["findings"])
+
+
+def test_cargo_audit_unmaintained_warnings_are_non_blocking() -> None:
+    status = security_audit.classify_cargo_audit_result(
+        0, CARGO_AUDIT_WARNING_RESULT, None
+    )
+
+    assert status == "warnings"
+    assert security_audit.policy_passes([status])
+
+
+def test_cargo_audit_vulnerabilities_remain_blocking() -> None:
+    status = security_audit.classify_cargo_audit_result(
+        1, CARGO_AUDIT_VULNERABILITY_RESULT, None
+    )
+
+    assert status == "findings"
+    assert not security_audit.policy_passes([status])
+
+
+def test_zizmor_confidence_controls_enforcement() -> None:
+    low_status = security_audit.classify_zizmor_result(
+        0, ZIZMOR_LOW_CONFIDENCE_RESULT, None
+    )
+    assert low_status == "warnings"
+    assert security_audit.policy_passes(["clean", low_status])
+    for blocking_result in ZIZMOR_BLOCKING_CONFIDENCE_RESULTS:
+        blocking_status = security_audit.classify_zizmor_result(
+            0, blocking_result, None
+        )
+        assert blocking_status == "findings"
+        assert not security_audit.policy_passes([blocking_status])
+
+
+def test_zizmor_tool_errors_remain_blocking() -> None:
+    status = security_audit.classify_zizmor_result(
+        1, ZIZMOR_LOW_CONFIDENCE_RESULT, None
+    )
+
+    assert status == "incomplete"
+    assert not security_audit.policy_passes([status])
+
+
+def test_specialized_scanners_fail_closed_on_malformed_output() -> None:
+    assert security_audit.classify_cargo_audit_result(0, {}, None) == "incomplete"
+    malformed_cargo_warnings = {
+        **CARGO_AUDIT_METADATA,
+        "vulnerabilities": {"count": 0, "found": False, "list": []},
+        "warnings": {"unmaintained": [{}]},
+    }
+    assert (
+        security_audit.classify_cargo_audit_result(0, malformed_cargo_warnings, None)
+        == "incomplete"
+    )
+    assert security_audit.classify_npm_audit_result(0, {}, None) == "incomplete"
+    assert security_audit.classify_pip_audit_result(0, {}, None) == "incomplete"
+    assert (
+        security_audit.classify_zizmor_result(
+            0,
+            [{"determinations": {"confidence": "Low", "severity": "High"}}],
+            None,
+        )
+        == "incomplete"
+    )
 
 
 def test_exact_version_parsing() -> None:

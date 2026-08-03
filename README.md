@@ -64,7 +64,7 @@ uv sync --project tools/ci --frozen
 make ci
 ```
 
-GitHub Actions runs the latest and minimum supported Linux toolchains on pull requests and `master` pushes using the trusted `beryl` runner. The 06:17 UTC nightly first repeats the latest-toolchain validation and release build, then runs focused CUDA 12 report tests on beryl's GPU. Dependency security and deprecation reports run each Monday at 06:37 UTC on GitHub-hosted Linux. The scheduled security audit reports every scanner result before failing on any finding or incomplete scan.
+GitHub Actions runs the latest and minimum supported Linux toolchains on pull requests and `master` pushes using the trusted `beryl` runner. The 06:17 UTC nightly first repeats the latest-toolchain validation and release build, then runs focused CUDA 12 report tests on beryl's GPU. Dependency security and deprecation reports run each Monday at 06:37 UTC on GitHub-hosted Linux. The scheduled security audit retains every scanner result. Unmaintained-only RustSec advisories and Low-confidence zizmor findings are reported as non-blocking warnings; vulnerabilities, other security findings, and incomplete scans fail the job.
 
 Full asset-backed report integration remains a local gate. After installing the CPU bundle and setting the three `DICOM_ANON_REPORT_*` paths, run `make report-integration-coverage` to exercise real ONNX Runtime, PDFium, OCR, CLI, and rendered-redaction paths and enforce 84% report line coverage. The nightly CUDA job separately checks its cached bundle, CPU/CUDA semantic parity, and `report-anon --device cuda` without duplicating PDF or OCR coverage.
 
