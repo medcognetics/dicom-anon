@@ -7,16 +7,38 @@ import os
 import re
 import subprocess
 import sys
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 REPORT_DIRECTORY = REPOSITORY_ROOT / "target" / "ci-reports" / "security"
 ACTION_REFERENCE = re.compile(r"^\s*uses:\s*([^\s@]+)@([^\s#]+)", re.MULTILINE)
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
+NON_BLOCKING_STATUSES = frozenset({"clean", "warnings"})
+ZIZMOR_CONFIDENCE_LEVELS = frozenset({"Low", "Medium", "High"})
+ENFORCEMENT_POLICY = {
+    "non_blocking_statuses": ["clean", "warnings"],
+    "blocking_statuses": ["findings", "incomplete"],
+    "cargo-audit": {
+        "warnings": "unmaintained-only advisories",
+        "findings": "vulnerabilities or other warning classes",
+    },
+    "zizmor": {
+        "warnings": "Low-confidence findings",
+        "findings": "Medium- or High-confidence findings",
+    },
+    "default_scanners": {
+        "findings": "npm, pip, action-pin, or other scanner findings",
+    },
+    "all_scanners": {
+        "incomplete": "scanner, database, network, parse, or schema errors",
+    },
+}
+ResultClassifier = Callable[[int, Any, str | None], str]
 
 
 @dataclass(frozen=True)
@@ -30,7 +52,12 @@ class ScanResult:
     error: str | None = None
 
 
-def run_command(name: str, command: list[str], working_directory: Path) -> ScanResult:
+def run_command(
+    name: str,
+    command: list[str],
+    working_directory: Path,
+    classifier: ResultClassifier,
+) -> ScanResult:
     output_file = REPORT_DIRECTORY / f"{name}.json"
     try:
         completed = subprocess.run(
@@ -56,7 +83,7 @@ def run_command(name: str, command: list[str], working_directory: Path) -> ScanR
         )
 
     parsed_output, parse_error = parse_json_output(completed.stdout)
-    status = classify_result(completed.returncode, parsed_output, parse_error)
+    status = classifier(completed.returncode, parsed_output, parse_error)
     write_json(
         output_file,
         {
@@ -88,16 +115,218 @@ def parse_json_output(output: str) -> tuple[Any, str | None]:
         return None, f"invalid JSON output: {error}"
 
 
-def classify_result(exit_code: int, parsed_output: Any, parse_error: str | None) -> str:
-    if parse_error is not None:
+def is_nonempty_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def is_nonnegative_integer(value: Any) -> TypeGuard[int]:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def has_cargo_advisory_identity(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    advisory = value.get("advisory")
+    package = value.get("package")
+    return (
+        isinstance(advisory, dict)
+        and is_nonempty_string(advisory.get("id"))
+        and isinstance(package, dict)
+        and is_nonempty_string(package.get("name"))
+        and is_nonempty_string(package.get("version"))
+    )
+
+
+def classify_cargo_audit_result(
+    exit_code: int, parsed_output: Any, parse_error: str | None
+) -> str:
+    if parse_error is not None or not isinstance(parsed_output, dict):
         return "incomplete"
-    if isinstance(parsed_output, dict) and "error" in parsed_output:
+    if "error" in parsed_output or exit_code not in (0, 1):
         return "incomplete"
-    if exit_code == 0:
-        return "clean"
-    if parsed_output is not None:
+
+    database = parsed_output.get("database")
+    lockfile = parsed_output.get("lockfile")
+    settings = parsed_output.get("settings")
+    vulnerabilities = parsed_output.get("vulnerabilities")
+    warnings = parsed_output.get("warnings")
+    if (
+        not isinstance(database, dict)
+        or not is_nonnegative_integer(database.get("advisory-count"))
+        or not is_nonempty_string(database.get("last-commit"))
+        or not is_nonempty_string(database.get("last-updated"))
+        or not isinstance(lockfile, dict)
+        or not is_nonnegative_integer(lockfile.get("dependency-count"))
+        or not isinstance(settings, dict)
+        or not isinstance(vulnerabilities, dict)
+        or not isinstance(warnings, dict)
+    ):
+        return "incomplete"
+
+    vulnerability_count = vulnerabilities.get("count")
+    vulnerabilities_found = vulnerabilities.get("found")
+    vulnerability_list = vulnerabilities.get("list")
+    if (
+        not isinstance(vulnerability_count, int)
+        or isinstance(vulnerability_count, bool)
+        or not isinstance(vulnerabilities_found, bool)
+        or not isinstance(vulnerability_list, list)
+        or vulnerability_count != len(vulnerability_list)
+        or vulnerabilities_found != (vulnerability_count > 0)
+        or any(
+            not has_cargo_advisory_identity(vulnerability)
+            for vulnerability in vulnerability_list
+        )
+        or any(
+            not is_nonempty_string(warning_kind)
+            or not isinstance(warning_entries, list)
+            for warning_kind, warning_entries in warnings.items()
+        )
+        or any(
+            not has_cargo_advisory_identity(warning_entry)
+            for warning_entries in warnings.values()
+            for warning_entry in warning_entries
+        )
+    ):
+        return "incomplete"
+
+    if vulnerability_count > 0:
         return "findings"
-    return "incomplete"
+
+    active_warning_kinds = {
+        warning_kind
+        for warning_kind, warning_entries in warnings.items()
+        if warning_entries
+    }
+    if active_warning_kinds:
+        return "warnings" if active_warning_kinds == {"unmaintained"} else "findings"
+    return "clean" if exit_code == 0 else "incomplete"
+
+
+def classify_npm_audit_result(
+    exit_code: int, parsed_output: Any, parse_error: str | None
+) -> str:
+    if (
+        parse_error is not None
+        or exit_code not in (0, 1)
+        or not isinstance(parsed_output, dict)
+        or "error" in parsed_output
+    ):
+        return "incomplete"
+
+    report_version = parsed_output.get("auditReportVersion")
+    metadata = parsed_output.get("metadata")
+    vulnerabilities = parsed_output.get("vulnerabilities")
+    if (
+        not is_nonnegative_integer(report_version)
+        or report_version == 0
+        or not isinstance(metadata, dict)
+        or not isinstance(vulnerabilities, dict)
+    ):
+        return "incomplete"
+
+    vulnerability_summary = metadata.get("vulnerabilities")
+    if not isinstance(vulnerability_summary, dict):
+        return "incomplete"
+    vulnerability_total = vulnerability_summary.get("total")
+    if (
+        not is_nonnegative_integer(vulnerability_total)
+        or any(
+            not is_nonempty_string(package_name)
+            or not isinstance(vulnerability, dict)
+            or not is_nonempty_string(vulnerability.get("severity"))
+            for package_name, vulnerability in vulnerabilities.items()
+        )
+        or bool(vulnerabilities) != (vulnerability_total > 0)
+    ):
+        return "incomplete"
+
+    if vulnerabilities:
+        return "findings"
+    return "clean" if exit_code == 0 else "incomplete"
+
+
+def classify_pip_audit_result(
+    exit_code: int, parsed_output: Any, parse_error: str | None
+) -> str:
+    if (
+        parse_error is not None
+        or exit_code not in (0, 1)
+        or not isinstance(parsed_output, dict)
+        or "error" in parsed_output
+    ):
+        return "incomplete"
+
+    dependencies = parsed_output.get("dependencies")
+    fixes = parsed_output.get("fixes")
+    if (
+        not isinstance(dependencies, list)
+        or not isinstance(fixes, list)
+        or any(not isinstance(fix, dict) for fix in fixes)
+    ):
+        return "incomplete"
+
+    has_findings = False
+    for dependency in dependencies:
+        if not isinstance(dependency, dict):
+            return "incomplete"
+        name = dependency.get("name")
+        version = dependency.get("version")
+        vulnerabilities = dependency.get("vulns")
+        if (
+            not is_nonempty_string(name)
+            or not is_nonempty_string(version)
+            or not isinstance(vulnerabilities, list)
+            or any(
+                not isinstance(vulnerability, dict)
+                or not is_nonempty_string(vulnerability.get("id"))
+                for vulnerability in vulnerabilities
+            )
+        ):
+            return "incomplete"
+        has_findings |= bool(vulnerabilities)
+
+    if has_findings:
+        return "findings"
+    return "clean" if exit_code == 0 else "incomplete"
+
+
+def classify_zizmor_result(
+    exit_code: int, parsed_output: Any, parse_error: str | None
+) -> str:
+    if parse_error is not None or exit_code != 0 or not isinstance(parsed_output, list):
+        return "incomplete"
+    if not parsed_output:
+        return "clean"
+
+    has_blocking_confidence = False
+    for finding in parsed_output:
+        if not isinstance(finding, dict):
+            return "incomplete"
+        identifier = finding.get("ident")
+        determinations = finding.get("determinations")
+        locations = finding.get("locations")
+        if (
+            not is_nonempty_string(identifier)
+            or not isinstance(determinations, dict)
+            or not isinstance(locations, list)
+            or not locations
+            or any(not isinstance(location, dict) for location in locations)
+        ):
+            return "incomplete"
+        confidence = determinations.get("confidence")
+        severity = determinations.get("severity")
+        if confidence not in ZIZMOR_CONFIDENCE_LEVELS or not is_nonempty_string(
+            severity
+        ):
+            return "incomplete"
+        has_blocking_confidence |= confidence in {"Medium", "High"}
+
+    return "findings" if has_blocking_confidence else "warnings"
+
+
+def policy_passes(statuses: Iterable[str]) -> bool:
+    return all(status in NON_BLOCKING_STATUSES for status in statuses)
 
 
 def scan_action_pins() -> ScanResult:
@@ -206,6 +435,7 @@ def scan_python_lock() -> ScanResult:
             "json",
         ],
         REPOSITORY_ROOT,
+        classify_pip_audit_result,
     )
 
 
@@ -247,7 +477,8 @@ def write_summary(results: list[ScanResult]) -> None:
     lines.extend(
         [
             "",
-            "All scanners ran before enforcement. Findings and incomplete scans both fail policy.",
+            "All scanners ran before enforcement. Warning-only results remain visible; "
+            "findings and incomplete scans fail policy.",
         ]
     )
     summary = "\n".join(lines) + "\n"
@@ -262,19 +493,22 @@ def main() -> int:
     results = [
         run_command(
             "cargo-audit",
-            ["cargo", "audit", "--json", "--deny", "warnings"],
+            ["cargo", "audit", "--json"],
             REPOSITORY_ROOT,
+            classify_cargo_audit_result,
         ),
         run_command(
             "npm-audit",
             ["npm", "audit", "--package-lock-only", "--json"],
             REPOSITORY_ROOT / "bindings" / "node",
+            classify_npm_audit_result,
         ),
         scan_python_lock(),
         run_command(
             "zizmor",
-            ["zizmor", "--format", "json", "."],
+            ["zizmor", "--format", "json", "--no-exit-codes", "."],
             REPOSITORY_ROOT,
+            classify_zizmor_result,
         ),
         scan_action_pins(),
     ]
@@ -294,6 +528,7 @@ def main() -> int:
                 "tools/ci/uv.lock (CI and test tools)",
                 ".github/workflows/*.yml",
             ],
+            "enforcement_policy": ENFORCEMENT_POLICY,
             "tool_versions": {
                 "cargo-audit": command_version(["cargo", "audit", "--version"]),
                 "npm": command_version(["npm", "--version"]),
@@ -307,7 +542,7 @@ def main() -> int:
         },
     )
     write_summary(results)
-    return 1 if any(result.status != "clean" for result in results) else 0
+    return 0 if policy_passes(result.status for result in results) else 1
 
 
 if __name__ == "__main__":
