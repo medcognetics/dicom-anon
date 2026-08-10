@@ -16,6 +16,9 @@ ANY_ACTION_PATTERN = re.compile(r"^\s*uses:\s*[^\s@]+@([^\s#]+)", re.MULTILINE)
 BERYL_RUNNER = "[self-hosted, linux, x64, beryl]"
 CUDA_BERYL_RUNNER = "[self-hosted, linux, x64, beryl, cuda]"
 NODE_ENGINE = ">=22"
+MINIMUM_SAFE_JS_YAML_VERSION = (4, 3, 1)
+RUST_TOOLCHAIN_ACTION = "dtolnay/rust-toolchain"
+RUST_TOOLCHAIN_ACTION_SHA = "6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772"
 SETUP_GO_SHA = "4a3601121dd01d1626a1e23e37211e3254c1c06c"
 CI_CONTAINER_IMAGE = "ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90"
 CUDA_CONTAINER_IMAGE = (
@@ -161,6 +164,21 @@ def test_zizmor_uses_the_non_vulnerable_pin() -> None:
     assert '"zizmor==1.27.0",' not in ci_manifest
 
 
+def test_rust_toolchain_action_uses_master_pin() -> None:
+    expected_reference = (
+        f"uses: {RUST_TOOLCHAIN_ACTION}@{RUST_TOOLCHAIN_ACTION_SHA} # master"
+    )
+    action_references = [
+        line.strip()
+        for workflow_path in WORKFLOW_DIRECTORY.glob("*.yml")
+        for line in workflow_path.read_text(encoding="utf-8").splitlines()
+        if f"uses: {RUST_TOOLCHAIN_ACTION}@" in line
+    ]
+
+    assert action_references
+    assert set(action_references) == {expected_reference}
+
+
 def test_nightly_cuda_contract() -> None:
     nightly = read_workflow("nightly.yml")
     cuda_job = nightly.partition("  cuda-report:\n")[2]
@@ -250,3 +268,17 @@ def test_node_support_floor_is_consistent() -> None:
 
     assert package["engines"]["node"] == NODE_ENGINE
     assert lock["packages"][""]["engines"]["node"] == NODE_ENGINE
+
+
+def test_node_lock_uses_patched_js_yaml() -> None:
+    lock = json.loads(
+        (REPOSITORY_ROOT / "bindings" / "node" / "package-lock.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    js_yaml_version = tuple(
+        int(component)
+        for component in lock["packages"]["node_modules/js-yaml"]["version"].split(".")
+    )
+
+    assert js_yaml_version >= MINIMUM_SAFE_JS_YAML_VERSION
