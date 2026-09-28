@@ -129,9 +129,8 @@ def test_scheduled_workflow_contracts() -> None:
     assert "cron: '37 6 * * 1'" in dependency_health
     assert "name: Dependency / Security audit" in dependency_health
     assert "name: Dependency / Deprecation report" in dependency_health
-    assert "target/ci-reports/security" in dependency_health
-    assert "target/ci-reports/deprecations" in dependency_health
-    assert "retention-days: 7" in dependency_health
+    assert "run: make audit" in dependency_health
+    assert "run: make deprecations" in dependency_health
     assert "timeout-minutes: 20" in dependency_health
     assert "timeout-minutes: 30" in dependency_health
     assert "GH_TOKEN: ${{ github.token }}" in audit_step
@@ -227,6 +226,15 @@ def test_workflows_are_read_only_and_actions_are_pinned() -> None:
         assert action_references
         assert len(action_references) == len(full_sha_references)
         assert "pull_request_target" not in workflow
+
+
+def test_workflows_do_not_upload_artifacts() -> None:
+    workflow_paths = sorted(WORKFLOW_DIRECTORY.glob("*.yml"))
+
+    assert workflow_paths
+    for workflow_path in workflow_paths:
+        workflow = workflow_path.read_text(encoding="utf-8")
+        assert "actions/upload-artifact@" not in workflow, workflow_path.name
 
 
 def test_actionlint_uses_a_supported_pinned_installer() -> None:

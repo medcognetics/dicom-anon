@@ -1,10 +1,15 @@
 """Unit tests for CI report classification and lifecycle parsing."""
 
 from datetime import date
+from pathlib import Path
 
-from tools.ci import security_audit
+import pytest
+
+from tools.ci import deprecation_report, security_audit
 from tools.ci.deprecation_report import (
+    Finding,
     build_manifest,
+    classify_rust_future_incompatibility,
     exact_version,
     parse_python_lifecycle_date,
 )
@@ -69,11 +74,49 @@ PIP_AUDIT_FINDING_RESULT = {
     ],
     "fixes": [],
 }
+PIP_AUDIT_DUPLICATE_RESULT = {
+    "dependencies": [
+        {
+            "name": "example",
+            "version": "1.0.0",
+            "vulns": [
+                {"id": "PYSEC-2099-1", "fix_versions": ["1.0.1"]},
+                {"id": "GHSA-2099-0002"},
+                {"id": "PYSEC-2099-1", "fix_versions": ["1.0.1.0"]},
+            ],
+        }
+    ],
+    "fixes": [],
+}
 ZIZMOR_LOW_CONFIDENCE_RESULT = [
     {
         "ident": "cache-poisoning",
         "determinations": {"confidence": "Low", "severity": "High"},
         "locations": [{}],
+    }
+]
+ZIZMOR_LOCATED_RESULT = [
+    {
+        "ident": "cache-poisoning",
+        "determinations": {"confidence": "Low", "severity": "High"},
+        "locations": [
+            {
+                "symbolic": {
+                    "key": {
+                        "Local": {"verbatim_path": "./.github/workflows/other.yml"}
+                    },
+                    "kind": "Related",
+                },
+                "concrete": {"location": {"start_point": {"row": 1}}},
+            },
+            {
+                "symbolic": {
+                    "key": {"Local": {"verbatim_path": "./.github/workflows/ci.yml"}},
+                    "kind": "Primary",
+                },
+                "concrete": {"location": {"start_point": {"row": 11}}},
+            },
+        ],
     }
 ]
 ZIZMOR_BLOCKING_CONFIDENCE_RESULTS = (
@@ -187,6 +230,146 @@ def test_specialized_scanners_fail_closed_on_malformed_output() -> None:
         )
         == "incomplete"
     )
+
+
+def test_security_findings_are_described_without_scanner_output() -> None:
+    assert security_audit.describe_findings(
+        "cargo-audit", "findings", CARGO_AUDIT_VULNERABILITY_RESULT
+    ) == ("vulnerability RUSTSEC-2099-0001 `example` 1.0.0",)
+    assert security_audit.describe_findings(
+        "cargo-audit", "warnings", CARGO_AUDIT_WARNING_RESULT
+    ) == ("unmaintained RUSTSEC-2024-0436 `paste` 1.0.15",)
+    assert security_audit.describe_findings(
+        "npm-audit", "findings", NPM_AUDIT_FINDING_RESULT
+    ) == ("`example` (high)",)
+    assert security_audit.describe_findings(
+        "pip-audit", "findings", PIP_AUDIT_FINDING_RESULT
+    ) == ("`example` 1.0.0: PYSEC-2099-1",)
+    assert security_audit.describe_findings(
+        "pip-audit", "findings", PIP_AUDIT_DUPLICATE_RESULT
+    ) == ("`example` 1.0.0: PYSEC-2099-1, GHSA-2099-0002",)
+    assert security_audit.describe_findings(
+        "zizmor", "warnings", ZIZMOR_LOCATED_RESULT
+    ) == (
+        "cache-poisoning (Low confidence, High severity) at "
+        "./.github/workflows/ci.yml:12",
+    )
+    assert security_audit.describe_findings(
+        "zizmor", "warnings", ZIZMOR_LOW_CONFIDENCE_RESULT
+    ) == ("cache-poisoning (Low confidence, High severity)",)
+    assert (
+        security_audit.describe_findings("npm-audit", "clean", NPM_AUDIT_CLEAN_RESULT)
+        == ()
+    )
+
+
+def test_incomplete_scanner_error_is_described() -> None:
+    assert security_audit.describe_findings(
+        "npm-audit", "incomplete", {"error": {"code": "ENOAUDIT"}}
+    ) == ('scanner error: {"code": "ENOAUDIT"}',)
+    assert security_audit.describe_findings("npm-audit", "incomplete", None) == ()
+
+
+def test_security_summary_reports_details_in_log_and_step_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    step_summary = tmp_path / "step-summary.md"
+    monkeypatch.setattr(security_audit, "REPORT_DIRECTORY", tmp_path)
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(step_summary))
+    detail_count = security_audit.MAX_DETAILS_PER_SCANNER + 2
+    results = [
+        security_audit.ScanResult(
+            "cargo-audit",
+            ["cargo", "audit", "--json"],
+            ".",
+            0,
+            "warnings",
+            "cargo-audit.json",
+            details=tuple(
+                f"unmaintained RUSTSEC-{index}" for index in range(detail_count)
+            ),
+        ),
+        security_audit.ScanResult(
+            "pip-audit",
+            ["pip-audit"],
+            ".",
+            None,
+            "incomplete",
+            "pip-audit.json",
+            "scanner produced no JSON output",
+        ),
+    ]
+
+    security_audit.write_summary(results)
+
+    logged = capsys.readouterr().out
+    assert step_summary.read_text(encoding="utf-8") == logged
+    assert (tmp_path / "summary.md").read_text(encoding="utf-8") == logged
+    assert "| `cargo-audit` | warnings | 0 |" in logged
+    assert "- `cargo-audit`: unmaintained RUSTSEC-0" in logged
+    assert "- `cargo-audit`: 2 more" in logged
+    assert f"RUSTSEC-{security_audit.MAX_DETAILS_PER_SCANNER}\n" not in logged
+    assert "- `pip-audit`: error: scanner produced no JSON output" in logged
+
+
+def test_rust_future_incompatibility_names_packages() -> None:
+    output = (
+        "warning: the following packages contain code that will be rejected by a "
+        "future version of Rust: nom v1.2.4, rental v0.5.6\n"
+    )
+
+    assert classify_rust_future_incompatibility(0, output) == (
+        [
+            Finding(
+                "Rust",
+                "workspace",
+                "locked",
+                "future-incompatible code in nom v1.2.4, rental v0.5.6",
+            )
+        ],
+        [],
+    )
+    assert classify_rust_future_incompatibility(0, "Finished dev profile\n") == ([], [])
+
+
+def test_rust_future_incompatibility_failure_names_the_first_error() -> None:
+    output = (
+        "   Compiling leptonica-sys v0.4.9\n"
+        "error: failed to run custom build command for `leptonica-sys v0.4.9`\n"
+        "error: could not compile workspace\n"
+    )
+
+    assert classify_rust_future_incompatibility(101, output) == (
+        [],
+        [
+            "Rust future-incompatibility check exited 101: "
+            "error: failed to run custom build command for `leptonica-sys v0.4.9`"
+        ],
+    )
+    assert classify_rust_future_incompatibility(101, "") == (
+        [],
+        ["Rust future-incompatibility check exited 101"],
+    )
+
+
+def test_deprecation_summary_is_logged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(deprecation_report, "REPORT_DIRECTORY", tmp_path)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+
+    deprecation_report.write_summary(
+        [Finding("Node", "example", "1.0.0", "deprecated")], ["npm metadata: timeout"]
+    )
+
+    logged = capsys.readouterr().out
+    assert (tmp_path / "summary.md").read_text(encoding="utf-8") == logged
+    assert "| Node | `example` | `1.0.0` | deprecated |" in logged
+    assert "- npm metadata: timeout" in logged
 
 
 def test_exact_version_parsing() -> None:

@@ -19,6 +19,9 @@ REPORT_DIRECTORY = REPOSITORY_ROOT / "target" / "ci-reports" / "security"
 ACTION_REFERENCE = re.compile(r"^\s*uses:\s*([^\s@]+)@([^\s#]+)", re.MULTILINE)
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 NON_BLOCKING_STATUSES = frozenset({"clean", "warnings"})
+DESCRIBED_STATUSES = frozenset({"findings", "warnings"})
+MAX_DETAILS_PER_SCANNER = 25
+MAX_DETAIL_LENGTH = 300
 ZIZMOR_CONFIDENCE_LEVELS = frozenset({"Low", "Medium", "High"})
 ENFORCEMENT_POLICY = {
     "non_blocking_statuses": ["clean", "warnings"],
@@ -50,6 +53,7 @@ class ScanResult:
     status: str
     output_file: str
     error: str | None = None
+    details: tuple[str, ...] = ()
 
 
 def run_command(
@@ -84,6 +88,7 @@ def run_command(
 
     parsed_output, parse_error = parse_json_output(completed.stdout)
     status = classifier(completed.returncode, parsed_output, parse_error)
+    details = describe_findings(name, status, parsed_output)
     write_json(
         output_file,
         {
@@ -103,6 +108,7 @@ def run_command(
         status,
         output_file.name,
         parse_error,
+        details,
     )
 
 
@@ -325,6 +331,97 @@ def classify_zizmor_result(
     return "findings" if has_blocking_confidence else "warnings"
 
 
+def nested_value(value: Any, *keys: str) -> Any:
+    for key in keys:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def describe_cargo_advisory(entry: dict[str, Any]) -> str:
+    package = entry["package"]
+    return f"{entry['advisory']['id']} `{package['name']}` {package['version']}"
+
+
+def describe_cargo_audit(output: Any) -> list[str]:
+    vulnerabilities = [
+        f"vulnerability {describe_cargo_advisory(entry)}"
+        for entry in output["vulnerabilities"]["list"]
+    ]
+    warnings = [
+        f"{warning_kind} {describe_cargo_advisory(entry)}"
+        for warning_kind, entries in sorted(output["warnings"].items())
+        for entry in entries
+    ]
+    return vulnerabilities + warnings
+
+
+def describe_npm_audit(output: Any) -> list[str]:
+    return [
+        f"`{package_name}` ({vulnerability['severity']})"
+        for package_name, vulnerability in sorted(output["vulnerabilities"].items())
+    ]
+
+
+def describe_pip_audit(output: Any) -> list[str]:
+    return [
+        f"`{dependency['name']}` {dependency['version']}: "
+        + ", ".join(
+            dict.fromkeys(vulnerability["id"] for vulnerability in dependency["vulns"])
+        )
+        for dependency in output["dependencies"]
+        if dependency["vulns"]
+    ]
+
+
+def describe_zizmor_location(locations: list[dict[str, Any]]) -> str:
+    location = next(
+        (
+            candidate
+            for candidate in locations
+            if nested_value(candidate, "symbolic", "kind") == "Primary"
+        ),
+        locations[0],
+    )
+    path = nested_value(location, "symbolic", "key", "Local", "verbatim_path")
+    if not is_nonempty_string(path):
+        return ""
+    row = nested_value(location, "concrete", "location", "start_point", "row")
+    return f" at {path}:{row + 1}" if is_nonnegative_integer(row) else f" at {path}"
+
+
+def describe_zizmor(output: Any) -> list[str]:
+    return [
+        f"{finding['ident']} ({finding['determinations']['confidence']} confidence, "
+        f"{finding['determinations']['severity']} severity)"
+        + describe_zizmor_location(finding["locations"])
+        for finding in output
+    ]
+
+
+FINDING_DESCRIBERS: dict[str, Callable[[Any], list[str]]] = {
+    "cargo-audit": describe_cargo_audit,
+    "npm-audit": describe_npm_audit,
+    "pip-audit": describe_pip_audit,
+    "zizmor": describe_zizmor,
+}
+
+
+def describe_findings(name: str, status: str, parsed_output: Any) -> tuple[str, ...]:
+    """Name the findings of a validated result without copying raw scanner output."""
+    if status == "incomplete" and isinstance(parsed_output, dict):
+        if "error" in parsed_output:
+            return (
+                f"scanner error: {json.dumps(parsed_output['error'], sort_keys=True)}",
+            )
+        return ()
+    describer = FINDING_DESCRIBERS.get(name)
+    if describer is None or status not in DESCRIBED_STATUSES:
+        return ()
+    return tuple(describer(parsed_output))
+
+
 def policy_passes(statuses: Iterable[str]) -> bool:
     return all(status in NON_BLOCKING_STATUSES for status in statuses)
 
@@ -360,6 +457,10 @@ def scan_action_pins() -> ScanResult:
         1 if findings else 0,
         status,
         output_file.name,
+        details=tuple(
+            f"`{finding['workflow']}`: {finding['action']}@{finding['reference']}"
+            for finding in findings
+        ),
     )
 
 
@@ -460,29 +561,53 @@ def write_json(path: Path, value: Any) -> None:
     )
 
 
+def truncate_detail(detail: str) -> str:
+    if len(detail) <= MAX_DETAIL_LENGTH:
+        return detail
+    return detail[: MAX_DETAIL_LENGTH - 3] + "..."
+
+
+def summary_details(results: list[ScanResult]) -> list[str]:
+    lines: list[str] = []
+    for result in results:
+        entries = list(result.details)
+        if result.error is not None:
+            entries.insert(0, f"error: {result.error}")
+        lines.extend(
+            f"- `{result.name}`: {truncate_detail(entry)}"
+            for entry in entries[:MAX_DETAILS_PER_SCANNER]
+        )
+        omitted = len(entries) - MAX_DETAILS_PER_SCANNER
+        if omitted > 0:
+            lines.append(f"- `{result.name}`: {omitted} more")
+    return lines
+
+
 def write_summary(results: list[ScanResult]) -> None:
     lines = [
         "# Dependency security audit",
         "",
         f"Checked: {datetime.now(timezone.utc).isoformat()}",
         "",
-        "| Scanner | Status | Exit | Report |",
-        "|---|---|---:|---|",
+        "| Scanner | Status | Exit |",
+        "|---|---|---:|",
     ]
     for result in results:
         exit_code = "-" if result.exit_code is None else str(result.exit_code)
-        lines.append(
-            f"| `{result.name}` | {result.status} | {exit_code} | `{result.output_file}` |"
-        )
+        lines.append(f"| `{result.name}` | {result.status} | {exit_code} |")
+    if details := summary_details(results):
+        lines.extend(["", "## Findings and errors", "", *details])
     lines.extend(
         [
             "",
             "All scanners ran before enforcement. Warning-only results remain visible; "
             "findings and incomplete scans fail policy.",
+            "Local runs write complete scanner output to `target/ci-reports/security/`.",
         ]
     )
     summary = "\n".join(lines) + "\n"
     (REPORT_DIRECTORY / "summary.md").write_text(summary, encoding="utf-8")
+    sys.stdout.write(summary)
     if step_summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         with Path(step_summary).open("a", encoding="utf-8") as summary_file:
             summary_file.write(summary)

@@ -48,14 +48,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: make audit
-      - name: Upload security reports
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: dependency-security-reports
-          path: target/ci-reports/security
-          if-no-files-found: error
-          retention-days: 7
       - name: Enforce security policy
         if: always()
         env:
@@ -106,14 +98,6 @@ jobs:
         id: deprecations
         continue-on-error: true
         run: make deprecations
-      - name: Upload deprecation reports
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: dependency-deprecation-reports
-          path: target/ci-reports/deprecations
-          if-no-files-found: error
-          retention-days: 7
       - name: Require a complete report
         if: always()
         env:
