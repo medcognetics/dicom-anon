@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import re
 from pathlib import Path
@@ -15,6 +16,14 @@ FULL_SHA_PATTERN = re.compile(
 ANY_ACTION_PATTERN = re.compile(r"^\s*uses:\s*[^\s@]+@([^\s#]+)", re.MULTILINE)
 BERYL_RUNNER = "[self-hosted, linux, x64, beryl]"
 CUDA_BERYL_RUNNER = "[self-hosted, linux, x64, beryl, cuda]"
+FORK_ROUTED_BERYL_RUNNER = (
+    "${{ fromJSON((github.event_name != 'pull_request' || "
+    "github.event.pull_request.head.repo.full_name == github.repository) && "
+    '\'["self-hosted","linux","x64","beryl"]\' || \'["ubuntu-24.04"]\') }}'
+)
+JOB_PATTERN = re.compile(r"^  (?P<job>[A-Za-z0-9_-]+):$")
+RUNS_ON_PATTERN = re.compile(r"^    runs-on:[ \t]*(?P<value>.*)$")
+BLOCK_SCALAR_PATTERN = re.compile(r"^[>|][-+]?(?:[ \t]+#.*)?$")
 NODE_ENGINE = ">=22"
 MINIMUM_SAFE_JS_YAML_VERSION = (4, 3, 1)
 RUST_TOOLCHAIN_ACTION = "dtolnay/rust-toolchain"
@@ -57,6 +66,25 @@ def read_workflow(name: str) -> str:
     return (WORKFLOW_DIRECTORY / name).read_text(encoding="utf-8")
 
 
+def job_runners(workflow: str) -> dict[str, str]:
+    """Return each job's runs-on value and join folded block scalars."""
+    lines = workflow.partition("\njobs:\n")[2].splitlines()
+    runners: dict[str, str] = {}
+    job = None
+    for index, line in enumerate(lines):
+        if job_match := JOB_PATTERN.match(line):
+            job = job_match["job"]
+        elif job is not None and (runs_on_match := RUNS_ON_PATTERN.match(line)):
+            value = runs_on_match["value"].strip()
+            if BLOCK_SCALAR_PATTERN.match(value):
+                continuation = itertools.takewhile(
+                    lambda text: text.startswith("      "), lines[index + 1 :]
+                )
+                value = " ".join(text.strip() for text in continuation)
+            runners[job] = value
+    return runners
+
+
 def test_expected_workflows_replace_legacy_ci() -> None:
     assert sorted(path.name for path in WORKFLOW_DIRECTORY.glob("*.yml")) == [
         "dependency-health.yml",
@@ -94,6 +122,13 @@ def test_linux_ci_contract() -> None:
     assert "if: always()" in workflow
 
 
+def test_linux_ci_uses_hosted_runners_only_for_fork_pull_requests() -> None:
+    assert job_runners(read_workflow("linux-ci.yml")) == {
+        "supported-versions": BERYL_RUNNER,
+        "required": FORK_ROUTED_BERYL_RUNNER,
+    }
+
+
 def test_self_hosted_jobs_use_a_pinned_ci_container() -> None:
     for workflow_name in ("linux-ci.yml", "nightly.yml"):
         workflow = read_workflow(workflow_name)
@@ -129,9 +164,8 @@ def test_scheduled_workflow_contracts() -> None:
     assert "cron: '37 6 * * 1'" in dependency_health
     assert "name: Dependency / Security audit" in dependency_health
     assert "name: Dependency / Deprecation report" in dependency_health
-    assert "target/ci-reports/security" in dependency_health
-    assert "target/ci-reports/deprecations" in dependency_health
-    assert "retention-days: 7" in dependency_health
+    assert "run: make audit" in dependency_health
+    assert "run: make deprecations" in dependency_health
     assert "timeout-minutes: 20" in dependency_health
     assert "timeout-minutes: 30" in dependency_health
     assert "GH_TOKEN: ${{ github.token }}" in audit_step
@@ -227,6 +261,15 @@ def test_workflows_are_read_only_and_actions_are_pinned() -> None:
         assert action_references
         assert len(action_references) == len(full_sha_references)
         assert "pull_request_target" not in workflow
+
+
+def test_workflows_do_not_upload_artifacts() -> None:
+    workflow_paths = sorted(WORKFLOW_DIRECTORY.glob("*.yml"))
+
+    assert workflow_paths
+    for workflow_path in workflow_paths:
+        workflow = workflow_path.read_text(encoding="utf-8")
+        assert "actions/upload-artifact@" not in workflow, workflow_path.name
 
 
 def test_actionlint_uses_a_supported_pinned_installer() -> None:

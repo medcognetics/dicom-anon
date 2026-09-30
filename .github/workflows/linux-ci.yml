@@ -138,7 +138,8 @@ jobs:
     name: Linux / Required
     if: always()
     needs: supported-versions
-    runs-on: ubuntu-24.04
+    runs-on: >-
+      ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","linux","x64","beryl"]' || '["ubuntu-24.04"]') }}
     timeout-minutes: 5
     steps:
       - name: Require all supported versions
