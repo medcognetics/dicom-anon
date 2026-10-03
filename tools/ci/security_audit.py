@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TypeGuard
+from typing import Any, NamedTuple, TypeGuard
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -19,6 +19,12 @@ REPORT_DIRECTORY = REPOSITORY_ROOT / "target" / "ci-reports" / "security"
 ACTION_REFERENCE = re.compile(r"^\s*uses:\s*([^\s@]+)@([^\s#]+)", re.MULTILINE)
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 NON_BLOCKING_STATUSES = frozenset({"clean", "warnings"})
+DESCRIBED_STATUSES = frozenset({"findings", "warnings"})
+MAX_DETAILS_PER_SCANNER = 25
+MAX_DETAIL_LENGTH = 300
+MAX_STDERR_LINES = 20
+MAX_STDERR_CHARACTERS = 2048
+SECRET_ENVIRONMENT_VARIABLES = ("GH_TOKEN", "GITHUB_TOKEN")
 ZIZMOR_CONFIDENCE_LEVELS = frozenset({"Low", "Medium", "High"})
 ENFORCEMENT_POLICY = {
     "non_blocking_statuses": ["clean", "warnings"],
@@ -38,7 +44,21 @@ ENFORCEMENT_POLICY = {
         "incomplete": "scanner, database, network, parse, or schema errors",
     },
 }
-ResultClassifier = Callable[[int, Any, str | None], str]
+
+
+class Classification(NamedTuple):
+    status: str
+    reason: str | None = None
+
+
+CLEAN = Classification("clean")
+WARNINGS = Classification("warnings")
+FINDINGS = Classification("findings")
+ResultClassifier = Callable[[int, Any, str | None], Classification]
+
+
+def incomplete(reason: str) -> Classification:
+    return Classification("incomplete", reason)
 
 
 @dataclass(frozen=True)
@@ -50,6 +70,8 @@ class ScanResult:
     status: str
     output_file: str
     error: str | None = None
+    details: tuple[str, ...] = ()
+    stderr_excerpt: str | None = None
 
 
 def run_command(
@@ -83,7 +105,8 @@ def run_command(
         )
 
     parsed_output, parse_error = parse_json_output(completed.stdout)
-    status = classifier(completed.returncode, parsed_output, parse_error)
+    status, reason = classifier(completed.returncode, parsed_output, parse_error)
+    details = describe_findings(name, status, parsed_output)
     write_json(
         output_file,
         {
@@ -102,7 +125,9 @@ def run_command(
         completed.returncode,
         status,
         output_file.name,
-        parse_error,
+        reason,
+        details,
+        stderr_excerpt(completed.stderr) if status == "incomplete" else None,
     )
 
 
@@ -113,6 +138,37 @@ def parse_json_output(output: str) -> tuple[Any, str | None]:
         return json.loads(output), None
     except json.JSONDecodeError as error:
         return None, f"invalid JSON output: {error}"
+
+
+def stderr_excerpt(stderr: str) -> str | None:
+    """Keep the bounded end of stderr, where scanners report a failure cause."""
+    for variable in SECRET_ENVIRONMENT_VARIABLES:
+        if secret := os.environ.get(variable):
+            stderr = stderr.replace(secret, "***")
+    excerpt = "\n".join(stderr.strip().splitlines()[-MAX_STDERR_LINES:])
+    return excerpt[-MAX_STDERR_CHARACTERS:] or None
+
+
+def report_object_failure(
+    exit_code: int, parsed_output: Any, parse_error: str | None
+) -> Classification | None:
+    """Reject a JSON object report that cannot carry a trustworthy result."""
+    if parse_error is not None:
+        return incomplete(parse_error)
+    if not isinstance(parsed_output, dict):
+        return incomplete("expected a JSON object")
+    if "error" in parsed_output:
+        error = json.dumps(parsed_output["error"], sort_keys=True)
+        return incomplete(f"scanner error: {error}")
+    if exit_code not in (0, 1):
+        return incomplete(f"unexpected exit code {exit_code}")
+    return None
+
+
+def clean_unless_failed(exit_code: int) -> Classification:
+    if exit_code == 0:
+        return CLEAN
+    return incomplete(f"exit code {exit_code} without reported findings")
 
 
 def is_nonempty_string(value: Any) -> bool:
@@ -139,11 +195,10 @@ def has_cargo_advisory_identity(value: Any) -> bool:
 
 def classify_cargo_audit_result(
     exit_code: int, parsed_output: Any, parse_error: str | None
-) -> str:
-    if parse_error is not None or not isinstance(parsed_output, dict):
-        return "incomplete"
-    if "error" in parsed_output or exit_code not in (0, 1):
-        return "incomplete"
+) -> Classification:
+    failure = report_object_failure(exit_code, parsed_output, parse_error)
+    if failure is not None:
+        return failure
 
     database = parsed_output.get("database")
     lockfile = parsed_output.get("lockfile")
@@ -158,10 +213,10 @@ def classify_cargo_audit_result(
         or not isinstance(lockfile, dict)
         or not is_nonnegative_integer(lockfile.get("dependency-count"))
         or not isinstance(settings, dict)
-        or not isinstance(vulnerabilities, dict)
-        or not isinstance(warnings, dict)
     ):
-        return "incomplete"
+        return incomplete("invalid database, lockfile, or settings metadata")
+    if not isinstance(vulnerabilities, dict) or not isinstance(warnings, dict):
+        return incomplete("invalid vulnerabilities or warnings object")
 
     vulnerability_count = vulnerabilities.get("count")
     vulnerabilities_found = vulnerabilities.get("found")
@@ -177,21 +232,21 @@ def classify_cargo_audit_result(
             not has_cargo_advisory_identity(vulnerability)
             for vulnerability in vulnerability_list
         )
-        or any(
-            not is_nonempty_string(warning_kind)
-            or not isinstance(warning_entries, list)
-            for warning_kind, warning_entries in warnings.items()
-        )
+    ):
+        return incomplete("invalid vulnerability list")
+    if any(
+        not is_nonempty_string(warning_kind)
+        or not isinstance(warning_entries, list)
         or any(
             not has_cargo_advisory_identity(warning_entry)
-            for warning_entries in warnings.values()
             for warning_entry in warning_entries
         )
+        for warning_kind, warning_entries in warnings.items()
     ):
-        return "incomplete"
+        return incomplete("invalid warning entries")
 
     if vulnerability_count > 0:
-        return "findings"
+        return FINDINGS
 
     active_warning_kinds = {
         warning_kind
@@ -199,63 +254,54 @@ def classify_cargo_audit_result(
         if warning_entries
     }
     if active_warning_kinds:
-        return "warnings" if active_warning_kinds == {"unmaintained"} else "findings"
-    return "clean" if exit_code == 0 else "incomplete"
+        return WARNINGS if active_warning_kinds == {"unmaintained"} else FINDINGS
+    return clean_unless_failed(exit_code)
 
 
 def classify_npm_audit_result(
     exit_code: int, parsed_output: Any, parse_error: str | None
-) -> str:
-    if (
-        parse_error is not None
-        or exit_code not in (0, 1)
-        or not isinstance(parsed_output, dict)
-        or "error" in parsed_output
-    ):
-        return "incomplete"
+) -> Classification:
+    failure = report_object_failure(exit_code, parsed_output, parse_error)
+    if failure is not None:
+        return failure
 
     report_version = parsed_output.get("auditReportVersion")
     metadata = parsed_output.get("metadata")
     vulnerabilities = parsed_output.get("vulnerabilities")
-    if (
-        not is_nonnegative_integer(report_version)
-        or report_version == 0
-        or not isinstance(metadata, dict)
-        or not isinstance(vulnerabilities, dict)
-    ):
-        return "incomplete"
+    if not is_nonnegative_integer(report_version) or report_version == 0:
+        return incomplete("invalid auditReportVersion")
+    if not isinstance(metadata, dict) or not isinstance(vulnerabilities, dict):
+        return incomplete("invalid metadata or vulnerabilities object")
 
     vulnerability_summary = metadata.get("vulnerabilities")
-    if not isinstance(vulnerability_summary, dict):
-        return "incomplete"
-    vulnerability_total = vulnerability_summary.get("total")
-    if (
-        not is_nonnegative_integer(vulnerability_total)
-        or any(
-            not is_nonempty_string(package_name)
-            or not isinstance(vulnerability, dict)
-            or not is_nonempty_string(vulnerability.get("severity"))
-            for package_name, vulnerability in vulnerabilities.items()
-        )
-        or bool(vulnerabilities) != (vulnerability_total > 0)
+    vulnerability_total = (
+        vulnerability_summary.get("total")
+        if isinstance(vulnerability_summary, dict)
+        else None
+    )
+    if not is_nonnegative_integer(vulnerability_total):
+        return incomplete("invalid metadata.vulnerabilities.total")
+    if any(
+        not is_nonempty_string(package_name)
+        or not isinstance(vulnerability, dict)
+        or not is_nonempty_string(vulnerability.get("severity"))
+        for package_name, vulnerability in vulnerabilities.items()
     ):
-        return "incomplete"
+        return incomplete("invalid vulnerability entries")
+    if bool(vulnerabilities) != (vulnerability_total > 0):
+        return incomplete("vulnerability entries disagree with metadata total")
 
     if vulnerabilities:
-        return "findings"
-    return "clean" if exit_code == 0 else "incomplete"
+        return FINDINGS
+    return clean_unless_failed(exit_code)
 
 
 def classify_pip_audit_result(
     exit_code: int, parsed_output: Any, parse_error: str | None
-) -> str:
-    if (
-        parse_error is not None
-        or exit_code not in (0, 1)
-        or not isinstance(parsed_output, dict)
-        or "error" in parsed_output
-    ):
-        return "incomplete"
+) -> Classification:
+    failure = report_object_failure(exit_code, parsed_output, parse_error)
+    if failure is not None:
+        return failure
 
     dependencies = parsed_output.get("dependencies")
     fixes = parsed_output.get("fixes")
@@ -264,12 +310,12 @@ def classify_pip_audit_result(
         or not isinstance(fixes, list)
         or any(not isinstance(fix, dict) for fix in fixes)
     ):
-        return "incomplete"
+        return incomplete("invalid dependencies or fixes list")
 
     has_findings = False
     for dependency in dependencies:
         if not isinstance(dependency, dict):
-            return "incomplete"
+            return incomplete("invalid dependency entry")
         name = dependency.get("name")
         version = dependency.get("version")
         vulnerabilities = dependency.get("vulns")
@@ -283,26 +329,30 @@ def classify_pip_audit_result(
                 for vulnerability in vulnerabilities
             )
         ):
-            return "incomplete"
+            return incomplete("invalid dependency entry")
         has_findings |= bool(vulnerabilities)
 
     if has_findings:
-        return "findings"
-    return "clean" if exit_code == 0 else "incomplete"
+        return FINDINGS
+    return clean_unless_failed(exit_code)
 
 
 def classify_zizmor_result(
     exit_code: int, parsed_output: Any, parse_error: str | None
-) -> str:
-    if parse_error is not None or exit_code != 0 or not isinstance(parsed_output, list):
-        return "incomplete"
+) -> Classification:
+    if parse_error is not None:
+        return incomplete(parse_error)
+    if exit_code != 0:
+        return incomplete(f"unexpected exit code {exit_code}")
+    if not isinstance(parsed_output, list):
+        return incomplete("expected a JSON array")
     if not parsed_output:
-        return "clean"
+        return CLEAN
 
     has_blocking_confidence = False
     for finding in parsed_output:
         if not isinstance(finding, dict):
-            return "incomplete"
+            return incomplete("invalid finding entry")
         identifier = finding.get("ident")
         determinations = finding.get("determinations")
         locations = finding.get("locations")
@@ -313,16 +363,101 @@ def classify_zizmor_result(
             or not locations
             or any(not isinstance(location, dict) for location in locations)
         ):
-            return "incomplete"
+            return incomplete("invalid finding entry")
         confidence = determinations.get("confidence")
         severity = determinations.get("severity")
         if confidence not in ZIZMOR_CONFIDENCE_LEVELS or not is_nonempty_string(
             severity
         ):
-            return "incomplete"
+            return incomplete("invalid finding confidence or severity")
         has_blocking_confidence |= confidence in {"Medium", "High"}
 
-    return "findings" if has_blocking_confidence else "warnings"
+    return FINDINGS if has_blocking_confidence else WARNINGS
+
+
+def nested_value(value: Any, *keys: str) -> Any:
+    for key in keys:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def describe_cargo_advisory(entry: dict[str, Any]) -> str:
+    package = entry["package"]
+    return f"{entry['advisory']['id']} `{package['name']}` {package['version']}"
+
+
+def describe_cargo_audit(output: Any) -> list[str]:
+    vulnerabilities = [
+        f"vulnerability {describe_cargo_advisory(entry)}"
+        for entry in output["vulnerabilities"]["list"]
+    ]
+    warnings = [
+        f"{warning_kind} {describe_cargo_advisory(entry)}"
+        for warning_kind, entries in sorted(output["warnings"].items())
+        for entry in entries
+    ]
+    return vulnerabilities + warnings
+
+
+def describe_npm_audit(output: Any) -> list[str]:
+    return [
+        f"`{package_name}` ({vulnerability['severity']})"
+        for package_name, vulnerability in sorted(output["vulnerabilities"].items())
+    ]
+
+
+def describe_pip_audit(output: Any) -> list[str]:
+    return [
+        f"`{dependency['name']}` {dependency['version']}: "
+        + ", ".join(
+            dict.fromkeys(vulnerability["id"] for vulnerability in dependency["vulns"])
+        )
+        for dependency in output["dependencies"]
+        if dependency["vulns"]
+    ]
+
+
+def describe_zizmor_location(locations: list[dict[str, Any]]) -> str:
+    location = next(
+        (
+            candidate
+            for candidate in locations
+            if nested_value(candidate, "symbolic", "kind") == "Primary"
+        ),
+        locations[0],
+    )
+    path = nested_value(location, "symbolic", "key", "Local", "verbatim_path")
+    if not is_nonempty_string(path):
+        return ""
+    row = nested_value(location, "concrete", "location", "start_point", "row")
+    return f" at {path}:{row + 1}" if is_nonnegative_integer(row) else f" at {path}"
+
+
+def describe_zizmor(output: Any) -> list[str]:
+    return [
+        f"{finding['ident']} ({finding['determinations']['confidence']} confidence, "
+        f"{finding['determinations']['severity']} severity)"
+        + describe_zizmor_location(finding["locations"])
+        for finding in output
+    ]
+
+
+FINDING_DESCRIBERS: dict[str, Callable[[Any], list[str]]] = {
+    "cargo-audit": describe_cargo_audit,
+    "npm-audit": describe_npm_audit,
+    "pip-audit": describe_pip_audit,
+    "zizmor": describe_zizmor,
+}
+
+
+def describe_findings(name: str, status: str, parsed_output: Any) -> tuple[str, ...]:
+    """Name the findings of a validated result without copying raw scanner output."""
+    describer = FINDING_DESCRIBERS.get(name)
+    if describer is None or status not in DESCRIBED_STATUSES:
+        return ()
+    return tuple(describer(parsed_output))
 
 
 def policy_passes(statuses: Iterable[str]) -> bool:
@@ -360,6 +495,10 @@ def scan_action_pins() -> ScanResult:
         1 if findings else 0,
         status,
         output_file.name,
+        details=tuple(
+            f"`{finding['workflow']}`: {finding['action']}@{finding['reference']}"
+            for finding in findings
+        ),
     )
 
 
@@ -403,7 +542,6 @@ def scan_python_lock() -> ScanResult:
         )
     if completed.returncode != 0:
         output_file = REPORT_DIRECTORY / "pip-audit.json"
-        error = f"uv export exited {completed.returncode}: {completed.stderr.strip()}"
         write_json(
             output_file,
             {
@@ -421,7 +559,8 @@ def scan_python_lock() -> ScanResult:
             completed.returncode,
             "incomplete",
             output_file.name,
-            error,
+            f"uv export exited {completed.returncode}",
+            stderr_excerpt=stderr_excerpt(completed.stderr),
         )
     return run_command(
         "pip-audit",
@@ -460,29 +599,68 @@ def write_json(path: Path, value: Any) -> None:
     )
 
 
+def truncate_detail(detail: str) -> str:
+    if len(detail) <= MAX_DETAIL_LENGTH:
+        return detail
+    return detail[: MAX_DETAIL_LENGTH - 3] + "..."
+
+
+def summary_details(results: list[ScanResult]) -> list[str]:
+    lines: list[str] = []
+    for result in results:
+        entries = list(result.details)
+        if result.error is not None:
+            entries.insert(0, f"error: {result.error}")
+        lines.extend(
+            f"- `{result.name}`: {truncate_detail(entry)}"
+            for entry in entries[:MAX_DETAILS_PER_SCANNER]
+        )
+        omitted = len(entries) - MAX_DETAILS_PER_SCANNER
+        if omitted > 0:
+            lines.append(f"- `{result.name}`: {omitted} more")
+        if result.stderr_excerpt is not None:
+            lines.extend(stderr_block(result.name, result.stderr_excerpt))
+    return lines
+
+
+def stderr_block(name: str, excerpt: str) -> list[str]:
+    # The gutter keeps scanner text from closing the fence or starting a
+    # GitHub Actions workflow command, which the runner detects after leading
+    # whitespace.
+    return [
+        f"- `{name}`: stderr excerpt:",
+        "",
+        "  ```text",
+        *(f"  | {line}".rstrip() for line in excerpt.splitlines()),
+        "  ```",
+    ]
+
+
 def write_summary(results: list[ScanResult]) -> None:
     lines = [
         "# Dependency security audit",
         "",
         f"Checked: {datetime.now(timezone.utc).isoformat()}",
         "",
-        "| Scanner | Status | Exit | Report |",
-        "|---|---|---:|---|",
+        "| Scanner | Status | Exit |",
+        "|---|---|---:|",
     ]
     for result in results:
         exit_code = "-" if result.exit_code is None else str(result.exit_code)
-        lines.append(
-            f"| `{result.name}` | {result.status} | {exit_code} | `{result.output_file}` |"
-        )
+        lines.append(f"| `{result.name}` | {result.status} | {exit_code} |")
+    if details := summary_details(results):
+        lines.extend(["", "## Findings and errors", "", *details])
     lines.extend(
         [
             "",
             "All scanners ran before enforcement. Warning-only results remain visible; "
             "findings and incomplete scans fail policy.",
+            "Local runs write complete scanner output to `target/ci-reports/security/`.",
         ]
     )
     summary = "\n".join(lines) + "\n"
     (REPORT_DIRECTORY / "summary.md").write_text(summary, encoding="utf-8")
+    sys.stdout.write(summary)
     if step_summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         with Path(step_summary).open("a", encoding="utf-8") as summary_file:
             summary_file.write(summary)

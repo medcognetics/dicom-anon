@@ -22,6 +22,10 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 REPORT_DIRECTORY = REPOSITORY_ROOT / "target" / "ci-reports" / "deprecations"
 USER_AGENT = "dicom-anon-dependency-health/0.1"
 WARNING_WINDOW_DAYS = 180
+FUTURE_INCOMPATIBILITY_PACKAGES = re.compile(
+    r"will be rejected by a future version of Rust: (?P<packages>[^\n]+)"
+)
+MAX_ERROR_LINE_LENGTH = 300
 
 
 @dataclass(frozen=True)
@@ -370,7 +374,6 @@ def check_rust_future_incompatibility() -> tuple[list[Finding], list[str]]:
             {"command": command, "error": str(error), "status": "incomplete"},
         )
         return [], [f"Rust future-incompatibility check could not start: {error}"]
-    output = f"{completed.stdout}\n{completed.stderr}"
     write_json(
         REPORT_DIRECTORY / "rust-future-incompatibility.json",
         {
@@ -380,13 +383,29 @@ def check_rust_future_incompatibility() -> tuple[list[Finding], list[str]]:
             "stderr": completed.stderr,
         },
     )
-    if completed.returncode != 0:
-        return [], [f"Rust future-incompatibility check exited {completed.returncode}"]
-    if "will be rejected by a future version of Rust" in output:
-        return [
-            Finding("Rust", "workspace", "locked", "future-incompatible code reported")
-        ], []
-    return [], []
+    return classify_rust_future_incompatibility(
+        completed.returncode, f"{completed.stdout}\n{completed.stderr}"
+    )
+
+
+def classify_rust_future_incompatibility(
+    exit_code: int, output: str
+) -> tuple[list[Finding], list[str]]:
+    """Name affected packages or the first Cargo error without copying full output."""
+    if exit_code != 0:
+        error = f"Rust future-incompatibility check exited {exit_code}"
+        first_error = next(
+            (line.strip() for line in output.splitlines() if line.startswith("error")),
+            None,
+        )
+        if first_error:
+            error = f"{error}: {first_error[:MAX_ERROR_LINE_LENGTH]}"
+        return [], [error]
+    match = FUTURE_INCOMPATIBILITY_PACKAGES.search(output)
+    if match is None:
+        return [], []
+    detail = f"future-incompatible code in {match.group('packages').strip()}"
+    return [Finding("Rust", "workspace", "locked", detail)], []
 
 
 def write_summary(findings: list[Finding], errors: list[str]) -> None:
@@ -415,9 +434,16 @@ def write_summary(findings: list[Finding], errors: list[str]) -> None:
         lines.extend(
             ["", "## Incomplete checks", "", *[f"- {error}" for error in errors]]
         )
-    lines.extend(["", "Findings are informational. Incomplete checks fail this job."])
+    lines.extend(
+        [
+            "",
+            "Findings are informational. Incomplete checks fail this job.",
+            "Local runs write complete command output to `target/ci-reports/deprecations/`.",
+        ]
+    )
     summary = "\n".join(lines) + "\n"
     (REPORT_DIRECTORY / "summary.md").write_text(summary, encoding="utf-8")
+    sys.stdout.write(summary)
     if step_summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         with Path(step_summary).open("a", encoding="utf-8") as summary_file:
             summary_file.write(summary)
