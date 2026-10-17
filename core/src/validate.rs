@@ -217,7 +217,11 @@ fn validate_pixel_gates(
     profile: &ProfileConfiguration,
     report: &mut ValidationReport,
 ) {
-    for violation in pixel::gate_violations(object, profile) {
+    for violation in pixel::gate_violations(
+        object,
+        Some(object.meta().media_storage_sop_class_uid()),
+        profile,
+    ) {
         let (code, tag, message) = match violation {
             PixelGateViolation::BurnedInAnnotationNotNo => (
                 "burned_in_annotation_not_no",
