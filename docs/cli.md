@@ -56,6 +56,8 @@ Anonymization and validation share these profile arguments:
 | `--descriptor-map PATH` | Load a JSON object keyed by canonical eight-digit tag, then exact source value and safe output value. |
 | `--safe-private-allowlist PATH` | Load a JSON array of `{ "creator": STRING, "element_offset": INTEGER }`. |
 | `--uid-map PATH` | Load a JSON object from original UID to replacement UID. Required for Safe Harbor anonymization. |
+| `--require-no-burned-in-annotation` | Fail unless Burned In Annotation `(0028,0301)` is exactly `NO`. A `YES`, empty, or absent value fails. |
+| `--allow-sop-class UID` | Permit only the given SOP Class UID; repeat for multiple SOP Classes. An absent or other SOP Class UID fails. |
 
 The presets enable these options before applying `--enable-option` and `--disable-option`:
 
@@ -66,6 +68,17 @@ The presets enable these options before applying `--enable-option` and `--disabl
 | `safe-harbor-metadata` | `clean-graphics`, `clean-structured-content`, `clean-descriptors`, `retain-modified-dates`, `retain-patient-characteristics` |
 
 Both commands default to `dicom-extended`. The `dicom` and `dicom-extended` presets use the serialized policy value `dicom`; reports distinguish them through `active_options`. `clean-pixel-data` and `clean-recognizable-visual-features` are accepted names but produce unsupported-option errors.
+
+The two pixel-risk gates are off by default and apply to every preset. With a gate active, `dicom-anonymize` exits with status 2 and writes no output for a failing input, and `dicom-validate` reports the error finding `burned_in_annotation_not_no` or `sop_class_not_allowed`. For mammography, a typical gate is:
+
+```console
+dicom-anonymize IN OUT --policy safe-harbor-metadata --patient-scope SUBJ-0001 \
+  --uid-map MAP --key-file KEY --require-no-burned-in-annotation \
+  --allow-sop-class 1.2.840.10008.5.1.4.1.1.1.2 \
+  --allow-sop-class 1.2.840.10008.5.1.4.1.1.13.1.3
+```
+
+For JPEG 2000 transfer syntaxes, `dicom-anonymize` always parses each frame codestream and removes comment (COM) marker segments. It fails with status 2 when it cannot do this safely. `--verbose` reports the number of removed segments as `removed_jpeg2000_comment_segments`. `dicom-validate` reports `jpeg2000_comment_present` or `jpeg2000_codestream_unparseable` as errors. See [Conformance](conformance.md#pixel-and-disclosure-limits) for the exact conditions.
 
 Example descriptor map:
 

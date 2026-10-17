@@ -86,4 +86,13 @@ pub enum Error {
     /// Patient's Age did not contain a valid DICOM AS value.
     #[error("invalid Patient's Age value")]
     InvalidPatientAge,
+    /// The burned-in annotation gate requires Burned In Annotation=NO.
+    #[error("Burned In Annotation (0028,0301) is not NO; pixel review is required")]
+    BurnedInAnnotationNotNo,
+    /// The SOP Class UID is absent or not in the configured allowlist.
+    #[error("SOP Class UID is not in the configured SOP Class allowlist")]
+    SopClassNotAllowed,
+    /// JPEG 2000 comment segments could not be removed safely.
+    #[error("cannot safely remove JPEG 2000 comment segments: {0}")]
+    UnsupportedJpeg2000(String),
 }

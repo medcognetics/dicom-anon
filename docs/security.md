@@ -27,6 +27,8 @@ Descriptor maps and safe-private allowlists are disclosure decisions. Review eve
 
 The default rejects files already marked Patient Identity Removed=`YES`. This prevents accidental repeated transformation. `--allow-reanonymize` is intended for deliberate re-keying; it does not preserve the pseudonyms from the first pass.
 
+For pixel risk, enable `--require-no-burned-in-annotation` and `--allow-sop-class` for each permitted SOP Class when the release depends on those declarations. A failing input exits with status 2 and writes no output. JPEG 2000 comment segments are always removed, and a JPEG 2000 codestream that cannot be rewritten safely fails. These controls use declared attributes and codestream structure. They do not inspect the pixel samples. The [conformance statement](conformance.md#pixel-and-disclosure-limits) lists the risks that stay with the caller.
+
 Invalid DA, DT, and TM values fail the operation instead of being copied. Missing patient scope also fails. Atomic file output is created only after parsing and transformation succeed, so an input error does not truncate the destination.
 
 ## Release review
@@ -36,7 +38,7 @@ Before disclosing output:
 1. run `dicom-validate` and retain the JSON report;
 2. use `--source` comparison when the original and linkage inputs are available;
 3. resolve every error-severity finding;
-4. inspect pixel data for burned-in text and recognizable features;
+4. inspect pixel data for burned-in text and recognizable features, also when the pixel-risk gates passed, unless the approved method record states why that review is unnecessary;
 5. inspect filenames, paths, archives, manifests, and linked records outside the DICOM object;
 6. confirm that the intended recipient and purpose match the de-identification risk assessment;
 7. sample representative SOP Classes and transfer syntaxes with an independent DICOM validator;
@@ -44,7 +46,7 @@ Before disclosing output:
 
 Do not include the key itself in those records. Use a non-secret key identifier or controlled configuration reference.
 
-A passing `safe-harbor-metadata` report covers only metadata processed under the supplied configuration. Pixel inspection, external mapping provenance and controls, re-identification-code safeguards, and the covered entity's “actual knowledge” determination remain outside the tool. The report does not claim HIPAA compliance.
+A passing `safe-harbor-metadata` report covers only metadata processed under the supplied configuration. Pixel inspection beyond the declared-attribute gates and JPEG 2000 comment removal, external mapping provenance and controls, re-identification-code safeguards, and the covered entity's “actual knowledge” determination remain outside the tool. The report does not claim HIPAA compliance.
 
 ## Dependency audit
 

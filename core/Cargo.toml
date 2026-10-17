@@ -26,6 +26,7 @@ zeroize.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+pure_jpeg2k.workspace = true
 
 [[bin]]
 name = "dicom-anonymize"

@@ -139,6 +139,12 @@ pub struct ProfileConfiguration {
     /// Original UID -> independently assigned replacement UID.
     #[serde(default)]
     pub uid_mappings: BTreeMap<String, String>,
+    /// Reject input unless Burned In Annotation (0028,0301) is exactly `NO`.
+    #[serde(default)]
+    pub require_no_burned_in_annotation: bool,
+    /// Permitted SOP Class UIDs. An empty set permits every SOP Class.
+    #[serde(default)]
+    pub sop_class_allowlist: BTreeSet<String>,
 }
 
 impl Default for ProfileConfiguration {
@@ -157,6 +163,8 @@ impl ProfileConfiguration {
             descriptor_mappings: BTreeMap::new(),
             safe_private_allowlist: BTreeSet::new(),
             uid_mappings: BTreeMap::new(),
+            require_no_burned_in_annotation: false,
+            sop_class_allowlist: BTreeSet::new(),
         }
     }
 
@@ -183,9 +191,7 @@ impl ProfileConfiguration {
             ]
             .into_iter()
             .collect(),
-            descriptor_mappings: BTreeMap::new(),
-            safe_private_allowlist: BTreeSet::new(),
-            uid_mappings: BTreeMap::new(),
+            ..Self::dicom()
         }
     }
 
@@ -256,6 +262,11 @@ impl ProfileConfiguration {
         {
             return Err(Error::InvalidProfileConfiguration(
                 "safe-private creators must be non-empty and contain no null characters".to_owned(),
+            ));
+        }
+        if !self.sop_class_allowlist.iter().all(|uid| valid_uid(uid)) {
+            return Err(Error::InvalidProfileConfiguration(
+                "SOP Class allowlist entries must be valid DICOM UIDs".to_owned(),
             ));
         }
         let mut replacement_uids = BTreeSet::new();
@@ -781,6 +792,17 @@ mod tests {
         assert!(matches!(
             cross_mapping_collision.validate(),
             Err(Error::InvalidSafeHarborUidMapping(_))
+        ));
+
+        let mut sop_classes = ProfileConfiguration::default();
+        sop_classes
+            .sop_class_allowlist
+            .insert("1.2.840.10008.5.1.4.1.1.1.2".to_owned());
+        assert!(sop_classes.validate().is_ok());
+        sop_classes.sop_class_allowlist.insert(String::new());
+        assert!(matches!(
+            sop_classes.validate(),
+            Err(Error::InvalidProfileConfiguration(_))
         ));
     }
 

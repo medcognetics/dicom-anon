@@ -40,6 +40,12 @@ pub struct ProfileArgs {
     /// JSON original-to-output UID map required by Safe Harbor mode.
     #[arg(long, value_name = "PATH")]
     pub uid_map: Option<PathBuf>,
+    /// Fail unless Burned In Annotation (0028,0301) is NO.
+    #[arg(long)]
+    pub require_no_burned_in_annotation: bool,
+    /// Permit only this SOP Class UID; repeat as needed. Other SOP Classes fail.
+    #[arg(long, value_name = "UID")]
+    pub allow_sop_class: Vec<String>,
 }
 
 impl ProfileArgs {
@@ -70,6 +76,10 @@ impl ProfileArgs {
         if let Some(path) = &self.uid_map {
             profile.uid_mappings = read_json(path, "UID map")?;
         }
+        profile.require_no_burned_in_annotation |= self.require_no_burned_in_annotation;
+        profile
+            .sop_class_allowlist
+            .extend(self.allow_sop_class.iter().cloned());
         profile.validate().map_err(|error| error.to_string())?;
         Ok(profile)
     }

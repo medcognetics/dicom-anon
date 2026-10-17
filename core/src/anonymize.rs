@@ -8,6 +8,7 @@ use dicom_object::mem::{InMemDicomObject, InMemElement};
 use dicom_object::{DefaultDicomObject, FileMetaTableBuilder};
 use serde::{Deserialize, Serialize};
 
+use crate::pixel;
 use crate::profile::{
     profile_basic_action, profile_option_action, profile_rule_for, safe_private_tags,
     DeidentificationPolicy, DicomOption, ProfileAction, ProfileConfiguration, PROFILE_VERSION,
@@ -83,6 +84,8 @@ pub struct AnonymizationReport {
     pub shifted_temporal_attributes: u64,
     /// Temporal attributes generalized to year-level Safe Harbor values.
     pub generalized_temporal_attributes: u64,
+    /// JPEG 2000 comment (COM) marker segments removed from Pixel Data.
+    pub removed_jpeg2000_comment_segments: u64,
 }
 
 impl AnonymizationReport {
@@ -106,6 +109,7 @@ impl AnonymizationReport {
             remapped_uid_attributes: 0,
             shifted_temporal_attributes: 0,
             generalized_temporal_attributes: 0,
+            removed_jpeg2000_comment_segments: 0,
         }
     }
 }
@@ -145,6 +149,13 @@ impl Anonymizer {
         {
             return Err(Error::AlreadyDeidentified);
         }
+        pixel::check_gates(source, &self.options.profile)?;
+        let transfer_syntax = source.meta().transfer_syntax().trim_end_matches('\0');
+        let jpeg2000 = if pixel::is_jpeg2000(transfer_syntax) {
+            Some(pixel::clean_jpeg2000(source)?)
+        } else {
+            None
+        };
 
         let patient_scope = self.patient_scope(source)?;
         let patient_pseudonym = self.options.secret.patient_id(&patient_scope);
@@ -169,9 +180,17 @@ impl Anonymizer {
         };
 
         let mut output = self.process_dataset(source, &context, &mut report)?;
+        if let Some(cleaning) = jpeg2000 {
+            report.removed_jpeg2000_comment_segments = cleaning.removed_segments;
+            if let Some(replacement) = cleaning.replacement {
+                if output.get(tags::PIXEL_DATA).is_some() {
+                    output.put(replacement);
+                }
+            }
+        }
         add_deidentification_markers(&mut output, &self.options.profile, &patient_pseudonym);
         let meta = FileMetaTableBuilder::new()
-            .transfer_syntax(source.meta().transfer_syntax().trim_end_matches('\0'))
+            .transfer_syntax(transfer_syntax)
             .implementation_class_uid(IMPLEMENTATION_CLASS_UID)
             .implementation_version_name(IMPLEMENTATION_VERSION_NAME);
         let output = output
