@@ -23,15 +23,15 @@ Safe Harbor metadata mode adds two sensitive inputs: the independently assigned 
 
 ### Generated UID maps
 
-`--generate-uid-map` and `anonymize_with_generated_uid_map` assign each missing Safe Harbor replacement from the operating-system CSPRNG. Each replacement is a random version 4 UUID integer under the UID root. It does not depend on the source UID, the key, the patient scope, or other patient data, so it meets the intent of a re-identification code that is not derived from information about the individual. Each replacement differs from every UID in the source object and from every source and replacement in the starting map.
+`--generate-uid-map` and `anonymize_with_generated_uid_map` assign each missing Safe Harbor replacement from the operating-system CSPRNG. Each replacement is a random version 4 UUID integer under the UID root. It does not depend on the source UID, the key, the patient scope, or other patient data, so it meets the intent of a re-identification code that is not derived from information about the individual. Each replacement differs from every UID in the source object and its File Meta Information, and from every source and replacement in the starting map. Generation fails, with the attribute path only, when a source UID that needs a replacement is empty or is not a valid DICOM UID. It also fails when a starting replacement equals a UID in the source object.
 
 The generated map is the only link from output UIDs to source UIDs. It is a re-identification mechanism. Apply these custody rules:
 
 1. Keep the map only with the party that is permitted to re-identify. Do not send it with the de-identified output or to its recipient.
 2. Do not write the map, or the output of `--list-required-uids`, to logs, reports, tickets, or source control. Both contain source UIDs.
-3. Store the map with access control and encryption at rest. The command writes the map file atomically with owner-only permissions (`0600`) on Unix. It replaces an existing file at that path.
+3. Store the map with access control and encryption at rest. The command writes the map file atomically with owner-only permissions (`0600`) on Unix. It replaces an existing file at that path only when that file is also the `--uid-map` input. When the path is a symbolic link, the command replaces the link target and keeps the link. It rejects a dangling link.
 4. Use one map for all files of one study or other linkage domain. Pass the current map as `--uid-map` and as the `--generate-uid-map` destination for each file, or keep the returned map and pass it in the next configuration. Serialize updates to one map. Concurrent writers can lose entries.
-5. The command writes the map before the DICOM output. If the output write fails, the map can contain entries that no output uses. These entries do not disclose output UIDs.
+5. The command writes and syncs the map, and on Unix its directory entry, before the DICOM output. If the output write fails, the map can contain entries that no output uses. These entries do not disclose output UIDs.
 6. Lost map entries cannot be recovered from the key. Later files then receive different UIDs, which breaks UID referential integrity across the study. Back up the map under the same controls.
 7. Destroy the map when the retention period for re-identification ends.
 

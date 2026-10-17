@@ -154,10 +154,34 @@ fn generate_uid_map(
     map_path: &Path,
 ) -> Result<AnonymizationReport, String> {
     let output = args.output.as_deref().unwrap_or("-");
-    if (args.input != "-" && same_path(map_path, Path::new(&args.input)))
-        || (output != "-" && same_path(map_path, Path::new(output)))
+    let protected = [
+        (args.input != "-").then(|| PathBuf::from(&args.input)),
+        (output != "-").then(|| PathBuf::from(output)),
+        args.key_file.clone(),
+        args.profile.descriptor_map.clone(),
+        args.profile.safe_private_allowlist.clone(),
+    ];
+    if protected
+        .iter()
+        .flatten()
+        .any(|path| same_path(map_path, path))
     {
-        return Err("--generate-uid-map must not name the input or output file".to_owned());
+        return Err(
+            "--generate-uid-map must not name the input, output, key, descriptor-map, or safe-private allowlist file"
+                .to_owned(),
+        );
+    }
+    if std::fs::symlink_metadata(map_path).is_ok()
+        && !args
+            .profile
+            .uid_map
+            .as_deref()
+            .is_some_and(|loaded| same_path(map_path, loaded))
+    {
+        return Err(
+            "--generate-uid-map names an existing file; pass the same file as --uid-map to extend it"
+                .to_owned(),
+        );
     }
     let source = read_source(&args.input)?;
     let (anonymized, report, map) = anonymizer
@@ -168,7 +192,8 @@ fn generate_uid_map(
     let mut json = serde_json::to_vec_pretty(&map)
         .map_err(|error| format!("cannot serialize UID map: {error}"))?;
     json.push(b'\n');
-    write_atomic(map_path, &json)?;
+    // Replace the link target, not a symbolic link that names the loaded map.
+    write_atomic(&normalize(map_path), &json)?;
     write_output(output, &bytes)?;
     Ok(report)
 }
@@ -195,13 +220,22 @@ fn write_output(output: &str, bytes: &[u8]) -> Result<(), String> {
         .map_err(|error| format!("cannot flush stdout: {error}"))
 }
 
+/// Compare paths after resolving symbolic links, including the parent of a new file.
 fn same_path(left: &Path, right: &Path) -> bool {
-    let normalize = |path: &Path| {
-        path.canonicalize()
-            .or_else(|_| std::path::absolute(path))
-            .unwrap_or_else(|_| path.to_owned())
-    };
     normalize(left) == normalize(right)
+}
+
+fn normalize(path: &Path) -> PathBuf {
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
+    match (absolute.parent(), absolute.file_name()) {
+        (Some(parent), Some(name)) => parent
+            .canonicalize()
+            .map_or_else(|_| absolute.clone(), |parent| parent.join(name)),
+        _ => absolute,
+    }
 }
 
 fn write_atomic(output: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -222,5 +256,23 @@ fn write_atomic(output: &Path, bytes: &[u8]) -> Result<(), String> {
     temporary
         .persist(output)
         .map_err(|error| format!("cannot replace {}: {}", output.display(), error.error))?;
+    sync_directory(parent)
+}
+
+/// Persist the rename so that a crash cannot keep a later output without this file.
+#[cfg(unix)]
+fn sync_directory(directory: &Path) -> Result<(), String> {
+    let directory = if directory.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        directory
+    };
+    File::open(directory)
+        .and_then(|handle| handle.sync_all())
+        .map_err(|error| format!("cannot sync {}: {error}", directory.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_directory: &Path) -> Result<(), String> {
     Ok(())
 }

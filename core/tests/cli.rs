@@ -704,3 +704,117 @@ fn generate_uid_map_writes_a_random_complete_map_before_the_output() {
     assert_eq!(keyed.status.code(), Some(2));
     assert!(!directory.path().join("keyed.json").exists());
 }
+
+#[test]
+fn generate_uid_map_rejects_aliases_of_outputs_and_configuration_inputs() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.dcm");
+    std::fs::write(&source, nested_uid_source()).unwrap();
+    let key_file = directory.path().join("key");
+    std::fs::write(&key_file, KEY).unwrap();
+    let real = directory.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let alias = directory.path().join("alias");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    #[cfg(not(unix))]
+    std::fs::create_dir(&alias).unwrap();
+
+    let key_alias = Command::new(env!("CARGO_BIN_EXE_dicom-anonymize"))
+        .arg(&source)
+        .arg(directory.path().join("output.dcm"))
+        .args([
+            "--policy",
+            "safe-harbor-metadata",
+            "--patient-scope",
+            "SUBJ-0001",
+        ])
+        .arg("--key-file")
+        .arg(&key_file)
+        .arg("--generate-uid-map")
+        .arg(&key_file)
+        .output()
+        .unwrap();
+    assert_eq!(key_alias.status.code(), Some(2));
+    assert_eq!(std::fs::read_to_string(&key_file).unwrap(), KEY);
+
+    #[cfg(unix)]
+    {
+        let output_alias = safe_harbor_command()
+            .arg(&source)
+            .arg(real.join("new.dcm"))
+            .arg("--generate-uid-map")
+            .arg(alias.join("new.dcm"))
+            .output()
+            .unwrap();
+        assert_eq!(output_alias.status.code(), Some(2));
+        assert!(!real.join("new.dcm").exists());
+    }
+}
+
+#[test]
+fn generate_uid_map_does_not_replace_a_map_that_was_not_loaded() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.dcm");
+    std::fs::write(&source, nested_uid_source()).unwrap();
+    let study_map = directory.path().join("study.json");
+    let existing = "{\"2.25.1001\": \"2.25.1002\"}\n";
+    std::fs::write(&study_map, existing).unwrap();
+    let output = safe_harbor_command()
+        .arg(&source)
+        .arg(directory.path().join("output.dcm"))
+        .arg("--generate-uid-map")
+        .arg(&study_map)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--uid-map"));
+    assert_eq!(std::fs::read_to_string(&study_map).unwrap(), existing);
+    assert!(!directory.path().join("output.dcm").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn generate_uid_map_updates_the_target_of_a_symbolically_linked_map() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.dcm");
+    std::fs::write(&source, nested_uid_source()).unwrap();
+    let target = directory.path().join("study.json");
+    std::fs::write(&target, "{}").unwrap();
+    let link = directory.path().join("current.json");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let output = safe_harbor_command()
+        .arg(&source)
+        .arg(directory.path().join("output.dcm"))
+        .arg("--uid-map")
+        .arg(&link)
+        .arg("--generate-uid-map")
+        .arg(&link)
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(std::fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    let map: std::collections::BTreeMap<String, String> =
+        serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+    assert_eq!(map.len(), 4);
+
+    let dangling = directory.path().join("dangling.json");
+    std::os::unix::fs::symlink(directory.path().join("missing.json"), &dangling).unwrap();
+    let rejected = safe_harbor_command()
+        .arg(&source)
+        .arg(directory.path().join("second.dcm"))
+        .arg("--generate-uid-map")
+        .arg(&dangling)
+        .output()
+        .unwrap();
+    assert_eq!(rejected.status.code(), Some(2));
+    assert!(!directory.path().join("missing.json").exists());
+}

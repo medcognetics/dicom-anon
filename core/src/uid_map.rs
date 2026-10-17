@@ -9,10 +9,10 @@ use std::fmt;
 
 use dicom_core::value::Value;
 use dicom_core::{Tag, VR};
-use dicom_object::InMemDicomObject;
+use dicom_object::{DefaultDicomObject, InMemDicomObject};
 use serde::{Deserialize, Serialize};
 
-use crate::profile::DeidentificationPolicy;
+use crate::profile::{valid_uid, DeidentificationPolicy};
 use crate::{Error, Options, Result};
 
 const MAXIMUM_GENERATION_ATTEMPTS: usize = 16;
@@ -72,16 +72,41 @@ impl UidResolver {
         }
     }
 
-    /// Start generation from `map`, reserving every UID in `source` and in the map.
-    pub(crate) fn generate(source: &InMemDicomObject, map: BTreeMap<String, String>) -> Self {
+    /// Start generation from `map`, reserving every UID in `source`, its file meta, and the map.
+    ///
+    /// Fail when a starting replacement equals a UID in `source` or its file meta.
+    pub(crate) fn generate(
+        source: &DefaultDicomObject,
+        map: BTreeMap<String, String>,
+    ) -> Result<Self> {
         let mut reserved = BTreeSet::new();
         collect_all_uids(source, &mut reserved);
+        let meta = source.meta();
+        reserved.extend(
+            [
+                meta.media_storage_sop_class_uid(),
+                meta.media_storage_sop_instance_uid(),
+                meta.transfer_syntax(),
+                meta.implementation_class_uid(),
+            ]
+            .into_iter()
+            .chain(meta.private_information_creator_uid())
+            .map(|value| value.trim_end_matches(['\0', ' ']).to_owned()),
+        );
+        if map
+            .values()
+            .any(|replacement| reserved.contains(replacement))
+        {
+            return Err(Error::InvalidSafeHarborUidMapping(
+                "replacement UIDs must differ from every source UID".to_owned(),
+            ));
+        }
         reserved.extend(map.keys().cloned());
         reserved.extend(map.values().cloned());
-        Self {
+        Ok(Self {
             mode: Mode::Generate { map, reserved },
             path: Vec::new(),
-        }
+        })
     }
 
     pub(crate) fn enter_item(&mut self, sequence: Tag, index: usize) {
@@ -113,6 +138,11 @@ impl UidResolver {
             Mode::Generate { map, reserved } => {
                 if let Some(replacement) = map.get(original) {
                     return Ok(replacement.clone());
+                }
+                if !valid_uid(original) {
+                    return Err(Error::InvalidSourceUid {
+                        path: format_path(&self.path, tag),
+                    });
                 }
                 let replacement = unique_random_uid(&options.uid_root, reserved)?;
                 map.insert(original.to_owned(), replacement.clone());
@@ -556,5 +586,67 @@ mod tests {
         let version = first[5..].parse::<u128>().unwrap();
         assert_eq!((version >> 76) & 0xF, 4);
         assert_eq!((version >> 62) & 0x3, 2);
+    }
+
+    #[test]
+    fn generation_rejects_invalid_or_empty_source_uids_by_path() {
+        for (value, path) in [("1.02.3", "(0020,000D)"), ("", "(0020,0052)")] {
+            let mut source = tomosynthesis();
+            let tag = if path == "(0020,000D)" {
+                tags::STUDY_INSTANCE_UID
+            } else {
+                tags::FRAME_OF_REFERENCE_UID
+            };
+            source.put(uid(tag, value));
+            let error = safe_harbor(BTreeMap::new())
+                .anonymize_with_generated_uid_map(&source)
+                .unwrap_err();
+            assert!(
+                matches!(&error, Error::InvalidSourceUid { path: found } if found == path),
+                "{error}"
+            );
+            if !value.is_empty() {
+                assert!(!error.to_string().contains(value));
+            }
+        }
+    }
+
+    #[test]
+    fn generation_rejects_starting_replacements_that_equal_object_uids() {
+        let error = safe_harbor(map(&[(INSTANCE, STUDY)]))
+            .anonymize_with_generated_uid_map(&tomosynthesis())
+            .unwrap_err();
+        assert!(matches!(error, Error::InvalidSafeHarborUidMapping(_)));
+        assert!(!error.to_string().contains(STUDY));
+    }
+
+    #[test]
+    fn generation_rejects_starting_replacements_that_equal_file_meta_uids() {
+        let source = tomosynthesis();
+        let implementation = source
+            .meta()
+            .implementation_class_uid()
+            .trim_end_matches('\0')
+            .to_owned();
+        let error = safe_harbor(map(&[(STUDY, implementation.as_str())]))
+            .anonymize_with_generated_uid_map(&source)
+            .unwrap_err();
+        assert!(matches!(error, Error::InvalidSafeHarborUidMapping(_)));
+    }
+
+    #[test]
+    fn generation_rejects_starting_replacements_that_equal_the_private_creator_uid() {
+        let creator = "2.25.60756160252525405890473755640066903379";
+        let source = tomosynthesis();
+        let meta = FileMetaTableBuilder::new()
+            .transfer_syntax(uids::EXPLICIT_VR_LITTLE_ENDIAN)
+            .media_storage_sop_class_uid(BREAST_TOMOSYNTHESIS)
+            .media_storage_sop_instance_uid(INSTANCE)
+            .private_information_creator_uid(creator);
+        let source = source.into_inner().with_meta(meta).unwrap();
+        let error = safe_harbor(map(&[(STUDY, creator)]))
+            .anonymize_with_generated_uid_map(&source)
+            .unwrap_err();
+        assert!(matches!(error, Error::InvalidSafeHarborUidMapping(_)));
     }
 }

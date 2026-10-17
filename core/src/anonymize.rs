@@ -174,7 +174,7 @@ impl Anonymizer {
         if self.options.profile.policy != DeidentificationPolicy::SafeHarborMetadata {
             return Err(Error::UidMapGenerationRequiresSafeHarbor);
         }
-        let resolver = UidResolver::generate(source, self.options.profile.uid_mappings.clone());
+        let resolver = UidResolver::generate(source, self.options.profile.uid_mappings.clone())?;
         let (output, report, uids) = self.anonymize_with(source, resolver)?;
         Ok((output, report, uids.into_map()))
     }

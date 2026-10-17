@@ -317,7 +317,7 @@ impl ProfileConfiguration {
     }
 }
 
-fn valid_uid(uid: &str) -> bool {
+pub(crate) fn valid_uid(uid: &str) -> bool {
     !uid.is_empty()
         && uid.len() <= 64
         && uid.split('.').all(|component| {

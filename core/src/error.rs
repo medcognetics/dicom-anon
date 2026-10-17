@@ -85,6 +85,14 @@ pub enum Error {
         /// Attribute path, for example `(0020,9221)[0]/(0020,9164)`.
         path: String,
     },
+    /// A source UID that needs a generated replacement is empty or malformed.
+    ///
+    /// The path identifies the attribute. The error never contains the UID value.
+    #[error("source UID at {path} is empty or is not a valid DICOM UID")]
+    InvalidSourceUid {
+        /// Attribute path, for example `(0020,000D)`.
+        path: String,
+    },
     /// UID map generation was requested outside the Safe Harbor metadata policy.
     #[error("UID map generation requires the safe-harbor-metadata policy")]
     UidMapGenerationRequiresSafeHarbor,

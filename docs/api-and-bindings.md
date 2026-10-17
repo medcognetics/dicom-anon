@@ -81,7 +81,7 @@ options.profile.uid_mappings.insert("1.2.3".to_owned(), "2.25.101".to_owned());
 # }
 ```
 
-In Safe Harbor mode, `Anonymizer::required_uids` returns a `RequiredUid { path, uid }` for each source UID occurrence that the profile replaces. It uses the same rule decisions as `anonymize`. `Anonymizer::anonymize_with_generated_uid_map` starts from `options.profile.uid_mappings`, assigns each missing replacement from the operating-system CSPRNG, and returns the output, the report, and the complete map. It returns `Error::UidMapGenerationRequiresSafeHarbor` for other policies. A missing mapping returns `Error::MissingSafeHarborUidMapping { path }`, which contains no UID value. The listing and the map contain source UIDs; follow the custody rules in [Security model](security.md).
+In Safe Harbor mode, `Anonymizer::required_uids` returns a `RequiredUid { path, uid }` for each source UID occurrence that the profile replaces. It uses the same rule decisions as `anonymize`. `Anonymizer::anonymize_with_generated_uid_map` starts from `options.profile.uid_mappings`, assigns each missing replacement from the operating-system CSPRNG, and returns the output, the report, and the complete map. It returns `Error::UidMapGenerationRequiresSafeHarbor` for other policies and `Error::InvalidSourceUid { path }` for an empty or malformed source UID. A missing mapping returns `Error::MissingSafeHarborUidMapping { path }`, which contains no UID value. The listing and the map contain source UIDs; follow the custody rules in [Security model](security.md).
 
 ```rust
 # use dicom_anon::{Anonymizer, DefaultDicomObject, Options, ProfileConfiguration, SecretKey};

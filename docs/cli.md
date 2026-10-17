@@ -82,7 +82,7 @@ Safe Harbor UID map arguments:
 | Argument | Meaning |
 |---|---|
 | `--list-required-uids` | Print a JSON object `{"required_uids": [{"path": PATH, "uid": UID}, ...]}` to stdout and write no DICOM output. The list contains each source UID occurrence that the configured profile replaces, in traversal order. It uses the same rule decisions as anonymization and fails for the same input errors, except a missing UID mapping. It conflicts with `OUTPUT`, `--in-place`, `--generate-uid-map`, and `--verbose`. |
-| `--generate-uid-map PATH` | Safe Harbor only. Start from the `--uid-map` contents, or an empty map. Assign each missing replacement from the operating-system CSPRNG under `--uid-root`, then write the complete map to `PATH` before the DICOM output. `PATH` must not name the input or output file. It may name the `--uid-map` file, so that one map grows over a study. Conflicts with `--in-place`. |
+| `--generate-uid-map PATH` | Safe Harbor only. Start from the `--uid-map` contents, or an empty map. Assign each missing replacement from the operating-system CSPRNG under `--uid-root`, then write the complete map to `PATH` before the DICOM output. `PATH` must not name the input, output, key, descriptor-map, or safe-private allowlist file, also through a symbolic link. It may name the `--uid-map` file, so that one map grows over a study. If `PATH` already exists, it must be the same file as `--uid-map`; the command does not replace a map that it did not load. Conflicts with `--in-place`. |
 
 A path has one `(gggg,eeee)[n]/` component for each enclosing sequence item and ends with the attribute tag. A missing Safe Harbor mapping fails with that path and never the UID value. See [Security model](security.md) for map custody rules.
 
