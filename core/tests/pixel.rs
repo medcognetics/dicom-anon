@@ -792,10 +792,8 @@ fn dct_codestream(transfer_syntax: &str, image: &DctImage, exif: Option<&[u8]>) 
 
 /// Remove the JFIF APP0 segment that the encoder writes after SOI.
 fn without_jfif(codestream: &[u8]) -> Vec<u8> {
-    assert_eq!(&codestream[2..4], &[0xFF, 0xE0]);
-    assert_eq!(&codestream[6..11], b"JFIF\0");
     let mut output = codestream.to_vec();
-    output.drain(2..2 + segment_length(codestream, 2));
+    output.drain(2..after_jfif(codestream));
     output
 }
 
@@ -813,8 +811,9 @@ fn first_scan(codestream: &[u8]) -> usize {
     header_segments(codestream).last().unwrap().1
 }
 
-/// Offset after the JFIF APP0 segment.
+/// Offset after the JFIF APP0 segment that follows SOI.
 fn after_jfif(codestream: &[u8]) -> usize {
+    assert_eq!(&codestream[2..4], &[0xFF, 0xE0]);
     assert_eq!(&codestream[6..11], b"JFIF\0");
     2 + segment_length(codestream, 2)
 }
@@ -837,10 +836,10 @@ fn restart_markers(codestream: &[u8]) -> usize {
 }
 
 /// Decoded samples and image description from the pinned pure-Rust decoder.
-fn decode_dct(codestream: &[u8]) -> (String, Vec<u8>) {
+fn decode_dct(codestream: &[u8]) -> (jpeg_decoder::ImageInfo, Vec<u8>) {
     let mut decoder = jpeg_decoder::Decoder::new(codestream);
     let pixels = decoder.decode().unwrap();
-    (format!("{:?}", decoder.info().unwrap()), pixels)
+    (decoder.info().unwrap(), pixels)
 }
 
 /// Synthetic 8-bit object whose Image Pixel attributes describe the DCT fixture.
