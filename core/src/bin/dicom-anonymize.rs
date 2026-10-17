@@ -193,7 +193,9 @@ fn generate_uid_map(
         .map_err(|error| format!("cannot serialize UID map: {error}"))?;
     json.push(b'\n');
     // Replace the link target, not a symbolic link that names the loaded map.
-    write_atomic(&normalize(map_path), &json)?;
+    let map_target = normalize(map_path);
+    write_atomic(&map_target, &json)?;
+    sync_directory(map_target.parent().unwrap_or_else(|| Path::new(".")))?;
     write_output(output, &bytes)?;
     Ok(report)
 }
@@ -256,10 +258,13 @@ fn write_atomic(output: &Path, bytes: &[u8]) -> Result<(), String> {
     temporary
         .persist(output)
         .map_err(|error| format!("cannot replace {}: {}", output.display(), error.error))?;
-    sync_directory(parent)
+    Ok(())
 }
 
-/// Persist the rename so that a crash cannot keep a later output without this file.
+/// Persist the map rename so that a crash cannot keep a later output without its map.
+///
+/// The command fails before it writes the DICOM output when the file system
+/// cannot sync the directory.
 #[cfg(unix)]
 fn sync_directory(directory: &Path) -> Result<(), String> {
     let directory = if directory.as_os_str().is_empty() {
