@@ -4,6 +4,9 @@
 //! the declared Burned In Annotation value, the SOP Class, and JPEG 2000 comment
 //! (COM) marker segments, which can carry text outside the image samples.
 
+use std::borrow::Cow;
+use std::ops::Range;
+
 use dicom_core::value::{PixelFragmentSequence, Value};
 use dicom_core::Tag;
 use dicom_dictionary_std::tags;
@@ -23,6 +26,7 @@ const JPEG_2000_TRANSFER_SYNTAXES: [&str; 7] = [
     "1.2.840.10008.1.2.4.203",
 ];
 const EXTENDED_OFFSET_TABLE: Tag = Tag(0x7FE0, 0x0001);
+const ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH: Tag = Tag(0x7FE0, 0x0003);
 
 const SOC: u16 = 0xFF4F;
 const SIZ: u16 = 0xFF51;
@@ -96,16 +100,13 @@ pub(crate) fn clean_jpeg2000(object: &InMemDicomObject) -> Result<Jpeg2000Cleani
         return Err(unsupported("Pixel Data is not encapsulated"));
     };
     let frames = frame_fragments(object, sequence)?;
-    let mut cleaned = Vec::with_capacity(frames.len());
+    // Keep only scan results so that concatenated frame copies do not stay alive.
+    let mut scans = Vec::with_capacity(frames.len());
     let mut removed_segments = 0_u64;
     for frame in &frames {
-        let codestream = frame
-            .iter()
-            .flat_map(|fragment| fragment.iter().copied())
-            .collect::<Vec<_>>();
-        let (output, removed) = strip_comments(&codestream)?;
-        removed_segments += removed;
-        cleaned.push(output);
+        let scan = scan_comments(&frame_codestream(frame))?;
+        removed_segments += scan.comments.len() as u64;
+        scans.push(scan);
     }
     if removed_segments == 0 {
         return Ok(Jpeg2000Cleaning {
@@ -118,21 +119,32 @@ pub(crate) fn clean_jpeg2000(object: &InMemDicomObject) -> Result<Jpeg2000Cleani
             "comment removal would invalidate the Extended Offset Table",
         ));
     }
+    if object
+        .get(ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH)
+        .is_some()
+    {
+        return Err(unsupported(
+            "comment removal would invalidate Encapsulated Pixel Data Value Total Length",
+        ));
+    }
 
-    let mut fragments = Vec::with_capacity(cleaned.len());
-    let mut offsets = Vec::with_capacity(cleaned.len());
+    // Rebuild the Basic Offset Table only when the source has one.
+    let write_offsets = !sequence.offset_table().is_empty();
+    let mut fragments = Vec::with_capacity(frames.len());
+    let mut offsets = Vec::new();
     let mut offset = 0_u64;
-    for mut fragment in cleaned {
+    for (frame, scan) in frames.iter().zip(&scans) {
+        let mut fragment = rewrite_without_comments(&frame_codestream(frame), scan);
         if fragment.len() % 2 == 1 {
             fragment.push(0);
         }
-        offsets
-            .push(u32::try_from(offset).map_err(|_| unsupported("Basic Offset Table overflow"))?);
-        offset += 8 + fragment.len() as u64;
+        if write_offsets {
+            offsets.push(
+                u32::try_from(offset).map_err(|_| unsupported("Basic Offset Table overflow"))?,
+            );
+            offset += 8 + fragment.len() as u64;
+        }
         fragments.push(fragment);
-    }
-    if sequence.offset_table().is_empty() {
-        offsets.clear();
     }
     Ok(Jpeg2000Cleaning {
         replacement: Some(InMemElement::new(
@@ -144,9 +156,27 @@ pub(crate) fn clean_jpeg2000(object: &InMemDicomObject) -> Result<Jpeg2000Cleani
     })
 }
 
-/// Count COM marker segments in every frame without changing the object.
+/// Count COM marker segments in every frame without changing or copying the object.
 pub(crate) fn count_jpeg2000_comments(object: &InMemDicomObject) -> Result<u64> {
-    clean_jpeg2000(object).map(|cleaning| cleaning.removed_segments)
+    let Some(element) = object.get(tags::PIXEL_DATA) else {
+        return Ok(0);
+    };
+    let Value::PixelSequence(sequence) = element.value() else {
+        return Err(unsupported("Pixel Data is not encapsulated"));
+    };
+    let mut count = 0_u64;
+    for frame in frame_fragments(object, sequence)? {
+        count += scan_comments(&frame_codestream(frame))?.comments.len() as u64;
+    }
+    Ok(count)
+}
+
+/// Borrow a single-fragment frame; concatenate only a frame split across fragments.
+fn frame_codestream(frame: &[Vec<u8>]) -> Cow<'_, [u8]> {
+    match frame {
+        [fragment] => Cow::Borrowed(fragment.as_slice()),
+        _ => Cow::Owned(frame.concat()),
+    }
 }
 
 /// Group fragments into frames without guessing from fragment contents.
@@ -208,10 +238,21 @@ fn frame_fragments<'a>(
         .collect())
 }
 
-/// Remove COM segments from the main header and every tile-part header.
+/// COM segment locations found by a structural codestream scan.
+#[derive(Debug, PartialEq, Eq)]
+struct CommentScan {
+    /// End of the codestream after EOC, without trailing padding.
+    end: usize,
+    /// Byte ranges of COM marker segments in codestream order.
+    comments: Vec<Range<usize>>,
+    /// Psot field offset and removed byte count for each explicit-length tile-part with comments.
+    psot_updates: Vec<(usize, u32)>,
+}
+
+/// Find COM segments in the main header and every tile-part header without copying data.
 ///
-/// Returns the rewritten codestream without trailing padding and the number of removed segments.
-fn strip_comments(input: &[u8]) -> Result<(Vec<u8>, u64)> {
+/// The scan fails when the structure cannot be rewritten safely.
+fn scan_comments(input: &[u8]) -> Result<CommentScan> {
     let mut end = input.len();
     while end > 0 && input[end - 1] == 0 {
         end -= 1;
@@ -227,9 +268,8 @@ fn strip_comments(input: &[u8]) -> Result<(Vec<u8>, u64)> {
         return Err(unsupported("SIZ does not follow SOC"));
     }
 
-    let mut output = Vec::with_capacity(end);
-    output.extend_from_slice(&input[..2]);
-    let mut removed = 0_u64;
+    let mut comments = Vec::new();
+    let mut psot_updates = Vec::new();
     let mut position = 2;
     let mut has_tlm = false;
     loop {
@@ -241,12 +281,9 @@ fn strip_comments(input: &[u8]) -> Result<(Vec<u8>, u64)> {
         }
         let length = segment_length(input, position, data_end, code)?;
         match code {
-            COM => removed += 1,
-            TLM => {
-                has_tlm = true;
-                output.extend_from_slice(&input[position..position + length]);
-            }
-            _ => output.extend_from_slice(&input[position..position + length]),
+            COM => comments.push(position..position + length),
+            TLM => has_tlm = true,
+            _ => {}
         }
         position += length;
     }
@@ -273,8 +310,6 @@ fn strip_comments(input: &[u8]) -> Result<(Vec<u8>, u64)> {
                 .filter(|&tile_end| tile_end <= data_end && tile_end >= start + 14)
                 .ok_or_else(|| unsupported("tile-part length is invalid"))?
         };
-        let sot_output = output.len();
-        output.extend_from_slice(&input[position..position + 12]);
         position += 12;
         let mut tile_removed = 0_usize;
         loop {
@@ -286,20 +321,20 @@ fn strip_comments(input: &[u8]) -> Result<(Vec<u8>, u64)> {
             }
             let length = segment_length(input, position, tile_end, code)?;
             if code == COM {
-                removed += 1;
+                comments.push(position..position + length);
                 tile_removed += length;
-            } else {
-                output.extend_from_slice(&input[position..position + length]);
             }
             position += length;
         }
-        output.extend_from_slice(&input[position..tile_end]);
+        check_tile_data(&input[position + 2..tile_end])?;
         position = tile_end;
         if tile_removed > 0 {
             tile_comments = true;
             if psot != 0 {
-                let psot = psot - u32::try_from(tile_removed).expect("bounded by Psot");
-                output[sot_output + 6..sot_output + 10].copy_from_slice(&psot.to_be_bytes());
+                psot_updates.push((
+                    start + 6,
+                    u32::try_from(tile_removed).expect("bounded by Psot"),
+                ));
             }
         }
     }
@@ -311,8 +346,80 @@ fn strip_comments(input: &[u8]) -> Result<(Vec<u8>, u64)> {
             "tile-part comment removal would invalidate the TLM marker segment",
         ));
     }
-    output.extend_from_slice(&input[data_end..end]);
-    Ok((output, removed))
+    Ok(CommentScan {
+        end,
+        comments,
+        psot_updates,
+    })
+}
+
+/// Reject marker codes in tile-part data.
+///
+/// T.800 bit stuffing keeps packet headers and code-block data free of 0xFF followed by a
+/// byte above 0x8F. Only the in-band SOP segment and EPH marker may use that range. The SOP
+/// segment fields are skipped because Nsop can contain any byte value. Any other such code,
+/// for example an EOC before the final EOC, indicates content that is not tile data.
+fn check_tile_data(data: &[u8]) -> Result<()> {
+    let mut index = 0;
+    while index + 1 < data.len() {
+        if data[index] != 0xFF || data[index + 1] <= 0x8F {
+            index += 1;
+            continue;
+        }
+        match data[index + 1] {
+            0x91 => {
+                if data.get(index + 2..index + 4) != Some(&[0x00, 0x04]) || index + 6 > data.len() {
+                    return Err(unsupported("SOP marker segment is invalid"));
+                }
+                index += 6;
+            }
+            0x92 => index += 2,
+            _ => return Err(unsupported("tile-part data contains a marker code")),
+        }
+    }
+    Ok(())
+}
+
+/// Copy the codestream without its COM segments, without padding, and with updated Psot values.
+fn rewrite_without_comments(input: &[u8], scan: &CommentScan) -> Vec<u8> {
+    let removed_bytes = scan
+        .comments
+        .iter()
+        .map(ExactSizeIterator::len)
+        .sum::<usize>();
+    let mut output = Vec::with_capacity(scan.end - removed_bytes);
+    let mut cursor = 0;
+    for comment in &scan.comments {
+        output.extend_from_slice(&input[cursor..comment.start]);
+        cursor = comment.end;
+    }
+    output.extend_from_slice(&input[cursor..scan.end]);
+    // Both lists are in codestream order, so one pass finds each field's output offset.
+    let mut comments = scan.comments.iter().peekable();
+    let mut shift = 0;
+    for &(field, removed) in &scan.psot_updates {
+        while let Some(comment) = comments.next_if(|comment| comment.end <= field) {
+            shift += comment.len();
+        }
+        let field = field - shift;
+        let psot = u32::from_be_bytes(
+            output[field..field + 4]
+                .try_into()
+                .expect("slice has four bytes"),
+        );
+        output[field..field + 4].copy_from_slice(&(psot - removed).to_be_bytes());
+    }
+    output
+}
+
+/// Scan and rewrite one codestream. Returns the output without padding and the removed count.
+#[cfg(test)]
+fn strip_comments(input: &[u8]) -> Result<(Vec<u8>, u64)> {
+    let scan = scan_comments(input)?;
+    Ok((
+        rewrite_without_comments(input, &scan),
+        scan.comments.len() as u64,
+    ))
 }
 
 fn marker(input: &[u8], position: usize) -> Option<u16> {
@@ -403,8 +510,12 @@ mod tests {
 
     #[test]
     fn strips_main_and_tile_comments_and_updates_psot() {
-        // Tile data contains bytes that look like COM and SOT markers.
-        let body = [0xFF, 0x64, 0x00, 0x04, 0xFF, 0x90, 0x12];
+        // Tile data contains bit-stuffed 0xFF bytes, in-band SOP segments whose Nsop
+        // values contain 0xFF and 0xFFD9, and an EPH marker.
+        let body = [
+            0xFF, 0x00, 0xFF, 0x8F, 0xFF, 0x91, 0x00, 0x04, 0x00, 0xFF, 0xC0, 0xFF, 0x91, 0x00,
+            0x04, 0xFF, 0xD9, 0xFF, 0x92, 0x12,
+        ];
         let clean = codestream(&[], &[], &body, true);
         for explicit in [true, false] {
             let commented = codestream(&comment(b"MAIN"), &comment(b"TILE"), &body, explicit);
@@ -434,7 +545,21 @@ mod tests {
         no_siz.extend_from_slice(&[0xFF, 0xD9]);
         let no_tiles = vec![0xFF, 0x4F, 0xFF, 0x51, 0x00, 0x02, 0xFF, 0xD9];
         let delimiter = codestream(&[0xFF, 0x30], &[], &[], true);
+        // A zero Psot tile-part must not hide an earlier EOC and an appended comment.
+        let hidden_after_eoc = codestream(
+            &[],
+            &[],
+            &[&[1, 0xFF, 0xD9][..], &comment(b"SYNTHHIDDEN")].concat(),
+            false,
+        );
+        let eoc_in_body = codestream(&[], &[], &[1, 0xFF, 0xD9, 0x00], true);
+        let bad_sop = codestream(&[], &[], &[0xFF, 0x91, 0x00, 0x05, 0x00, 0x01, 0x00], true);
+        let short_sop = codestream(&[], &[], &[0xFF, 0x91, 0x00, 0x04, 0x00], true);
         for (name, input) in [
+            ("bad-sop", bad_sop),
+            ("short-sop", short_sop),
+            ("hidden-after-eoc", hidden_after_eoc),
+            ("eoc-in-body", eoc_in_body),
             ("jp2", jp2),
             ("trailing", trailing),
             ("truncated", truncated_segment),
@@ -449,6 +574,37 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn updates_psot_in_every_commented_tile_part() {
+        let tile_part = |index: u8, header: &[u8], body: &[u8]| {
+            let psot = u32::try_from(12 + header.len() + 2 + body.len()).unwrap();
+            let mut part = vec![0xFF, 0x90, 0x00, 0x0A, 0x00, index];
+            part.extend_from_slice(&psot.to_be_bytes());
+            part.extend_from_slice(&[0x00, 0x01]);
+            part.extend_from_slice(header);
+            part.extend_from_slice(&[0xFF, 0x93]);
+            part.extend_from_slice(body);
+            part
+        };
+        let build = |comments: bool| {
+            let mut output = vec![0xFF, 0x4F, 0xFF, 0x51, 0x00, 0x04, 0xAA, 0xBB];
+            if comments {
+                output.extend_from_slice(&comment(b"MAIN"));
+            }
+            for index in 0..3 {
+                let header = if comments && index != 1 {
+                    comment(&vec![b'T'; usize::from(index) + 1])
+                } else {
+                    Vec::new()
+                };
+                output.extend_from_slice(&tile_part(index, &header, &[index]));
+            }
+            output.extend_from_slice(&[0xFF, 0xD9]);
+            output
+        };
+        assert_eq!(strip_comments(&build(true)).unwrap(), (build(false), 3));
     }
 
     #[test]
@@ -549,6 +705,20 @@ mod tests {
             .unwrap()
             .replacement
             .is_none());
+        let mut total_length = object(
+            None,
+            Vec::new(),
+            vec![pad(codestream(&comment(b"ONE"), &[], &[1], true))],
+        );
+        total_length.put(InMemElement::new(
+            ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH,
+            VR::UV,
+            PrimitiveValue::U64(vec![0_u64].into()),
+        ));
+        assert!(matches!(
+            clean_jpeg2000(&total_length),
+            Err(Error::UnsupportedJpeg2000(_))
+        ));
 
         let mut native = InMemDicomObject::new_empty();
         native.put(InMemElement::new(
