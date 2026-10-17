@@ -662,8 +662,7 @@ fn validate_dicom_options(args: &AnonymizeArgs) -> Result<(), String> {
     if !args.dicom.is_empty() {
         return Ok(());
     }
-    // Destructure without `..` so that a new profile flag fails to compile until it is
-    // classified here. Otherwise a report-only run can silently ignore it.
+    // Destructure every field so that a new profile flag must be classified here.
     let ProfileArgs {
         policy,
         enable_option,
