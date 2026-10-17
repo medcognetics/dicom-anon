@@ -7,7 +7,10 @@ use std::process::ExitCode;
 
 use clap::{ArgAction, Parser};
 use dicom_anon::cli_common::{load_key, ColorMode, ProfileArgs, Styles};
-use dicom_anon::{anonymize_file, anonymize_reader, Anonymizer, Options};
+use dicom_anon::{
+    anonymize_file, anonymize_reader, read_dicom, write_dicom, AnonymizationReport, Anonymizer,
+    DefaultDicomObject, Options,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -37,9 +40,18 @@ struct Args {
     /// Stable scope for inputs with no usable Patient ID or Patient Name.
     #[arg(long, value_name = "SCOPE")]
     patient_scope: Option<String>,
-    /// Numeric UID root for deterministic replacement UIDs.
+    /// Numeric UID root for keyed or generated replacement UIDs.
     #[arg(long, default_value = "2.25")]
     uid_root: String,
+    /// Print each source UID that the profile replaces, with its attribute path, as JSON and write no DICOM output.
+    #[arg(
+        long,
+        conflicts_with_all = ["output", "in_place", "generate_uid_map", "verbose"]
+    )]
+    list_required_uids: bool,
+    /// Assign missing Safe Harbor UID replacements at random and write the complete UID map to PATH before the DICOM output.
+    #[arg(long, value_name = "PATH", conflicts_with = "in_place")]
+    generate_uid_map: Option<PathBuf>,
     /// Permit reprocessing input marked Patient Identity Removed=YES.
     #[arg(long)]
     allow_reanonymize: bool,
@@ -60,7 +72,8 @@ struct Args {
 fn main() -> ExitCode {
     let args = Args::parse();
     match run(&args) {
-        Ok(report) => {
+        Ok(None) => ExitCode::SUCCESS,
+        Ok(Some(report)) => {
             if args.verbose && !args.quiet {
                 match serde_json::to_string_pretty(&report) {
                     Ok(json) => eprintln!("{json}"),
@@ -80,7 +93,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(args: &Args) -> Result<dicom_anon::AnonymizationReport, String> {
+fn run(args: &Args) -> Result<Option<AnonymizationReport>, String> {
     let secret = load_key(args.key_file.clone(), &args.key_env)?;
     let mut options = Options::new(secret);
     options.profile = args.profile.load()?;
@@ -89,17 +102,35 @@ fn run(args: &Args) -> Result<dicom_anon::AnonymizationReport, String> {
     options.reject_already_deidentified = !args.allow_reanonymize;
     let anonymizer = Anonymizer::new(options).map_err(|error| error.to_string())?;
 
+    if args.list_required_uids {
+        let source = read_source(&args.input)?;
+        let required = anonymizer
+            .required_uids(&source)
+            .map_err(|error| error.to_string())?;
+        let json = serde_json::to_string_pretty(&serde_json::json!({ "required_uids": required }))
+            .map_err(|error| format!("cannot serialize required UIDs: {error}"))?;
+        writeln!(io::stdout().lock(), "{json}")
+            .map_err(|error| format!("cannot write stdout: {error}"))?;
+        return Ok(None);
+    }
+    if let Some(map_path) = &args.generate_uid_map {
+        return generate_uid_map(args, &anonymizer, map_path).map(Some);
+    }
+    anonymize(args, &anonymizer).map(Some)
+}
+
+fn anonymize(args: &Args, anonymizer: &Anonymizer) -> Result<AnonymizationReport, String> {
     if args.in_place {
         if args.input == "-" {
             return Err("--in-place requires a file input".to_owned());
         }
-        return anonymize_file(&anonymizer, &args.input, &args.input)
+        return anonymize_file(anonymizer, &args.input, &args.input)
             .map_err(|error| error.to_string());
     }
 
     let output = args.output.as_deref().unwrap_or("-");
     if args.input != "-" && output != "-" {
-        return anonymize_file(&anonymizer, &args.input, output).map_err(|error| error.to_string());
+        return anonymize_file(anonymizer, &args.input, output).map_err(|error| error.to_string());
     }
 
     let mut input: Box<dyn Read> = if args.input == "-" {
@@ -111,19 +142,66 @@ fn run(args: &Args) -> Result<dicom_anon::AnonymizationReport, String> {
         )
     };
     let (bytes, report) =
-        anonymize_reader(&anonymizer, &mut input).map_err(|error| error.to_string())?;
-    if output == "-" {
-        let mut stdout = io::stdout().lock();
-        stdout
-            .write_all(&bytes)
-            .map_err(|error| format!("cannot write stdout: {error}"))?;
-        stdout
-            .flush()
-            .map_err(|error| format!("cannot flush stdout: {error}"))?;
-    } else {
-        write_atomic(Path::new(output), &bytes)?;
-    }
+        anonymize_reader(anonymizer, &mut input).map_err(|error| error.to_string())?;
+    write_output(output, &bytes)?;
     Ok(report)
+}
+
+/// Write the complete map first so that no output exists without its map entries.
+fn generate_uid_map(
+    args: &Args,
+    anonymizer: &Anonymizer,
+    map_path: &Path,
+) -> Result<AnonymizationReport, String> {
+    let output = args.output.as_deref().unwrap_or("-");
+    if (args.input != "-" && same_path(map_path, Path::new(&args.input)))
+        || (output != "-" && same_path(map_path, Path::new(output)))
+    {
+        return Err("--generate-uid-map must not name the input or output file".to_owned());
+    }
+    let source = read_source(&args.input)?;
+    let (anonymized, report, map) = anonymizer
+        .anonymize_with_generated_uid_map(&source)
+        .map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    write_dicom(&anonymized, &mut bytes).map_err(|error| error.to_string())?;
+    let mut json = serde_json::to_vec_pretty(&map)
+        .map_err(|error| format!("cannot serialize UID map: {error}"))?;
+    json.push(b'\n');
+    write_atomic(map_path, &json)?;
+    write_output(output, &bytes)?;
+    Ok(report)
+}
+
+fn read_source(input: &str) -> Result<DefaultDicomObject, String> {
+    let result = if input == "-" {
+        read_dicom(io::stdin().lock())
+    } else {
+        read_dicom(File::open(input).map_err(|error| format!("cannot open {input}: {error}"))?)
+    };
+    result.map_err(|error| error.to_string())
+}
+
+fn write_output(output: &str, bytes: &[u8]) -> Result<(), String> {
+    if output != "-" {
+        return write_atomic(Path::new(output), bytes);
+    }
+    let mut stdout = io::stdout().lock();
+    stdout
+        .write_all(bytes)
+        .map_err(|error| format!("cannot write stdout: {error}"))?;
+    stdout
+        .flush()
+        .map_err(|error| format!("cannot flush stdout: {error}"))
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    let normalize = |path: &Path| {
+        path.canonicalize()
+            .or_else(|_| std::path::absolute(path))
+            .unwrap_or_else(|_| path.to_owned())
+    };
+    normalize(left) == normalize(right)
 }
 
 fn write_atomic(output: &Path, bytes: &[u8]) -> Result<(), String> {

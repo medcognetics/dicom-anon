@@ -125,6 +125,8 @@ target/release/dicom-anonymize input.dcm output.dcm \
   --key-file deidentification.key
 ```
 
+`--list-required-uids` prints each source UID that needs a map entry, with its attribute path. `--generate-uid-map PATH` assigns missing replacements from the operating-system CSPRNG and writes the complete map. The map is re-identification material; read the custody rules in [Security model](docs/security.md).
+
 This policy empties Patient ID, Patient Name, and Patient Birth Date; stores a keyed subject token in Clinical Trial Subject ID; aggregates DA to `YYYY0101`, DT to `YYYY`, and TM to `000000`; and caps age at `090Y`. It is a metadata policy result, not a claim that a file or organization is HIPAA compliant.
 
 ## Validate a file

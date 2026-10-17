@@ -55,7 +55,7 @@ Anonymization and validation share these profile arguments:
 | `--disable-option OPTION` | Disable an option enabled by the selected preset; repeat for multiple options. |
 | `--descriptor-map PATH` | Load a JSON object keyed by canonical eight-digit tag, then exact source value and safe output value. |
 | `--safe-private-allowlist PATH` | Load a JSON array of `{ "creator": STRING, "element_offset": INTEGER }`. |
-| `--uid-map PATH` | Load a JSON object from original UID to replacement UID. Required for Safe Harbor anonymization. |
+| `--uid-map PATH` | Load a JSON object from original UID to replacement UID. Required for Safe Harbor anonymization unless `--generate-uid-map` assigns the missing entries. |
 
 The presets enable these options before applying `--enable-option` and `--disable-option`:
 
@@ -77,6 +77,32 @@ Example descriptor map:
 }
 ```
 
+Safe Harbor UID map arguments:
+
+| Argument | Meaning |
+|---|---|
+| `--list-required-uids` | Print a JSON object `{"required_uids": [{"path": PATH, "uid": UID}, ...]}` to stdout and write no DICOM output. The list contains each source UID occurrence that the configured profile replaces, in traversal order. It uses the same rule decisions as anonymization and fails for the same input errors, except a missing UID mapping. It conflicts with `OUTPUT`, `--in-place`, `--generate-uid-map`, and `--verbose`. |
+| `--generate-uid-map PATH` | Safe Harbor only. Start from the `--uid-map` contents, or an empty map. Assign each missing replacement from the operating-system CSPRNG under `--uid-root`, then write the complete map to `PATH` before the DICOM output. `PATH` must not name the input or output file. It may name the `--uid-map` file, so that one map grows over a study. Conflicts with `--in-place`. |
+
+A path has one `(gggg,eeee)[n]/` component for each enclosing sequence item and ends with the attribute tag. A missing Safe Harbor mapping fails with that path and never the UID value. See [Security model](security.md) for map custody rules.
+
+```console
+dicom-anonymize input.dcm \
+  --policy safe-harbor-metadata \
+  --patient-scope SUBJECT-42 \
+  --key-file deidentification.key \
+  --list-required-uids
+```
+
+```console
+dicom-anonymize input.dcm output.dcm \
+  --policy safe-harbor-metadata \
+  --patient-scope SUBJECT-42 \
+  --uid-map study-uid-map.json \
+  --generate-uid-map study-uid-map.json \
+  --key-file deidentification.key
+```
+
 The default successful invocation writes no text. `--verbose` writes the JSON anonymization report to stderr. DICOM bytes are the only stdout content. `--quiet` and `--verbose` are mutually exclusive. Color affects diagnostics only; `--no-color` overrides `--color`. Auto mode tests stderr because diagnostics are written there.
 
 Exit status:
@@ -84,7 +110,7 @@ Exit status:
 - `0`: the complete output was written;
 - `2`: invalid arguments, missing key material, parse failure, policy failure, or output failure.
 
-The command has no text or JSON primary-output mode because its primary output is a DICOM byte stream. The report is secondary diagnostic data and stays on stderr.
+Except for `--list-required-uids`, the command has no text or JSON primary-output mode because its primary output is a DICOM byte stream. The report is secondary diagnostic data and stays on stderr.
 
 ## `dicom-validate`
 

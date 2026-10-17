@@ -12,6 +12,7 @@ This workspace implements deterministic, configurable DICOM metadata de-identifi
 - `core/src/profile_generated.rs`: generated frozen PS3.15 rule matrix and safe-private registry
 - `tools/generate_profile.py`: reproducible edition-checked profile generator
 - `core/src/pseudonym.rs`: keyed patient and UID transformations
+- `core/src/uid_map.rs`: UID resolution with attribute paths, required-UID listing, and random Safe Harbor map generation
 - `core/src/temporal.rs`: DICOM DA, DT, and TM shifting with paired-date rollover
 - `core/src/io.rs`: stream and atomic file operations
 - `core/src/bin/`: command implementations
@@ -50,9 +51,9 @@ This workspace implements deterministic, configurable DICOM metadata de-identifi
 - When Parquet pixel hashing is disabled, skip Pixel Data through the lazy parser without loading its value. When enabled, stream it through the baseline-compatible XXH3-64 calculation without retaining it.
 - Parse each Parquet input DICOM once. Schema discovery may reread the compact unlinked staging file, but must not reopen source DICOMs.
 - Reject named files without a `.dcm` or `.dicom` extension before opening them. Check extensionless files for `DICM` at byte offset 128.
-- Keep anonymization deterministic. Do not add timestamps, random UIDs, random date offsets, or nondeterministic report ordering.
+- Keep anonymization deterministic. Do not add timestamps, random UIDs, random date offsets, or nondeterministic report ordering. The only exception is opt-in Safe Harbor UID map generation. It draws missing replacements from the operating-system CSPRNG and returns them only in the caller map.
 - Keep the patient-scoped time offset stable and apply TM midnight rollover to its known paired DA attribute.
-- Never include originals, key material, patient scope, UID-map contents, or identifying mismatch values in validation reports or logs.
+- Never include originals, key material, patient scope, UID-map contents, or identifying mismatch values in validation reports or logs. Missing-mapping errors name only the attribute path.
 - In Safe Harbor metadata mode, require an external non-PHI patient scope and a complete collision-free UID map; empty Patient ID, Patient Name, and Birth Date; and retain no temporal detail below year.
 - Pin the report model by immutable revision and validate its exact label taxonomy before inference.
 - Verify the model graph, external weights, tokenizer, configuration, and calibration against their pinned SHA-256 digests before loading them.

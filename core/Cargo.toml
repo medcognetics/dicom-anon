@@ -18,6 +18,7 @@ clap.workspace = true
 dicom-core.workspace = true
 dicom-dictionary-std.workspace = true
 dicom-object.workspace = true
+getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

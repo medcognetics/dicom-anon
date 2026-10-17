@@ -7,6 +7,8 @@ use dicom_dictionary_std::tags;
 use dicom_object::mem::{InMemDicomObject, InMemElement};
 use dicom_object::{DefaultDicomObject, FileMetaTableBuilder};
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 use crate::profile::{
     profile_basic_action, profile_option_action, profile_rule_for, safe_private_tags,
@@ -15,6 +17,7 @@ use crate::profile::{
 use crate::temporal::{
     shift_date_values, shift_date_values_with_adjustments, shift_datetime_values, shift_time_values,
 };
+use crate::uid_map::{RequiredUid, UidResolver};
 use crate::{Error, Result, SecretKey};
 
 const DEFAULT_DATE_SHIFT_RANGE_DAYS: i32 = 3_650;
@@ -139,6 +142,48 @@ impl Anonymizer {
         &self,
         source: &DefaultDicomObject,
     ) -> Result<(DefaultDicomObject, AnonymizationReport)> {
+        let (output, report, _) = self.anonymize_with(source, UidResolver::mapped())?;
+        Ok((output, report))
+    }
+
+    /// List each source UID occurrence that the configured profile replaces.
+    ///
+    /// This runs the same rule decisions as [`Self::anonymize`] and discards the
+    /// output. It fails for the same input errors, except a missing UID mapping.
+    /// The result contains source UIDs; keep it under source-data custody.
+    pub fn required_uids(&self, source: &DefaultDicomObject) -> Result<Vec<RequiredUid>> {
+        let (_, _, uids) = self.anonymize_with(source, UidResolver::collect())?;
+        Ok(uids.into_required())
+    }
+
+    /// De-identify an object and assign each missing Safe Harbor UID replacement.
+    ///
+    /// The configured UID map is the starting map. Each missing replacement is a
+    /// random version 4 UUID integer from the operating-system CSPRNG under the
+    /// UID root. It does not depend on the source UID, the key, or patient data,
+    /// and it differs from every UID in the source object and the starting map.
+    /// The result returns the complete map only when de-identification succeeds.
+    pub fn anonymize_with_generated_uid_map(
+        &self,
+        source: &DefaultDicomObject,
+    ) -> Result<(
+        DefaultDicomObject,
+        AnonymizationReport,
+        BTreeMap<String, String>,
+    )> {
+        if self.options.profile.policy != DeidentificationPolicy::SafeHarborMetadata {
+            return Err(Error::UidMapGenerationRequiresSafeHarbor);
+        }
+        let resolver = UidResolver::generate(source, self.options.profile.uid_mappings.clone());
+        let (output, report, uids) = self.anonymize_with(source, resolver)?;
+        Ok((output, report, uids.into_map()))
+    }
+
+    fn anonymize_with(
+        &self,
+        source: &DefaultDicomObject,
+        uids: UidResolver,
+    ) -> Result<(DefaultDicomObject, AnonymizationReport, UidResolver)> {
         if self.options.reject_already_deidentified
             && element_text(source, tags::PATIENT_IDENTITY_REMOVED)
                 .is_some_and(|value| value.eq_ignore_ascii_case("YES"))
@@ -166,6 +211,7 @@ impl Anonymizer {
             patient_pseudonym: &patient_pseudonym,
             date_shift_days,
             time_shift_hours: i32::from(time_shift_hours),
+            uids: RefCell::new(uids),
         };
 
         let mut output = self.process_dataset(source, &context, &mut report)?;
@@ -177,7 +223,7 @@ impl Anonymizer {
         let output = output
             .with_meta(meta)
             .map_err(|error| Error::Write(error.to_string()))?;
-        Ok((output, report))
+        Ok((output, report, context.uids.into_inner()))
     }
 
     fn patient_scope(&self, source: &DefaultDicomObject) -> Result<String> {
@@ -345,7 +391,7 @@ impl Anonymizer {
                     .map_err(|_| Error::MissingAttribute("UID value"))?;
                 let remapped = original
                     .split('\\')
-                    .map(|uid| self.remap_uid(uid))
+                    .map(|uid| self.remap_uid(uid, tag, context))
                     .collect::<Result<Vec<_>>>()?
                     .join("\\");
                 Ok(Some(InMemElement::new(tag, VR::UI, remapped)))
@@ -475,18 +521,11 @@ impl Anonymizer {
         ProfileAction::Keep
     }
 
-    fn remap_uid(&self, original: &str) -> Result<String> {
-        let original = original.trim_end_matches('\0');
-        if self.options.profile.policy == DeidentificationPolicy::SafeHarborMetadata {
-            return self
-                .options
-                .profile
-                .uid_mappings
-                .get(original)
-                .cloned()
-                .ok_or(Error::MissingSafeHarborUidMapping);
-        }
-        Ok(self.options.secret.uid(&self.options.uid_root, original))
+    fn remap_uid(&self, original: &str, tag: Tag, context: &Context<'_>) -> Result<String> {
+        context
+            .uids
+            .borrow_mut()
+            .resolve(original.trim_end_matches('\0'), tag, &self.options)
     }
 
     fn clean_sequence_or_clone(
@@ -501,7 +540,13 @@ impl Anonymizer {
         let items = sequence
             .items()
             .iter()
-            .map(|item| self.process_dataset(item, context, report))
+            .enumerate()
+            .map(|(index, item)| {
+                context.uids.borrow_mut().enter_item(element.tag(), index);
+                let processed = self.process_dataset(item, context, report);
+                context.uids.borrow_mut().leave_item();
+                processed
+            })
             .collect::<Result<Vec<_>>>()?;
         Ok(InMemElement::new(
             element.tag(),
@@ -602,6 +647,7 @@ struct Context<'a> {
     patient_pseudonym: &'a str,
     date_shift_days: i32,
     time_shift_hours: i32,
+    uids: RefCell<UidResolver>,
 }
 
 fn paired_day_adjustment(
@@ -1325,7 +1371,7 @@ mod tests {
         missing.patient_scope = Some("independent-subject-001".to_owned());
         assert!(matches!(
             Anonymizer::new(missing).unwrap().anonymize(&source),
-            Err(Error::MissingSafeHarborUidMapping)
+            Err(Error::MissingSafeHarborUidMapping { .. })
         ));
 
         let mut colliding = Options::new(SecretKey::new(KEY).unwrap());
@@ -1351,6 +1397,7 @@ mod tests {
             patient_pseudonym,
             date_shift_days: 1,
             time_shift_hours: 1,
+            uids: RefCell::new(UidResolver::mapped()),
         };
         let mut report = AnonymizationReport::new(
             patient_pseudonym.to_owned(),

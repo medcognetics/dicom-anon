@@ -19,7 +19,23 @@ The same key creates stable linkage across separately processed files. Changing 
 
 The transformation is one-way and does not store a lookup table. Losing the key prevents consistent processing of later files, but does not make existing output reversible. Keeping the key permits deterministic matching guesses against low-entropy source identifiers, so key access must remain restricted.
 
-Safe Harbor metadata mode adds two sensitive inputs: the independently assigned patient scope and the original-to-output UID map. Treat both as controlled linkage material. Do not place either in reports, logs, test fixtures, or public configuration repositories. The implementation reports missing, invalid, identity-preserving, colliding, and mismatched mappings without printing their contents. Temporal diagnostics identify only the affected tag and VR, never the source value.
+Safe Harbor metadata mode adds two sensitive inputs: the independently assigned patient scope and the original-to-output UID map. Treat both as controlled linkage material. Do not place either in reports, logs, test fixtures, or public configuration repositories. The implementation reports missing, invalid, identity-preserving, colliding, and mismatched mappings without printing their contents. A missing-mapping error identifies only the attribute path, for example `(0020,9221)[0]/(0020,9164)`, and never the UID value. Temporal diagnostics identify only the affected tag and VR, never the source value.
+
+### Generated UID maps
+
+`--generate-uid-map` and `anonymize_with_generated_uid_map` assign each missing Safe Harbor replacement from the operating-system CSPRNG. Each replacement is a random version 4 UUID integer under the UID root. It does not depend on the source UID, the key, the patient scope, or other patient data, so it meets the intent of a re-identification code that is not derived from information about the individual. Each replacement differs from every UID in the source object and from every source and replacement in the starting map.
+
+The generated map is the only link from output UIDs to source UIDs. It is a re-identification mechanism. Apply these custody rules:
+
+1. Keep the map only with the party that is permitted to re-identify. Do not send it with the de-identified output or to its recipient.
+2. Do not write the map, or the output of `--list-required-uids`, to logs, reports, tickets, or source control. Both contain source UIDs.
+3. Store the map with access control and encryption at rest. The command writes the map file atomically with owner-only permissions (`0600`) on Unix. It replaces an existing file at that path.
+4. Use one map for all files of one study or other linkage domain. Pass the current map as `--uid-map` and as the `--generate-uid-map` destination for each file, or keep the returned map and pass it in the next configuration. Serialize updates to one map. Concurrent writers can lose entries.
+5. The command writes the map before the DICOM output. If the output write fails, the map can contain entries that no output uses. These entries do not disclose output UIDs.
+6. Lost map entries cannot be recovered from the key. Later files then receive different UIDs, which breaks UID referential integrity across the study. Back up the map under the same controls.
+7. Destroy the map when the retention period for re-identification ends.
+
+The anonymization report, error text, and DICOM output never contain map contents or source UIDs. `--verbose` prints only the report.
 
 Descriptor maps and safe-private allowlists are disclosure decisions. Review every approved output and private creator/offset against the intended release. An exact configuration match proves that the configured transformation occurred; it does not prove that the approved output is non-identifying.
 
