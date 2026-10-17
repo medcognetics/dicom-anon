@@ -183,22 +183,20 @@ impl Anonymizer {
             time_shift_hours: i32::from(time_shift_hours),
         };
 
-        let mut output = self.process_dataset(source, &context, &mut report)?;
-        if let Some((kind, cleaning)) = codestream {
-            let removed = cleaning.removed;
-            if kind == pixel::Codestream::Jpeg2000 {
-                report.removed_jpeg2000_comment_segments = removed.comments;
-            } else {
-                report.removed_jpeg_comment_segments = removed.comments;
-                report.removed_jpeg_application_segments = removed.applications;
-            }
-            // Replace only elements that profile processing kept.
-            for replacement in cleaning.replacement {
-                if output.get(replacement.tag()).is_some() {
-                    output.put(replacement);
+        let replacements = match codestream {
+            Some((kind, cleaning)) => {
+                let removed = cleaning.removed;
+                if kind == pixel::Codestream::Jpeg2000 {
+                    report.removed_jpeg2000_comment_segments = removed.comments;
+                } else {
+                    report.removed_jpeg_comment_segments = removed.comments;
+                    report.removed_jpeg_application_segments = removed.applications;
                 }
+                cleaning.replacement
             }
-        }
+            None => Vec::new(),
+        };
+        let mut output = self.process_dataset(source, &context, &mut report, replacements)?;
         add_deidentification_markers(&mut output, &self.options.profile, &patient_pseudonym);
         let meta = FileMetaTableBuilder::new()
             .transfer_syntax(transfer_syntax)
@@ -232,11 +230,17 @@ impl Anonymizer {
         Err(Error::MissingPatientScope)
     }
 
+    /// Process one data set.
+    ///
+    /// Each element of `replacements` replaces the element with the same tag when profile
+    /// processing keeps that element. A kept element is not copied from the source, so peak
+    /// memory does not include a third copy of rewritten Pixel Data.
     fn process_dataset(
         &self,
         source: &InMemDicomObject,
         context: &Context<'_>,
         report: &mut AnonymizationReport,
+        mut replacements: Vec<InMemElement>,
     ) -> Result<InMemDicomObject> {
         let mut output = InMemDicomObject::new_empty();
         let mut date_adjustments = Vec::new();
@@ -288,6 +292,20 @@ impl Anonymizer {
                 {
                     date_adjustments.push(adjustment);
                 }
+            }
+            if let Some(index) = replacements
+                .iter()
+                .position(|replacement| replacement.tag() == tag)
+            {
+                let replacement = replacements.swap_remove(index);
+                if action == ProfileAction::Keep
+                    || self
+                        .process_element(element, action, context, report)?
+                        .is_some()
+                {
+                    output.put(replacement);
+                }
+                continue;
             }
             if let Some(processed) = self.process_element(element, action, context, report)? {
                 output.put(processed);
@@ -531,7 +549,7 @@ impl Anonymizer {
         let items = sequence
             .items()
             .iter()
-            .map(|item| self.process_dataset(item, context, report))
+            .map(|item| self.process_dataset(item, context, report, Vec::new()))
             .collect::<Result<Vec<_>>>()?;
         Ok(InMemElement::new(
             element.tag(),
