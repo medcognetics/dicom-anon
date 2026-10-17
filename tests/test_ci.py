@@ -191,11 +191,24 @@ def test_release_workflow_contract() -> None:
         "checks:",
         "read",
     ]
-    # Release builds do not restore caches that another workflow can write.
-    assert "rust-cache" not in workflow
-    assert "enable-cache: false" in workflow
-    assert "package-manager-cache: false" in workflow
-    assert "cache: npm" not in workflow
+    # Release builds install pinned, verified tools and use no cache that another job
+    # on the persistent runner can write.
+    for shared_cache_action in (
+        "rust-cache",
+        "actions/setup-python@",
+        "actions/setup-node@",
+        "astral-sh/setup-uv@",
+        "dtolnay/rust-toolchain@",
+    ):
+        assert shared_cache_action not in workflow
+    assert 'tools="${RUNNER_TEMP}/release-tools"' in workflow
+    assert 'rm -rf "${tools}"' in workflow
+    for checksum in ("UV_SHA256", "NODE_SHA256", "RUSTUP_SHA256"):
+        assert re.search(
+            rf"^          {checksum}: [0-9a-f]{{64}}$", workflow, re.MULTILINE
+        )
+        assert f'verify "${{{checksum}}}"' in workflow
+    assert 'echo "UV_PYTHON_PREFERENCE=only-managed"' in workflow
     assert "tool: cargo-audit@0.22.2,cargo-cyclonedx@0.5.9" in workflow
     assert "run: make audit" in workflow
     assert "release.py check-version --tag" in workflow

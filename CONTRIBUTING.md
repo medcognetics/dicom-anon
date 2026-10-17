@@ -56,7 +56,7 @@ The release workflow, `.github/workflows/release.yml`, runs on beryl for a `vMAJ
 6. The workflow requires an annotated tag on a `master` commit where `Linux / Required` and Nightly passed. It runs `make audit`, builds the assets from the tag, verifies `--version` and the checksums, and creates a draft GitHub release.
 7. Review the draft release and its assets, then publish it.
 
-The workflow uses no build caches, so another workflow cannot change the released files. To build the same assets locally on Linux x86_64, install cargo-audit 0.22.2 and cargo-cyclonedx 0.5.9, then run `make audit` and `make release-assets RELEASE_TAG=v0.2.0`. The assets are written to `target/release-assets/`.
+The workflow installs its own pinned Rust, Python, uv, and Node.js into a fresh job directory. It verifies each download with a SHA-256 value pinned in the workflow, or, for Python, with the checksum built into uv. It does not read or write the runner tool cache or any build cache, so pull-request jobs on beryl cannot change the tools that build the released files. To build the same assets locally on Linux x86_64, install cargo-audit 0.22.2 and cargo-cyclonedx 0.5.9, then run `make audit` and `make release-assets RELEASE_TAG=v0.2.0`. The assets are written to `target/release-assets/`.
 
 ## Test expectations
 

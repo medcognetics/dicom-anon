@@ -46,7 +46,8 @@ jobs:
             libtesseract-dev \
             pkg-config \
             tesseract-ocr \
-            tesseract-ocr-eng
+            tesseract-ocr-eng \
+            xz-utils
           pkg-config --exists lept tesseract
           gh --version
       - name: Check out repository
@@ -55,30 +56,70 @@ jobs:
           persist-credentials: false
       - name: Trust the checkout for build-time commit discovery
         run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
-        with:
-          toolchain: "1.97.1"
-      - name: Install Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.14"
-      - name: Install uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          version: "0.11.29"
-          enable-cache: false
-      - name: Install Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "24.18.0"
-          package-manager-cache: false
+      # The release job installs its own pinned tools into a fresh job directory and does
+      # not use the runner tool cache, which pull-request jobs on beryl can write.
+      - name: Install pinned release tools
+        env:
+          UV_VERSION: "0.11.29"
+          UV_SHA256: 04f8b82f5d47f0512dcd32c67a4a6f16a0ea27c81537c338fd0ad6b23cebe829
+          NODE_VERSION: "24.18.0"
+          NODE_SHA256: 55aa7153f9d88f28d765fcdad5ae6945b5c0f98a36881703817e4c450fa76742
+          RUSTUP_VERSION: "1.29.1"
+          RUSTUP_SHA256: dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
+          RUST_TOOLCHAIN: "1.97.1"
+          # uv verifies the Python download against the checksum built into uv.
+          PYTHON_VERSION: "3.14.6"
+        run: |
+          tools="${RUNNER_TEMP}/release-tools"
+          rm -rf "${tools}"
+          mkdir -p "${tools}/bin" "${tools}/downloads" "${tools}/node"
+          fetch() {
+            curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+              --retry 5 --output "$2" "$1"
+          }
+          verify() {
+            echo "$1  $2" | sha256sum --check --strict
+          }
+          fetch "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz" \
+            "${tools}/downloads/uv.tar.gz"
+          verify "${UV_SHA256}" "${tools}/downloads/uv.tar.gz"
+          tar -xzf "${tools}/downloads/uv.tar.gz" --strip-components=1 -C "${tools}/bin"
+          fetch "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
+            "${tools}/downloads/node.tar.xz"
+          verify "${NODE_SHA256}" "${tools}/downloads/node.tar.xz"
+          tar -xJf "${tools}/downloads/node.tar.xz" --strip-components=1 -C "${tools}/node"
+          fetch "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init" \
+            "${tools}/downloads/rustup-init"
+          verify "${RUSTUP_SHA256}" "${tools}/downloads/rustup-init"
+          chmod +x "${tools}/downloads/rustup-init"
+          export RUSTUP_HOME="${tools}/rustup" CARGO_HOME="${tools}/cargo"
+          "${tools}/downloads/rustup-init" -y --no-modify-path --profile minimal \
+            --default-toolchain "${RUST_TOOLCHAIN}"
+          export UV_CACHE_DIR="${tools}/uv-cache" UV_PYTHON_INSTALL_DIR="${tools}/python"
+          "${tools}/bin/uv" python install "${PYTHON_VERSION}"
+          {
+            echo "RUSTUP_HOME=${RUSTUP_HOME}"
+            echo "CARGO_HOME=${CARGO_HOME}"
+            echo "UV_CACHE_DIR=${UV_CACHE_DIR}"
+            echo "UV_PYTHON_INSTALL_DIR=${UV_PYTHON_INSTALL_DIR}"
+            echo "UV_PYTHON_PREFERENCE=only-managed"
+            echo "UV_PYTHON=${PYTHON_VERSION}"
+            echo "npm_config_cache=${tools}/npm-cache"
+          } >> "${GITHUB_ENV}"
+          {
+            echo "${tools}/bin"
+            echo "${tools}/node/bin"
+            echo "${CARGO_HOME}/bin"
+          } >> "${GITHUB_PATH}"
+          "${tools}/bin/uv" --version
+          "${tools}/node/bin/node" --version
+          "${CARGO_HOME}/bin/rustc" --version
       - name: Install cargo-audit and cargo-cyclonedx
         uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
         with:
           tool: cargo-audit@0.22.2,cargo-cyclonedx@0.5.9
       - name: Synchronize CI tools
-        run: uv sync --project tools/ci --frozen --python "3.14"
+        run: uv sync --project tools/ci --frozen
       - name: Resolve release tag
         id: tag
         env:
