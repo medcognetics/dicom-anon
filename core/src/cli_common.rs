@@ -1,5 +1,6 @@
 //! Shared implementation details for the bundled commands.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use clap::{Args, ValueEnum};
@@ -31,9 +32,12 @@ pub struct ProfileArgs {
     /// Disable one option enabled by the selected preset; repeat as needed.
     #[arg(long, value_enum)]
     pub disable_option: Vec<DicomOption>,
-    /// JSON exact descriptor source-to-safe-output mappings.
+    /// JSON exact descriptor source-to-safe-output mappings; repeat to merge maps.
     #[arg(long, value_name = "PATH")]
-    pub descriptor_map: Option<PathBuf>,
+    pub descriptor_map: Vec<PathBuf>,
+    /// Fail when an attribute with this tag (eight hexadecimal digits) would receive a dummy value; repeat as needed.
+    #[arg(long, value_name = "TAG", value_parser = parse_tag)]
+    pub fail_on_unmapped: Vec<String>,
     /// JSON safe-private creator and element-offset allowlist.
     #[arg(long, value_name = "PATH")]
     pub safe_private_allowlist: Option<PathBuf>,
@@ -60,9 +64,17 @@ impl ProfileArgs {
         for option in &self.disable_option {
             profile.options.remove(option);
         }
-        if let Some(path) = &self.descriptor_map {
-            profile.descriptor_mappings = read_json(path, "descriptor map")?;
+        for path in &self.descriptor_map {
+            let document: DescriptorMapDocument = read_json(path, "descriptor map")?;
+            merge_descriptor_mappings(
+                &mut profile.descriptor_mappings,
+                document.into_mappings(),
+                path,
+            )?;
         }
+        profile
+            .fail_on_unmapped
+            .extend(self.fail_on_unmapped.iter().cloned());
         if let Some(path) = &self.safe_private_allowlist {
             let values: Vec<SafePrivateElement> = read_json(path, "safe-private allowlist")?;
             profile.safe_private_allowlist = values.into_iter().collect();
@@ -72,6 +84,79 @@ impl ProfileArgs {
         }
         profile.validate().map_err(|error| error.to_string())?;
         Ok(profile)
+    }
+}
+
+/// Descriptor-map file: a bare tag map, or a versioned document with provenance.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum DescriptorMapDocument {
+    Versioned(VersionedDescriptorMap),
+    Bare(BTreeMap<String, BTreeMap<String, String>>),
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VersionedDescriptorMap {
+    #[serde(rename = "format")]
+    _format: VersionedDescriptorMapFormat,
+    #[serde(rename = "name")]
+    _name: String,
+    #[serde(rename = "version")]
+    _version: String,
+    #[serde(rename = "source")]
+    _source: String,
+    #[serde(rename = "notes", default)]
+    _notes: Vec<String>,
+    mappings: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+#[derive(serde::Deserialize)]
+enum VersionedDescriptorMapFormat {
+    #[serde(rename = "dicom-anon-descriptor-map/1")]
+    V1,
+}
+
+impl DescriptorMapDocument {
+    fn into_mappings(self) -> BTreeMap<String, BTreeMap<String, String>> {
+        match self {
+            Self::Versioned(document) => document.mappings,
+            Self::Bare(mappings) => mappings,
+        }
+    }
+}
+
+fn merge_descriptor_mappings(
+    target: &mut BTreeMap<String, BTreeMap<String, String>>,
+    source: BTreeMap<String, BTreeMap<String, String>>,
+    path: &std::path::Path,
+) -> Result<(), String> {
+    for (tag, values) in source {
+        let entries = target.entry(tag.clone()).or_default();
+        for (input, output) in values {
+            match entries.get(&input) {
+                Some(existing) if *existing != output => {
+                    return Err(format!(
+                        "descriptor map {} conflicts with an earlier map for tag {tag}",
+                        path.display()
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    entries.insert(input, output);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_tag(value: &str) -> Result<String, String> {
+    let tag = value.to_ascii_uppercase();
+    if tag.len() == 8 && tag.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(tag)
+    } else {
+        Err("expected eight hexadecimal digits, for example 00080100".to_owned())
     }
 }
 
@@ -170,6 +255,69 @@ mod tests {
     use super::*;
 
     const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn profile_args(descriptor_map: Vec<PathBuf>) -> ProfileArgs {
+        ProfileArgs {
+            policy: ProfilePreset::SafeHarborMetadata,
+            enable_option: Vec::new(),
+            disable_option: Vec::new(),
+            descriptor_map,
+            fail_on_unmapped: vec!["00080100".to_owned()],
+            safe_private_allowlist: None,
+            uid_map: None,
+        }
+    }
+
+    #[test]
+    fn descriptor_maps_merge_versioned_and_bare_documents() {
+        let directory = tempfile::tempdir().unwrap();
+        let shipped = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../descriptor-maps/breast-imaging-ps3.16-2026d.json"
+        ));
+        let bare = directory.path().join("bare.json");
+        std::fs::write(
+            &bare,
+            r#"{"00080070": {"SYNTHVENDOR": "SYNTHVENDOR"}, "00080102": {"SRT": "SRT"}}"#,
+        )
+        .unwrap();
+        let profile = profile_args(vec![shipped.clone(), bare]).load().unwrap();
+        assert_eq!(
+            profile.descriptor_replacement(dicom_core::Tag(0x0008, 0x0100), "R-10242"),
+            Some("R-10242")
+        );
+        assert_eq!(
+            profile.descriptor_replacement(dicom_core::Tag(0x0008, 0x0070), "SYNTHVENDOR"),
+            Some("SYNTHVENDOR")
+        );
+        assert!(profile.fail_on_unmapped.contains("00080100"));
+        for (tag, values) in &profile.descriptor_mappings {
+            for (source, output) in values {
+                assert_eq!(source, output, "{tag}");
+            }
+        }
+
+        let conflicting = directory.path().join("conflicting.json");
+        std::fs::write(&conflicting, r#"{"00080102": {"SRT": "OTHER"}}"#).unwrap();
+        let error = profile_args(vec![shipped, conflicting]).load().unwrap_err();
+        assert!(error.contains("conflicts"), "{error}");
+
+        let unknown_format = directory.path().join("unknown-format.json");
+        std::fs::write(
+            &unknown_format,
+            r#"{"format": "other/9", "name": "n", "version": "v", "source": "s", "mappings": {}}"#,
+        )
+        .unwrap();
+        assert!(profile_args(vec![unknown_format]).load().is_err());
+    }
+
+    #[test]
+    fn tag_parser_normalizes_case_and_rejects_other_forms() {
+        assert_eq!(parse_tag("0008010a").unwrap(), "0008010A");
+        for invalid in ["(0008,0100)", "0008010", "0008010G"] {
+            assert!(parse_tag(invalid).is_err(), "{invalid}");
+        }
+    }
 
     #[test]
     fn styles_apply_color_only_when_enabled() {
