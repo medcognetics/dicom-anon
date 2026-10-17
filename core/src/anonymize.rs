@@ -86,6 +86,10 @@ pub struct AnonymizationReport {
     pub generalized_temporal_attributes: u64,
     /// JPEG 2000 comment (COM) marker segments removed from Pixel Data.
     pub removed_jpeg2000_comment_segments: u64,
+    /// JPEG and JPEG-LS comment (COM) marker segments removed from Pixel Data.
+    pub removed_jpeg_comment_segments: u64,
+    /// JPEG and JPEG-LS application (APPn) marker segments removed from Pixel Data.
+    pub removed_jpeg_application_segments: u64,
 }
 
 impl AnonymizationReport {
@@ -110,6 +114,8 @@ impl AnonymizationReport {
             shifted_temporal_attributes: 0,
             generalized_temporal_attributes: 0,
             removed_jpeg2000_comment_segments: 0,
+            removed_jpeg_comment_segments: 0,
+            removed_jpeg_application_segments: 0,
         }
     }
 }
@@ -151,11 +157,9 @@ impl Anonymizer {
         }
         pixel::check_gates(source, &self.options.profile)?;
         let transfer_syntax = source.meta().transfer_syntax().trim_end_matches('\0');
-        let jpeg2000 = if pixel::is_jpeg2000(transfer_syntax) {
-            Some(pixel::clean_jpeg2000(source)?)
-        } else {
-            None
-        };
+        let codestream = pixel::Codestream::for_transfer_syntax(transfer_syntax)
+            .map(|kind| pixel::clean_codestreams(source, kind).map(|cleaning| (kind, cleaning)))
+            .transpose()?;
 
         let patient_scope = self.patient_scope(source)?;
         let patient_pseudonym = self.options.secret.patient_id(&patient_scope);
@@ -180,8 +184,14 @@ impl Anonymizer {
         };
 
         let mut output = self.process_dataset(source, &context, &mut report)?;
-        if let Some(cleaning) = jpeg2000 {
-            report.removed_jpeg2000_comment_segments = cleaning.removed_segments;
+        if let Some((kind, cleaning)) = codestream {
+            let removed = cleaning.removed;
+            if kind == pixel::Codestream::Jpeg2000 {
+                report.removed_jpeg2000_comment_segments = removed.comments;
+            } else {
+                report.removed_jpeg_comment_segments = removed.comments;
+                report.removed_jpeg_application_segments = removed.applications;
+            }
             if let Some(replacement) = cleaning.replacement {
                 if output.get(tags::PIXEL_DATA).is_some() {
                     output.put(replacement);

@@ -11,7 +11,7 @@ This workspace implements deterministic, configurable DICOM metadata de-identifi
 - `core/src/profile.rs`: profile configuration and option resolution
 - `core/src/profile_generated.rs`: generated frozen PS3.15 rule matrix and safe-private registry
 - `tools/generate_profile.py`: reproducible edition-checked profile generator
-- `core/src/pixel.rs`: Burned In Annotation and SOP Class gates and JPEG 2000 comment removal
+- `core/src/pixel.rs`: Burned In Annotation and SOP Class gates, JPEG 2000 comment removal, and JPEG and JPEG-LS comment and application segment removal
 - `core/src/pseudonym.rs`: keyed patient and UID transformations
 - `core/src/temporal.rs`: DICOM DA, DT, and TM shifting with paired-date rollover
 - `core/src/io.rs`: stream and atomic file operations
@@ -47,7 +47,7 @@ This workspace implements deterministic, configurable DICOM metadata de-identifi
 - Replace File Meta Information instead of copying source AE titles or private information.
 - Fail closed on invalid dates, missing patient scope, unsupported DICOM input, and already de-identified input unless the caller opts in.
 - Treat pixel data as unassessed. Do not claim a pixel-cleaning option without an implemented and tested pixel inspection path.
-- Remove JPEG 2000 COM segments only from main and tile-part headers. Copy entropy-coded data byte for byte, and fail closed when a codestream, frame mapping, or offset table cannot be rewritten safely.
+- Remove JPEG 2000 COM segments only from main and tile-part headers. Remove JPEG and JPEG-LS COM and APPn segments, but keep an APP14 Adobe segment that a three- or four-component frame needs for its color transform. Copy entropy-coded data byte for byte, and fail closed when a codestream, frame mapping, color interpretation, or offset table cannot be rewritten safely.
 - Keep Parquet output metadata-only. Never add Pixel Data to the schema or staged rows.
 - When Parquet pixel hashing is disabled, skip Pixel Data through the lazy parser without loading its value. When enabled, stream it through the baseline-compatible XXH3-64 calculation without retaining it.
 - Parse each Parquet input DICOM once. Schema discovery may reread the compact unlinked staging file, but must not reopen source DICOMs.

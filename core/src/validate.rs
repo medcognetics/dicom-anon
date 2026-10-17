@@ -10,7 +10,7 @@ use dicom_object::mem::{InMemDicomObject, InMemElement};
 use dicom_object::DefaultDicomObject;
 use serde::{Deserialize, Serialize};
 
-use crate::pixel::{self, PixelGateViolation};
+use crate::pixel::{self, Codestream, PixelGateViolation};
 use crate::profile::{
     profile_basic_action, profile_option_action, profile_rule_for, safe_private_tags,
     DeidentificationPolicy, DicomOption, ProfileAction, ProfileConfiguration, PROFILE_NAME,
@@ -232,28 +232,52 @@ fn validate_pixel_gates(
         };
         push_finding(report, Severity::Error, code, Some(tag), "root", message);
     }
-    if !pixel::is_jpeg2000(object.meta().transfer_syntax()) {
+    let Some(kind) = Codestream::for_transfer_syntax(object.meta().transfer_syntax()) else {
         return;
-    }
-    let finding = match pixel::count_jpeg2000_comments(object) {
-        Ok(0) => return,
-        Ok(_) => (
-            "jpeg2000_comment_present",
-            "JPEG 2000 Pixel Data contains comment (COM) marker segments",
-        ),
-        Err(_) => (
+    };
+    let jpeg2000 = kind == Codestream::Jpeg2000;
+    let mut findings = Vec::new();
+    match pixel::count_removable_segments(object, kind) {
+        Err(_) if jpeg2000 => findings.push((
             "jpeg2000_codestream_unparseable",
             "JPEG 2000 Pixel Data could not be parsed for comment (COM) marker segments",
-        ),
-    };
-    push_finding(
-        report,
-        Severity::Error,
-        finding.0,
-        Some(tags::PIXEL_DATA),
-        "root",
-        finding.1,
-    );
+        )),
+        Err(_) => findings.push((
+            "jpeg_codestream_unparseable",
+            "JPEG or JPEG-LS Pixel Data could not be parsed for comment (COM) and application (APPn) marker segments",
+        )),
+        Ok(removed) => {
+            if removed.comments > 0 {
+                findings.push(if jpeg2000 {
+                    (
+                        "jpeg2000_comment_present",
+                        "JPEG 2000 Pixel Data contains comment (COM) marker segments",
+                    )
+                } else {
+                    (
+                        "jpeg_comment_present",
+                        "JPEG or JPEG-LS Pixel Data contains comment (COM) marker segments",
+                    )
+                });
+            }
+            if removed.applications > 0 {
+                findings.push((
+                    "jpeg_application_segment_present",
+                    "JPEG or JPEG-LS Pixel Data contains application (APPn) marker segments that decoding does not need",
+                ));
+            }
+        }
+    }
+    for (code, message) in findings {
+        push_finding(
+            report,
+            Severity::Error,
+            code,
+            Some(tags::PIXEL_DATA),
+            "root",
+            message,
+        );
+    }
 }
 
 fn require_method_description(
