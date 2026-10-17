@@ -197,6 +197,12 @@ impl Anonymizer {
             None => Vec::new(),
         };
         let mut output = self.process_dataset(source, &context, &mut report, replacements)?;
+        // A source value that profile processing kept can be stale or wrong.
+        match pixel::repair_total_length(&mut output, transfer_syntax) {
+            Some(pixel::TotalLengthRepair::Replaced) => report.replaced_attributes += 1,
+            Some(pixel::TotalLengthRepair::Removed) => report.removed_attributes += 1,
+            None => {}
+        }
         add_deidentification_markers(&mut output, &self.options.profile, &patient_pseudonym);
         let meta = FileMetaTableBuilder::new()
             .transfer_syntax(transfer_syntax)

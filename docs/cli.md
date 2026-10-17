@@ -82,7 +82,7 @@ For JPEG 2000 transfer syntaxes, `dicom-anonymize` always parses each frame code
 
 For JPEG transfer syntaxes `1.2.840.10008.1.2.4.50`, `.51`, `.57`, and `.70`, and JPEG-LS transfer syntaxes `.80` and `.81`, `dicom-anonymize` always parses each frame codestream and removes comment (COM) and application (APPn) marker segments. It keeps an APP14 `Adobe` segment only when a three- or four-component frame needs its color transform flag. It fails with status 2 when it cannot do this safely. `--verbose` reports `removed_jpeg_comment_segments` and `removed_jpeg_application_segments`. `dicom-validate` reports `jpeg_comment_present`, `jpeg_application_segment_present`, or `jpeg_codestream_unparseable` as errors.
 
-When segment removal changes the fragments, `dicom-anonymize` replaces Encapsulated Pixel Data Value Total Length `(7FE0,0003)`. For every input, `dicom-validate` reports `encapsulated_total_length_mismatch` as an error when `(7FE0,0003)` is present and does not match the encapsulated fragments.
+When `(7FE0,0003)` does not match the output fragments, `dicom-anonymize` replaces it. When Pixel Data is absent or native, or when the padding cannot be determined, it removes it. For every input, `dicom-validate` reports `encapsulated_total_length_mismatch` as an error when `(7FE0,0003)` is present and does not match the encapsulated fragments.
 
 See [Conformance](conformance.md#pixel-and-disclosure-limits) for the exact conditions.
 

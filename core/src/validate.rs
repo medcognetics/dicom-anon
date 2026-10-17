@@ -1111,6 +1111,22 @@ mod tests {
         for total_length in [7, 8] {
             assert!(!mismatch(RLE, encapsulated(), Some(vec![total_length])));
         }
+        // Padding is at most one alignment byte. Earlier zero bytes are encoded data.
+        let zeros = || {
+            Some(Value::PixelSequence(
+                dicom_core::value::PixelFragmentSequence::new(
+                    Vec::<u32>::new(),
+                    vec![vec![1, 2, 3, 4], vec![5, 0, 0, 0]],
+                ),
+            ))
+        };
+        for (total_length, expected) in [(8, false), (7, false), (6, true), (5, true)] {
+            assert_eq!(
+                mismatch(RLE, zeros(), Some(vec![total_length])),
+                expected,
+                "{total_length}"
+            );
+        }
     }
 
     #[test]

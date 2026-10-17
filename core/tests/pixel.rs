@@ -733,6 +733,66 @@ fn encapsulated_total_length_follows_segment_removal_and_is_validated() {
         let (_, report) = validate(&output, &[]);
         assert_eq!(finding_severity(&report, CODE), None, "{transfer_syntax}");
 
+        // Without segment removal, the anonymizer repairs a stale source value.
+        let unchanged = directory
+            .path()
+            .join(format!("{transfer_syntax}-unchanged.dcm"));
+        let unchanged_output = directory
+            .path()
+            .join(format!("{transfer_syntax}-unchanged-out.dcm"));
+        let mut object = dicom_anon::read_dicom(
+            mammography_bytes(
+                MAMMOGRAPHY_FOR_PRESENTATION,
+                Some("NO"),
+                transfer_syntax,
+                clean.clone(),
+            )
+            .as_slice(),
+        )
+        .unwrap();
+        write_with_total_length(&mut object, clean.len() + 2, &unchanged);
+        let (_, report) = validate(&unchanged, &[]);
+        assert_eq!(
+            finding_severity(&report, CODE).as_deref(),
+            Some("error"),
+            "{transfer_syntax}"
+        );
+        let result = anonymize(&unchanged, &unchanged_output, &["--verbose"]);
+        assert_eq!(result.status.code(), Some(0), "{transfer_syntax}");
+        let repaired_report: serde_json::Value = serde_json::from_slice(&result.stderr).unwrap();
+        let valid = directory
+            .path()
+            .join(format!("{transfer_syntax}-valid.dcm"));
+        let valid_output = directory
+            .path()
+            .join(format!("{transfer_syntax}-valid-out.dcm"));
+        write_with_total_length(&mut object, clean.len(), &valid);
+        let result = anonymize(&valid, &valid_output, &["--verbose"]);
+        assert_eq!(result.status.code(), Some(0), "{transfer_syntax}");
+        let valid_report: serde_json::Value = serde_json::from_slice(&result.stderr).unwrap();
+        assert_eq!(
+            repaired_report["replaced_attributes"].as_u64().unwrap(),
+            valid_report["replaced_attributes"].as_u64().unwrap() + 1,
+            "{transfer_syntax}: the repair is reported"
+        );
+        assert_eq!(
+            pixel_fragments(&unchanged),
+            pixel_fragments(&unchanged_output)
+        );
+        let repaired = dicom_anon::read_dicom(std::fs::File::open(&unchanged_output).unwrap())
+            .unwrap()
+            .element(tags::ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH)
+            .unwrap()
+            .to_int::<u64>()
+            .unwrap();
+        assert_eq!(
+            repaired,
+            u64::try_from(clean.len()).unwrap(),
+            "{transfer_syntax}"
+        );
+        let (_, report) = validate(&unchanged_output, &[]);
+        assert_eq!(finding_severity(&report, CODE), None, "{transfer_syntax}");
+
         // A value that still counts the removed segments is stale.
         write_with_total_length(&mut candidate, annotated.len(), &stale);
         let (status, report) = validate(&stale, &[]);
