@@ -718,3 +718,31 @@ fn encapsulated_total_length_follows_segment_removal() {
         );
     }
 }
+
+#[test]
+fn sop_class_allowlist_rejects_a_mismatched_media_storage_sop_class() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("spoofed.dcm");
+    let output = directory.path().join("spoofed-out.dcm");
+    // The File Meta Information declares an excluded class; the data set declares an allowed one.
+    let mut object = dicom_anon::read_dicom(plain_mammography(Some("NO")).as_slice()).unwrap();
+    object.update_meta(|meta| {
+        meta.media_storage_sop_class_uid = format!("{BREAST_TOMOSYNTHESIS}\0");
+    });
+    let mut bytes = Vec::new();
+    object.write_all(&mut bytes).unwrap();
+    std::fs::write(&input, bytes).unwrap();
+
+    let gate = ["--allow-sop-class", MAMMOGRAPHY_FOR_PRESENTATION];
+    let result = anonymize(&input, &output, &gate);
+    assert_eq!(result.status.code(), Some(2));
+    assert!(!output.exists());
+    let (status, report) = validate(&input, &gate);
+    assert_eq!(status, Some(1));
+    assert_eq!(
+        finding_severity(&report, "sop_class_not_allowed").as_deref(),
+        Some("error")
+    );
+    // Without the gate, the mismatch is not a pixel-gate failure.
+    assert_eq!(anonymize(&input, &output, &[]).status.code(), Some(0));
+}

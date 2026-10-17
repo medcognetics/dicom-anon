@@ -73,8 +73,13 @@ pub(crate) enum PixelGateViolation {
 }
 
 /// Return every configured gate that the object fails.
+///
+/// `media_storage_sop_class` is the File Meta Information Media Storage SOP Class UID, if
+/// the object has File Meta Information. The SOP Class allowlist passes only when it and the
+/// data-set SOP Class UID agree, so a spoofed data-set value cannot pass the gate.
 pub(crate) fn gate_violations(
     object: &InMemDicomObject,
+    media_storage_sop_class: Option<&str>,
     profile: &ProfileConfiguration,
 ) -> Vec<PixelGateViolation> {
     let mut violations = Vec::new();
@@ -84,8 +89,11 @@ pub(crate) fn gate_violations(
         violations.push(PixelGateViolation::BurnedInAnnotationNotNo);
     }
     if !profile.sop_class_allowlist.is_empty()
-        && !text(object, tags::SOP_CLASS_UID)
-            .is_some_and(|uid| profile.sop_class_allowlist.contains(&uid))
+        && !text(object, tags::SOP_CLASS_UID).is_some_and(|uid| {
+            profile.sop_class_allowlist.contains(&uid)
+                && media_storage_sop_class
+                    .is_none_or(|meta| meta.trim_end_matches(['\0', ' ']) == uid)
+        })
     {
         violations.push(PixelGateViolation::SopClassNotAllowed);
     }
@@ -93,8 +101,12 @@ pub(crate) fn gate_violations(
 }
 
 /// Fail closed on the first configured gate that the object fails.
-pub(crate) fn check_gates(object: &InMemDicomObject, profile: &ProfileConfiguration) -> Result<()> {
-    match gate_violations(object, profile).first() {
+pub(crate) fn check_gates(
+    object: &InMemDicomObject,
+    media_storage_sop_class: Option<&str>,
+    profile: &ProfileConfiguration,
+) -> Result<()> {
+    match gate_violations(object, media_storage_sop_class, profile).first() {
         Some(PixelGateViolation::BurnedInAnnotationNotNo) => Err(Error::BurnedInAnnotationNotNo),
         Some(PixelGateViolation::SopClassNotAllowed) => Err(Error::SopClassNotAllowed),
         None => Ok(()),
@@ -1425,36 +1437,42 @@ mod tests {
     fn gates_require_explicit_no_and_allowlisted_sop_class() {
         let mut profile = ProfileConfiguration::default();
         let mut object = InMemDicomObject::new_empty();
-        assert!(gate_violations(&object, &profile).is_empty());
+        assert!(gate_violations(&object, None, &profile).is_empty());
         profile.require_no_burned_in_annotation = true;
         profile
             .sop_class_allowlist
             .insert("1.2.840.10008.5.1.4.1.1.1.2".to_owned());
         assert_eq!(
-            gate_violations(&object, &profile),
+            gate_violations(&object, None, &profile),
             [
                 PixelGateViolation::BurnedInAnnotationNotNo,
                 PixelGateViolation::SopClassNotAllowed
             ]
         );
         assert!(matches!(
-            check_gates(&object, &profile),
+            check_gates(&object, None, &profile),
             Err(Error::BurnedInAnnotationNotNo)
         ));
         for value in ["YES", "", "no", "NO\\YES"] {
             object.put_str(tags::BURNED_IN_ANNOTATION, VR::CS, value);
             assert!(
-                gate_violations(&object, &profile)
+                gate_violations(&object, None, &profile)
                     .contains(&PixelGateViolation::BurnedInAnnotationNotNo),
                 "{value:?}"
             );
         }
         object.put_str(tags::BURNED_IN_ANNOTATION, VR::CS, "NO ");
         object.put_str(tags::SOP_CLASS_UID, VR::UI, "1.2.840.10008.5.1.4.1.1.1.2\0");
-        assert!(check_gates(&object, &profile).is_ok());
+        assert!(check_gates(&object, None, &profile).is_ok());
+        let allowed = Some("1.2.840.10008.5.1.4.1.1.1.2\0");
+        assert!(check_gates(&object, allowed, &profile).is_ok());
+        assert!(matches!(
+            check_gates(&object, Some("1.2.840.10008.5.1.4.1.1.7"), &profile),
+            Err(Error::SopClassNotAllowed)
+        ));
         object.put_str(tags::SOP_CLASS_UID, VR::UI, "1.2.840.10008.5.1.4.1.1.7");
         assert!(matches!(
-            check_gates(&object, &profile),
+            check_gates(&object, None, &profile),
             Err(Error::SopClassNotAllowed)
         ));
     }
