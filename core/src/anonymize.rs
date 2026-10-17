@@ -155,7 +155,11 @@ impl Anonymizer {
         {
             return Err(Error::AlreadyDeidentified);
         }
-        pixel::check_gates(source, &self.options.profile)?;
+        pixel::check_gates(
+            source,
+            Some(source.meta().media_storage_sop_class_uid()),
+            &self.options.profile,
+        )?;
         let transfer_syntax = source.meta().transfer_syntax().trim_end_matches('\0');
         let codestream = pixel::Codestream::for_transfer_syntax(transfer_syntax)
             .map(|kind| pixel::clean_codestreams(source, kind).map(|cleaning| (kind, cleaning)))
