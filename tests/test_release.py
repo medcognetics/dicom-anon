@@ -83,13 +83,15 @@ def test_repository_changelog_has_a_section_for_the_manifest_version() -> None:
 
 @pytest.mark.parametrize(
     ("tag", "version"),
-    [("v0.2.0", "0.2.0"), ("v10.0.3", "10.0.3"), ("v1.0.0-rc.1", "1.0.0-rc.1")],
+    [("v0.2.0", "0.2.0"), ("v10.0.3", "10.0.3")],
 )
 def test_version_from_tag_accepts_semantic_versions(tag: str, version: str) -> None:
     assert release.version_from_tag(tag) == version
 
 
-@pytest.mark.parametrize("tag", ["0.2.0", "v0.2", "v01.2.0", "v0.2.0+build", "v0.2.0-"])
+@pytest.mark.parametrize(
+    "tag", ["0.2.0", "v0.2", "v01.2.0", "v0.2.0+build", "v0.2.0-", "v1.0.0-rc.1"]
+)
 def test_version_from_tag_rejects_other_names(tag: str) -> None:
     with pytest.raises(ReleaseError):
         release.version_from_tag(tag)
@@ -176,3 +178,53 @@ def test_release_notes_contain_required_sections() -> None:
     assert "# Dependency security audit" not in text
     assert "dicom-anonymize-1.2.0-x86_64-unknown-linux-gnu" in text
     assert "no HIPAA, GDPR, or regulatory compliance claim" in text
+
+
+def test_prepare_output_refuses_a_directory_it_did_not_create(tmp_path: Path) -> None:
+    unrelated = tmp_path / "checkout"
+    unrelated.mkdir()
+    (unrelated / "keep.txt").write_text("unrelated", encoding="utf-8")
+
+    with pytest.raises(ReleaseError, match="not a release asset directory"):
+        release.prepare_output(unrelated)
+    assert (unrelated / "keep.txt").read_text(encoding="utf-8") == "unrelated"
+
+
+def test_prepare_output_replaces_only_its_own_directory(tmp_path: Path) -> None:
+    output = tmp_path / "release-assets"
+    release.prepare_output(output)
+    (output / "old-asset").write_text("old", encoding="utf-8")
+
+    release.prepare_output(output)
+
+    assert [path.name for path in output.iterdir()] == [release.OUTPUT_MARKER]
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    release.prepare_output(empty)
+    assert (empty / release.OUTPUT_MARKER).is_file()
+
+
+def write_manifest(directory: Path, commit: str, statuses: list[str]) -> None:
+    (directory / "manifest.json").write_text(
+        json.dumps(
+            {"commit": commit, "results": [{"status": status} for status in statuses]}
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_audit_evidence_must_pass_on_the_release_commit(tmp_path: Path) -> None:
+    commit = "c" * 40
+    with pytest.raises(ReleaseError, match="run 'make audit' first"):
+        release.require_current_audit(commit, tmp_path)
+
+    write_manifest(tmp_path, commit, ["clean", "warnings"])
+    release.require_current_audit(commit, tmp_path)
+
+    write_manifest(tmp_path, "d" * 40, ["clean"])
+    with pytest.raises(ReleaseError, match="not from the release commit"):
+        release.require_current_audit(commit, tmp_path)
+    for statuses in (["clean", "findings"], ["incomplete"], []):
+        write_manifest(tmp_path, commit, statuses)
+        with pytest.raises(ReleaseError, match="blocking or incomplete"):
+            release.require_current_audit(commit, tmp_path)

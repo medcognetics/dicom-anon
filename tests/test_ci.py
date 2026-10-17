@@ -181,7 +181,7 @@ def test_release_workflow_contract() -> None:
 
     assert job_runners(workflow) == {"release": BERYL_RUNNER}
     assert f"image: {CI_CONTAINER_IMAGE}" in workflow
-    assert "tags: ['v[0-9]+.[0-9]+.[0-9]+', 'v[0-9]+.[0-9]+.[0-9]+-*']" in workflow
+    assert "tags: ['v[0-9]+.[0-9]+.[0-9]+']" in workflow
     assert "pull_request" not in workflow
     assert job_permissions.split() == [
         "contents:",

@@ -16,12 +16,12 @@ This is the first tagged release. Version 0.1.0 was not tagged or released.
 - `dicom-to-parquet` for one-read, metadata-only Parquet export.
 - Python (PyO3, abi3) and Node.js (N-API) bindings.
 - `--version` for `dicom-anonymize`, `dicom-validate`, and `report-anon` prints the crate version and the source commit that the build recorded.
-- A tag-triggered release workflow. It builds Linux x86_64 `dicom-anonymize` and `dicom-validate` binaries, an abi3 Python wheel, CycloneDX SBOMs of the Rust, Python, and Node locks, SHA-256 checksums, and the dependency audit evidence. It attaches them to a draft GitHub release.
+- A tag-triggered release workflow. It builds Linux x86_64 `dicom-anonymize` and `dicom-validate` binaries, an abi3 Python wheel, CycloneDX SBOMs of the Rust lock and of the Python and Node build-tool locks, SHA-256 checksums, and the dependency audit evidence. It attaches them to a draft GitHub release.
 - This changelog and the [known anomaly list](docs/known-anomalies.md).
 
 ### Changed
 
-- De-identification Method `(0012,0063)` now includes the crate version. The last value is `dicom-anon <version> <edition>`, or `dicom-anon <version> safe-harbor-metadata <edition>` for the Safe Harbor policy. This changes output bytes. `dicom-validate` accepts only the value that its own version writes, so validate an output with the same version that made it.
+- De-identification Method `(0012,0063)` now includes the crate version. The last value is `dicom-anon <version> <edition>`, or `dicom-anon <version> safe-harbor-metadata <edition>` for the Safe Harbor policy. This changes output bytes. `dicom-validate` accepts only the value that its own version writes and reports another version as `deidentification_method_version_mismatch`. Validate an output with the same version that made it.
 - The Cargo `repository` field and the README badge identify `medcognetics/dicom-anon`.
 
 [0.2.0]: https://github.com/medcognetics/dicom-anon/releases/tag/v0.2.0

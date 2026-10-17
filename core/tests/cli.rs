@@ -247,6 +247,7 @@ fn version_reports_crate_version_and_source_commit() {
             .strip_prefix(&format!("{name} {} (commit ", env!("CARGO_PKG_VERSION")))
             .and_then(|rest| rest.strip_suffix(')'))
             .unwrap_or_else(|| panic!("unexpected version text: {text:?}"));
+        let commit = commit.strip_suffix("-dirty").unwrap_or(commit);
         assert!(
             commit == "unknown"
                 || (matches!(commit.len(), 40 | 64)

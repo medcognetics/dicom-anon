@@ -31,10 +31,11 @@ REPOSITORY_URL = "https://github.com/medcognetics/dicom-anon"
 RUST_TARGET = "x86_64-unknown-linux-gnu"
 BINARIES = ("dicom-anonymize", "dicom-validate")
 CHECKSUM_FILE = "SHA256SUMS"
+# Prerelease tags are not supported: PEP 440 and SemVer spell them differently.
 TAG_PATTERN = re.compile(
-    r"^v(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
-    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)$"
+    r"^v(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$"
 )
+OUTPUT_MARKER = ".dicom-anon-release-assets"
 CHANGELOG_HEADING = re.compile(r"^## \[(?P<version>[^\]]+)\](?P<rest>.*)$")
 PROFILE_VERSION_PATTERN = re.compile(
     r'^pub const PROFILE_VERSION: &str = "(?P<edition>[^"]+)";$', re.MULTILINE
@@ -53,7 +54,7 @@ class ReleaseError(Exception):
 def version_from_tag(tag: str) -> str:
     match = TAG_PATTERN.match(tag)
     if match is None:
-        raise ReleaseError(f"tag {tag!r} is not v<MAJOR>.<MINOR>.<PATCH>[-PRERELEASE]")
+        raise ReleaseError(f"tag {tag!r} is not v<MAJOR>.<MINOR>.<PATCH>")
     return match["version"]
 
 
@@ -315,17 +316,33 @@ def build_sboms(output: Path, version: str) -> list[str]:
         cwd=REPOSITORY_ROOT / "bindings" / "node",
         capture=True,
     ).stdout
+    # The wheel has no Python runtime dependencies; sbom-rust-dicom-anon-python lists its
+    # contents. These two locks hold only build, test, and audit tools.
     for ecosystem, document in (("python", python_sbom), ("node", node_sbom)):
         parsed = json.loads(document)
         if parsed.get("bomFormat") != "CycloneDX":
             raise ReleaseError(f"{ecosystem} SBOM is not a CycloneDX document")
-        name = f"sbom-{ecosystem}-{version}.cdx.json"
+        name = f"sbom-{ecosystem}-build-tools-{version}.cdx.json"
         (output / name).write_text(document, encoding="utf-8")
         names.append(name)
     return names
 
 
-def copy_audit_evidence(output: Path, version: str) -> list[str]:
+def require_current_audit(commit: str, reports: Path = SECURITY_REPORTS) -> None:
+    """Require a passing ``make audit`` manifest for ``commit``."""
+    manifest_path = reports / "manifest.json"
+    if not manifest_path.is_file():
+        raise ReleaseError(f"run 'make audit' first: {manifest_path} is missing")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("commit") != commit:
+        raise ReleaseError("the audit evidence is not from the release commit")
+    statuses = [result.get("status") for result in manifest.get("results", [])]
+    if not statuses or any(status not in ("clean", "warnings") for status in statuses):
+        raise ReleaseError("the audit evidence has blocking or incomplete results")
+
+
+def copy_audit_evidence(output: Path, version: str, commit: str) -> list[str]:
+    require_current_audit(commit)
     names = []
     for source, name in (
         ("summary.md", f"security-audit-{version}.md"),
@@ -339,17 +356,30 @@ def copy_audit_evidence(output: Path, version: str) -> list[str]:
     return names
 
 
+def prepare_output(output: Path) -> None:
+    """Create an empty asset directory, replacing only a directory this script made."""
+    if output.exists():
+        if any(output.iterdir()) and not (output / OUTPUT_MARKER).is_file():
+            raise ReleaseError(
+                f"{output} is not empty and is not a release asset directory"
+            )
+        shutil.rmtree(output)
+    output.mkdir(parents=True)
+    (output / OUTPUT_MARKER).write_text(
+        "Created by tools/ci/release.py. The next build replaces this directory.\n",
+        encoding="utf-8",
+    )
+
+
 def build(tag: str, output: Path) -> None:
     version = check_version(tag)
     commit = git_commit()
-    if output.exists():
-        shutil.rmtree(output)
-    output.mkdir(parents=True)
+    prepare_output(output)
     names = [
         *build_binaries(output, version, commit),
         build_wheel(output, version),
         *build_sboms(output, version),
-        *copy_audit_evidence(output, version),
+        *copy_audit_evidence(output, version, commit),
     ]
     write_checksums(output, names)
     print(f"Wrote {len(names)} assets and {CHECKSUM_FILE} to {output}")
@@ -388,8 +418,16 @@ def release_notes(
             "## Assets",
             "",
             "Linux x86_64 (glibc) binaries, an abi3 CPython 3.10+ wheel, CycloneDX 1.5 "
-            "SBOMs of the Rust, Python, and Node locks, and the audit evidence. "
-            f"Verify downloads with `sha256sum --check {CHECKSUM_FILE}`.",
+            "SBOMs, and the audit evidence. Verify downloads with "
+            f"`sha256sum --check {CHECKSUM_FILE}`.",
+            "",
+            "- `sbom-rust-<crate>-*`: each workspace crate and its resolved Rust "
+            "dependencies from `Cargo.lock`. `sbom-rust-dicom-anon-python-*` describes "
+            "the wheel contents; the wheel has no Python runtime dependencies.",
+            "- `sbom-python-build-tools-*`: `tools/ci/uv.lock`, the build, test, and "
+            "audit tools. None of them ship in an asset.",
+            "- `sbom-node-build-tools-*`: `bindings/node/package-lock.json`, the Node.js "
+            "binding build tools. No Node.js package is released.",
             "",
             "```text",
             checksums.strip(),

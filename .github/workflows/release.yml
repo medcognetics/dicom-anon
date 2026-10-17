@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    tags: ['v[0-9]+.[0-9]+.[0-9]+', 'v[0-9]+.[0-9]+.[0-9]+-*']
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
   workflow_dispatch:
 
 permissions:
@@ -22,7 +22,8 @@ jobs:
       run:
         shell: bash
     timeout-minutes: 60
-    # Write access is used only by the final step, which creates a draft release for a tag.
+    # Only the final step needs write access. The audit step also gets this token for
+    # zizmor online checks; it runs only the tools pinned in tools/ci/uv.lock.
     permissions:
       contents: write
       actions: read
@@ -145,14 +146,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          prerelease=()
-          if [[ "${TAG}" == *-* ]]; then
-            prerelease=(--prerelease)
-          fi
           gh release create "${TAG}" \
             --draft \
             --verify-tag \
-            "${prerelease[@]}" \
             --title "dicom-anon ${TAG#v}" \
             --notes-file "${RUNNER_TEMP}/release-notes.md" \
             target/release-assets/*

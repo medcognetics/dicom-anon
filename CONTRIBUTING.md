@@ -40,13 +40,13 @@ Versions follow [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html)
 
 A change to any output byte for the same input and configuration is a minor version change at least. This includes DICOM output, De-identification Method `(0012,0063)` text, validation and anonymization reports, report-filter output and sidecars, and Parquet output. A change that removes or renames a public API, CLI argument, configuration field, or report field, or that makes a previously accepted input fail, is a major version change. While the major version is 0, such a change is a minor version change. Only a change that keeps every output byte and every public interface is a patch version change.
 
-De-identification Method contains the crate version, so every version change also changes that value. `dicom-validate` accepts only the value of its own version.
+De-identification Method contains the crate version, so every version change also changes that value. The rule above excludes this version text: compare outputs with the version text removed. `dicom-validate` accepts only the value of its own version.
 
 Add each user-visible change to the `Unreleased` section of [CHANGELOG.md](CHANGELOG.md) in the same pull request. Update [docs/known-anomalies.md](docs/known-anomalies.md) when a change opens, closes, or changes a known anomaly.
 
 ## Release procedure
 
-The release workflow, `.github/workflows/release.yml`, runs on beryl for a `vMAJOR.MINOR.PATCH` or `vMAJOR.MINOR.PATCH-PRERELEASE` tag. It does not run for pull requests.
+The release workflow, `.github/workflows/release.yml`, runs on beryl for a `vMAJOR.MINOR.PATCH` tag. It does not run for pull requests. Prerelease tags are not supported, because Python and Cargo spell prerelease versions differently.
 
 1. In a pull request, set the version in `Cargo.toml`, `bindings/python/pyproject.toml`, `bindings/node/package.json`, and `bindings/node/package-lock.json`. Run `cargo update --workspace` and `make test-node`, which regenerates `bindings/node/index.js`.
 2. In the same pull request, replace `Unreleased` in the version heading of `CHANGELOG.md` with the release date, and review `docs/known-anomalies.md`.
