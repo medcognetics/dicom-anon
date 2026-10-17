@@ -43,7 +43,7 @@ const PDF_HEADER_SEARCH_BYTES: usize = 1_024;
 #[derive(Debug, Parser)]
 #[command(
     name = "report-anon",
-    version,
+    version = dicom_anon::cli_common::LONG_VERSION,
     about = "Filter private information from local text and medical reports"
 )]
 struct Cli {

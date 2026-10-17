@@ -15,7 +15,12 @@ dependencies = [
 package = false
 
 [tool.basedpyright]
-include = [".", "../../tests/test_ci.py", "../../tests/test_ci_reporting.py"]
+include = [
+    ".",
+    "../../tests/test_ci.py",
+    "../../tests/test_ci_reporting.py",
+    "../../tests/test_release.py",
+]
 exclude = [".venv"]
 extraPaths = ["../.."]
 pythonVersion = "3.10"

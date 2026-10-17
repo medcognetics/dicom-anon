@@ -1,0 +1,27 @@
+# Changelog
+
+This file records each released version of `dicom-anon`. The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) and the output-byte rule in [CONTRIBUTING.md](CONTRIBUTING.md#versioning). Known anomalies for each release are in [docs/known-anomalies.md](docs/known-anomalies.md).
+
+The release workflow copies the section of the tagged version into the GitHub release notes. Before you tag a release, replace `Unreleased` in that section heading with the release date in `YYYY-MM-DD` format. The workflow refuses a heading without a date.
+
+## [0.2.0] - Unreleased
+
+This is the first tagged release. Version 0.1.0 was not tagged or released.
+
+### Added
+
+- DICOM PS3.15 2026c Basic Application Level Confidentiality Profile with every metadata option column, the default `dicom-extended` preset, the `dicom` preset, and the strict `safe-harbor-metadata` policy.
+- `dicom-anonymize` and `dicom-validate` commands, with candidate-only and source-aware validation.
+- `report-anon` for local plaintext and PDF privacy filtering with the pinned OpenAI Privacy Filter model. Its output always requires human review.
+- `dicom-to-parquet` for one-read, metadata-only Parquet export.
+- Python (PyO3, abi3) and Node.js (N-API) bindings.
+- `--version` for `dicom-anonymize`, `dicom-validate`, and `report-anon` prints the crate version and the source commit that the build recorded.
+- A tag-triggered release workflow. It builds Linux x86_64 `dicom-anonymize` and `dicom-validate` binaries, an abi3 Python wheel, CycloneDX SBOMs of the Rust, Python, and Node locks, SHA-256 checksums, and the dependency audit evidence. It attaches them to a draft GitHub release.
+- This changelog and the [known anomaly list](docs/known-anomalies.md).
+
+### Changed
+
+- De-identification Method `(0012,0063)` now includes the crate version. The last value is `dicom-anon <version> <edition>`, or `dicom-anon <version> safe-harbor-metadata <edition>` for the Safe Harbor policy. This changes output bytes. `dicom-validate` accepts only the value that its own version writes, so validate an output with the same version that made it.
+- The Cargo `repository` field and the README badge identify `medcognetics/dicom-anon`.
+
+[0.2.0]: https://github.com/medcognetics/dicom-anon/releases/tag/v0.2.0

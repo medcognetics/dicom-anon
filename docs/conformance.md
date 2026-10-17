@@ -70,13 +70,13 @@ These are scope boundaries, not relaxed transformations of metadata the policy p
 
 ## Inserted attributes
 
-Every output contains Patient Identity Removed `(0012,0062)`=`YES`; De-identification Method `(0012,0063)`; De-identification Method Code Sequence `(0012,0064)` with DCM `113100` and exactly one CID 7050 code per active implemented option; and Longitudinal Temporal Information Modified `(0028,0303)`=`MODIFIED`, `UNMODIFIED`, or `REMOVED`. Safe Harbor output also contains the keyed Clinical Trial Subject ID.
+Every output contains Patient Identity Removed `(0012,0062)`=`YES`; De-identification Method `(0012,0063)`, whose values are `DICOM PS3.15 Basic Profile`, the CID 7050 meaning of each active option, and the implementation value `dicom-anon <version> <edition>` (`dicom-anon <version> safe-harbor-metadata <edition>` for the Safe Harbor policy); De-identification Method Code Sequence `(0012,0064)` with DCM `113100` and exactly one CID 7050 code per active implemented option; and Longitudinal Temporal Information Modified `(0028,0303)`=`MODIFIED`, `UNMODIFIED`, or `REMOVED`. Safe Harbor output also contains the keyed Clinical Trial Subject ID.
 
 Pixel-option codes are never emitted. Source, sending, and receiving AE titles and private File Meta Information are not copied. The writer emits a zeroed 128-byte preamble.
 
 ## Validator scope
 
-Candidate-only validation uses an explicit caller configuration rather than trusting the candidate’s claims. It checks the exact De-identification Method text and DCM code items, the temporal marker, the Safe Harbor subject-token format, profile actions, cleaned descriptors, age syntax and ceiling, temporal syntax, graphics and structured-content cleaning, safe-private membership, unknown/private/group `0004` handling, file meta, and UID syntax recursively. It emits one aggregate `source_not_compared` warning because exact `K`, `C`, and `U` relationships cannot be proven without the original.
+Candidate-only validation uses an explicit caller configuration rather than trusting the candidate’s claims. It checks the exact De-identification Method text, including the validator's own crate version, and DCM code items, the temporal marker, the Safe Harbor subject-token format, profile actions, cleaned descriptors, age syntax and ceiling, temporal syntax, graphics and structured-content cleaning, safe-private membership, unknown/private/group `0004` handling, file meta, and UID syntax recursively. It emits one aggregate `source_not_compared` warning because exact `K`, `C`, and `U` relationships cannot be proven without the original.
 
 Source-aware validation reconstructs the exact expected output from the source, key, patient scope, profile, descriptor map, safe-private registry, and UID map, then compares every nested attribute path. Findings and errors contain only path, tag, rule category, and mismatch category. They never contain original values, key material, patient scope, or mapping contents. Cross-file consistency remains a caller-level batch check.
 

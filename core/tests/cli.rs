@@ -234,6 +234,29 @@ fn in_place_output_is_atomic_and_validated() {
 }
 
 #[test]
+fn version_reports_crate_version_and_source_commit() {
+    for (name, binary) in [
+        ("dicom-anonymize", env!("CARGO_BIN_EXE_dicom-anonymize")),
+        ("dicom-validate", env!("CARGO_BIN_EXE_dicom-validate")),
+    ] {
+        let output = Command::new(binary).arg("--version").output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        let text = String::from_utf8(output.stdout).unwrap();
+        let commit = text
+            .trim_end()
+            .strip_prefix(&format!("{name} {} (commit ", env!("CARGO_PKG_VERSION")))
+            .and_then(|rest| rest.strip_suffix(')'))
+            .unwrap_or_else(|| panic!("unexpected version text: {text:?}"));
+        assert!(
+            commit == "unknown"
+                || (matches!(commit.len(), 40 | 64)
+                    && commit.bytes().all(|byte| byte.is_ascii_hexdigit())),
+            "unexpected commit: {commit:?}"
+        );
+    }
+}
+
+#[test]
 fn usage_errors_return_two() {
     let output = Command::new(env!("CARGO_BIN_EXE_dicom-anonymize"))
         .args(["input.dcm", "output.dcm", "--in-place"])

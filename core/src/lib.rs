@@ -16,7 +16,7 @@ pub use io::{anonymize_file, anonymize_reader, read_dicom, write_dicom};
 pub use profile::{
     profile_rule, profile_rule_for, DeidentificationPolicy, DicomOption, ProfileAction,
     ProfileConfiguration, ProfileRule, ResolvedProfileRule, SafePrivateElement, PROFILE_NAME,
-    PROFILE_VERSION,
+    PROFILE_VERSION, TOOL_VERSION,
 };
 pub use pseudonym::SecretKey;
 pub use validate::{

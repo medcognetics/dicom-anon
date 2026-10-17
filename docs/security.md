@@ -40,7 +40,7 @@ Before disclosing output:
 5. inspect filenames, paths, archives, manifests, and linked records outside the DICOM object;
 6. confirm that the intended recipient and purpose match the de-identification risk assessment;
 7. sample representative SOP Classes and transfer syntaxes with an independent DICOM validator;
-8. retain the software version, profile edition, configuration, non-secret key identifier, validation record, and release approval in the applicable quality system.
+8. retain the software version and commit from `--version` (De-identification Method also records the version and edition in each output), the profile edition, configuration, non-secret key identifier, validation record, and release approval in the applicable quality system.
 
 Do not include the key itself in those records. Use a non-secret key identifier or controlled configuration reference.
 

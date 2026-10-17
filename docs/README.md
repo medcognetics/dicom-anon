@@ -7,3 +7,5 @@
 - [Rust API and bindings](api-and-bindings.md): Rust, Python, and Node.js interfaces
 - [Key management and disclosure safety](security.md): key handling, deterministic linkage, and operational checks
 - [Benchmarks](benchmarks.md): workloads, commands, measurements, and performance decision
+- [Known anomalies](known-anomalies.md): open defects, supplier risks, and scope limits for each release
+- [Changelog](../CHANGELOG.md): changes in each released version

@@ -90,6 +90,7 @@ def test_expected_workflows_replace_legacy_ci() -> None:
         "dependency-health.yml",
         "linux-ci.yml",
         "nightly.yml",
+        "release.yml",
     ]
     assert not (REPOSITORY_ROOT / ".circleci" / "config.yml").exists()
     assert not (REPOSITORY_ROOT / "codecov.yml").exists()
@@ -169,6 +170,47 @@ def test_scheduled_workflow_contracts() -> None:
     assert "timeout-minutes: 20" in dependency_health
     assert "timeout-minutes: 30" in dependency_health
     assert "GH_TOKEN: ${{ github.token }}" in audit_step
+
+
+def test_release_workflow_contract() -> None:
+    workflow = read_workflow("release.yml")
+    job_permissions = workflow.partition("    permissions:\n")[2].partition("    env:")[
+        0
+    ]
+    publish_step = workflow.partition("      - name: Create draft GitHub release\n")[2]
+
+    assert job_runners(workflow) == {"release": BERYL_RUNNER}
+    assert f"image: {CI_CONTAINER_IMAGE}" in workflow
+    assert "tags: ['v[0-9]+.[0-9]+.[0-9]+', 'v[0-9]+.[0-9]+.[0-9]+-*']" in workflow
+    assert "pull_request" not in workflow
+    assert job_permissions.split() == [
+        "contents:",
+        "write",
+        "actions:",
+        "read",
+        "checks:",
+        "read",
+    ]
+    # Release builds do not restore caches that another workflow can write.
+    assert "rust-cache" not in workflow
+    assert "enable-cache: false" in workflow
+    assert "package-manager-cache: false" in workflow
+    assert "cache: npm" not in workflow
+    assert "tool: cargo-audit@0.22.2,cargo-cyclonedx@0.5.9" in workflow
+    assert "run: make audit" in workflow
+    assert "release.py check-version --tag" in workflow
+    assert "release.py build --tag" in workflow
+    assert "sha256sum --check SHA256SUMS" in workflow
+    for precondition in (
+        "git/ref/tags/${TAG}",
+        "compare/master...${commit}",
+        "check_name=Linux%20%2F%20Required",
+        "actions/workflows/nightly.yml/runs?head_sha=${commit}&status=success",
+    ):
+        assert precondition in workflow
+    assert "if: github.event_name == 'push'" in publish_step
+    assert "--draft" in publish_step and "--verify-tag" in publish_step
+    assert "${{ github.ref_name }}" not in publish_step
 
 
 def test_deprecation_job_installs_native_build_dependencies() -> None:

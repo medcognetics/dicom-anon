@@ -919,7 +919,7 @@ dependencies = [
 
 [[package]]
 name = "dicom-anon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "chrono",
@@ -937,7 +937,7 @@ dependencies = [
 
 [[package]]
 name = "dicom-anon-node"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dicom-anon",
  "napi",
@@ -948,7 +948,7 @@ dependencies = [
 
 [[package]]
 name = "dicom-anon-parquet"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "clap",
@@ -972,7 +972,7 @@ dependencies = [
 
 [[package]]
 name = "dicom-anon-python"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dicom-anon",
  "pyo3",
@@ -981,7 +981,7 @@ dependencies = [
 
 [[package]]
 name = "dicom-anon-report"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "dicom-anon",

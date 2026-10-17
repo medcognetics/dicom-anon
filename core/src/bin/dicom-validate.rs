@@ -15,7 +15,7 @@ use dicom_anon::{
 #[derive(Debug, Parser)]
 #[command(
     name = "dicom-validate",
-    version,
+    version = dicom_anon::cli_common::LONG_VERSION,
     about = "Assess DICOM PS3.15 metadata de-identification conformance",
     after_help = "Exit status: 0 conformant (warnings allowed), 1 metadata non-conformance, 2 usage or runtime error. Reports go to stdout; errors go to stderr."
 )]

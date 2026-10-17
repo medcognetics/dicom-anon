@@ -16,6 +16,8 @@ use crate::{Error, Result};
 pub const PROFILE_NAME: &str = "DICOM PS3.15 Basic Application Confidentiality Profile + Clean Descriptors + Modified Dates + Retain Patient Characteristics";
 /// DICOM edition used to construct the rule table.
 pub const PROFILE_VERSION: &str = "2026c";
+/// Version of the `dicom-anon` crate that writes De-identification Method `(0012,0063)`.
+pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const OPTION_COLUMN_COUNT: usize = 10;
 const DICOM_EXTENDED_OPTIONS: [DicomOption; 3] = [
@@ -293,13 +295,18 @@ impl ProfileConfiguration {
             .map(String::as_str)
     }
 
-    pub(crate) fn deidentification_method(&self) -> String {
-        let implementation = match self.policy {
-            DeidentificationPolicy::Dicom => format!("dicom-anon {PROFILE_VERSION}"),
+    /// Implementation value of De-identification Method: tool version, policy, and DICOM edition.
+    pub(crate) fn deidentification_implementation(&self) -> String {
+        match self.policy {
+            DeidentificationPolicy::Dicom => format!("dicom-anon {TOOL_VERSION} {PROFILE_VERSION}"),
             DeidentificationPolicy::SafeHarborMetadata => {
-                format!("dicom-anon safe-harbor-metadata {PROFILE_VERSION}")
+                format!("dicom-anon {TOOL_VERSION} safe-harbor-metadata {PROFILE_VERSION}")
             }
-        };
+        }
+    }
+
+    pub(crate) fn deidentification_method(&self) -> String {
+        let implementation = self.deidentification_implementation();
         std::iter::once("DICOM PS3.15 Basic Profile")
             .chain(self.options.iter().map(|option| option.method_code().1))
             .chain(std::iter::once(implementation.as_str()))
@@ -684,6 +691,31 @@ mod tests {
             "Curve Data"
         );
         assert!(profile_rule(Tag(0x7776, 0x0001)).is_none());
+    }
+
+    #[test]
+    fn deidentification_method_identifies_tool_version_and_edition() {
+        let extended = ProfileConfiguration::dicom_extended().deidentification_method();
+        assert_eq!(
+            extended.rsplit('\\').next(),
+            Some(format!("dicom-anon {TOOL_VERSION} {PROFILE_VERSION}").as_str())
+        );
+        assert_eq!(TOOL_VERSION, env!("CARGO_PKG_VERSION"));
+        let safe_harbor = ProfileConfiguration {
+            policy: DeidentificationPolicy::SafeHarborMetadata,
+            ..ProfileConfiguration::dicom()
+        };
+        assert_eq!(
+            safe_harbor.deidentification_implementation(),
+            format!("dicom-anon {TOOL_VERSION} safe-harbor-metadata {PROFILE_VERSION}")
+        );
+        // Each LO value is limited to 64 characters.
+        for configuration in [ProfileConfiguration::dicom_extended(), safe_harbor] {
+            assert!(configuration
+                .deidentification_method()
+                .split('\\')
+                .all(|value| value.len() <= 64));
+        }
     }
 
     #[test]

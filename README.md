@@ -1,12 +1,12 @@
 # dicom-anon
 
-[![Linux CI](https://github.com/TidalPaladin/dicom-anon/actions/workflows/linux-ci.yml/badge.svg?branch=master)](https://github.com/TidalPaladin/dicom-anon/actions/workflows/linux-ci.yml)
+[![Linux CI](https://github.com/medcognetics/dicom-anon/actions/workflows/linux-ci.yml/badge.svg?branch=master)](https://github.com/medcognetics/dicom-anon/actions/workflows/linux-ci.yml)
 
 `dicom-anon` de-identifies DICOM Part 10 files, plaintext reports, and PDFs. It can also scan DICOM metadata directly into compressed Parquet shards. The workspace provides Rust libraries, four Unix-style commands, a Python extension, and a Node.js N-API module. Report filtering runs OpenAI Privacy Filter locally through ONNX Runtime.
 
 The default `dicom-extended` preset implements the metadata actions from the [DICOM PS3.15 2026c Basic Application Level Confidentiality Profile](https://dicom.nema.org/medical/dicom/current/output/chtml/part15/chapter_E.html) with Clean Descriptors, Retain Patient Characteristics, and Retain Longitudinal Temporal Information With Modified Dates. Patient identifiers and UIDs receive keyed deterministic replacements. Dates and times move by patient-specific whole-day and whole-hour offsets. Patient ages from `090Y` through `999Y` are categorized as `090Y`. Study and Series Description are retained only when an exact caller-supplied mapping approves a safe replacement; otherwise they receive a safe dummy. The `dicom` preset applies the Basic Profile without optional columns.
 
-This software does not inspect pixel data for burned-in text or recognizable faces. It does not claim the Clean Pixel Data or Clean Recognizable Visual Features options. Read [Conformance and scope](docs/conformance.md) before using output outside a controlled environment.
+This software does not inspect pixel data for burned-in text or recognizable faces. It does not claim the Clean Pixel Data or Clean Recognizable Visual Features options. Read [Conformance and scope](docs/conformance.md) and [Known anomalies](docs/known-anomalies.md) before using output outside a controlled environment. Released versions, their checksums, SBOMs, and audit results are on the [GitHub releases page](https://github.com/medcognetics/dicom-anon/releases); changes are in the [changelog](CHANGELOG.md).
 
 ## Install and build
 
@@ -64,7 +64,7 @@ uv sync --project tools/ci --frozen
 make ci
 ```
 
-GitHub Actions runs the latest and minimum supported Linux toolchains on pull requests and `master` pushes using the trusted `beryl` runner. The 06:17 UTC nightly first repeats the latest-toolchain validation and release build, then runs focused CUDA 12 report tests on beryl's GPU. Dependency security and deprecation reports run each Monday at 06:37 UTC on GitHub-hosted Linux. The scheduled security audit retains every scanner result. Unmaintained-only RustSec advisories and Low-confidence zizmor findings are reported as non-blocking warnings; vulnerabilities, other security findings, and incomplete scans fail the job.
+GitHub Actions runs the latest and minimum supported Linux toolchains on pull requests and `master` pushes using the trusted `beryl` runner. The 06:17 UTC nightly first repeats the latest-toolchain validation and release build, then runs focused CUDA 12 report tests on beryl's GPU. Dependency security and deprecation reports run each Monday at 06:37 UTC on GitHub-hosted Linux. A `v*.*.*` tag starts the release workflow on beryl. It builds Linux x86_64 binaries, an abi3 Python wheel, CycloneDX SBOMs, and checksums from the tag, and creates a draft GitHub release. The scheduled security audit retains every scanner result. Unmaintained-only RustSec advisories and Low-confidence zizmor findings are reported as non-blocking warnings; vulnerabilities, other security findings, and incomplete scans fail the job.
 
 Full asset-backed report integration remains a local gate. After installing the CPU bundle and setting the three `DICOM_ANON_REPORT_*` paths, run `make report-integration-coverage` to exercise real ONNX Runtime, PDFium, OCR, CLI, and rendered-redaction paths and enforce 84% report line coverage. The nightly CUDA job separately checks its cached bundle, CPU/CUDA semantic parity, and `report-anon --device cuda` without duplicating PDF or OCR coverage.
 
@@ -243,7 +243,9 @@ The public API also supports readers, writers, parsed `dicom-rs` objects, and va
 - [Rust API and bindings](docs/api-and-bindings.md)
 - [Key management and disclosure safety](docs/security.md)
 - [Benchmarks](docs/benchmarks.md)
-- [Contributing](CONTRIBUTING.md)
+- [Changelog](CHANGELOG.md)
+- [Known anomalies](docs/known-anomalies.md)
+- [Contributing, versioning, and release procedure](CONTRIBUTING.md)
 
 ## Regulatory status
 

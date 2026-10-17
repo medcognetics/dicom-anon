@@ -1,5 +1,7 @@
 # CLI contract
 
+`dicom-anonymize --version`, `dicom-validate --version`, and `report-anon --version` print the crate version and the source commit, for example `dicom-anonymize 0.2.0 (commit 0123…)`. The build script records the commit from the local Git checkout without network access. Set `DICOM_ANON_GIT_COMMIT` to a full commit hash to supply it for a build outside a Git checkout. The text is `commit unknown` when neither source is available. Release binaries always name the tagged commit.
+
 ## `dicom-to-parquet`
 
 ```text

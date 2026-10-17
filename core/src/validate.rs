@@ -240,14 +240,7 @@ fn method_description_matches(value: &str, profile: &ProfileConfiguration) -> bo
     {
         return false;
     }
-    let expected_prefix = match profile.policy {
-        DeidentificationPolicy::Dicom => "dicom-anon ",
-        DeidentificationPolicy::SafeHarborMetadata => "dicom-anon safe-harbor-metadata ",
-    };
-    parts
-        .next()
-        .and_then(|implementation| implementation.strip_prefix(expected_prefix))
-        == Some(PROFILE_VERSION)
+    parts.next() == Some(profile.deidentification_implementation().as_str())
         && parts.next().is_none()
 }
 
@@ -923,7 +916,7 @@ fn compare_datasets(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Anonymizer, Options, SecretKey};
+    use crate::{Anonymizer, Options, SecretKey, TOOL_VERSION};
     use dicom_core::value::DataSetSequence;
     use dicom_dictionary_std::uids;
     use dicom_object::{FileMetaTableBuilder, InMemDicomObject};
@@ -1027,6 +1020,37 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(!error.contains(SENSITIVE_INVALID_DATE));
+    }
+
+    #[test]
+    fn candidate_validation_requires_the_current_tool_version_in_method_text() {
+        let options = Options::new(SecretKey::new(KEY).unwrap());
+        let (mut candidate, _) = Anonymizer::new(options)
+            .unwrap()
+            .anonymize(&source())
+            .unwrap();
+        let method = element_text(&candidate, tags::DEIDENTIFICATION_METHOD).unwrap();
+        let current = format!("dicom-anon {TOOL_VERSION} {PROFILE_VERSION}");
+        assert!(method.ends_with(&format!("\\{current}")));
+        assert!(validate_object(&candidate)
+            .findings
+            .iter()
+            .all(|finding| finding.code != "deidentification_method_text_mismatch"));
+
+        for implementation in [
+            format!("dicom-anon {PROFILE_VERSION}"),
+            format!("dicom-anon 0.0.0-other {PROFILE_VERSION}"),
+        ] {
+            candidate.put_str(
+                tags::DEIDENTIFICATION_METHOD,
+                VR::LO,
+                method.replace(&current, &implementation),
+            );
+            assert!(validate_object(&candidate)
+                .findings
+                .iter()
+                .any(|finding| finding.code == "deidentification_method_text_mismatch"));
+        }
     }
 
     #[test]

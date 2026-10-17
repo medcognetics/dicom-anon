@@ -12,7 +12,7 @@ use dicom_anon::{anonymize_file, anonymize_reader, Anonymizer, Options};
 #[derive(Debug, Parser)]
 #[command(
     name = "dicom-anonymize",
-    version,
+    version = dicom_anon::cli_common::LONG_VERSION,
     about = "De-identify one DICOM file using DICOM PS3.15",
     after_help = "Exit status: 0 success, 2 usage or runtime error. DICOM output goes to stdout when OUTPUT is omitted or '-'."
 )]

@@ -1,0 +1,158 @@
+name: Release
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+', 'v[0-9]+.[0-9]+.[0-9]+-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release / Linux x86_64
+    runs-on: [self-hosted, linux, x64, beryl]
+    container:
+      image: ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 60
+    # Write access is used only by the final step, which creates a draft release for a tag.
+    permissions:
+      contents: write
+      actions: read
+      checks: read
+    env:
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Install container prerequisites
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+            build-essential \
+            ca-certificates \
+            clang \
+            curl \
+            gh \
+            git \
+            libclang-dev \
+            libleptonica-dev \
+            libtesseract-dev \
+            pkg-config \
+            tesseract-ocr \
+            tesseract-ocr-eng
+          pkg-config --exists lept tesseract
+          gh --version
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Trust the checkout for build-time commit discovery
+        run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: "1.97.1"
+      - name: Install Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          enable-cache: false
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.18.0"
+          package-manager-cache: false
+      - name: Install cargo-audit and cargo-cyclonedx
+        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
+        with:
+          tool: cargo-audit@0.22.2,cargo-cyclonedx@0.5.9
+      - name: Synchronize CI tools
+        run: uv sync --project tools/ci --frozen --python "3.14"
+      - name: Resolve release tag
+        id: tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ "${EVENT_NAME}" == "push" ]]; then
+            tag="${REF_NAME}"
+          else
+            tag="$(uv run --project tools/ci --frozen python tools/ci/release.py manifest-tag)"
+          fi
+          uv run --project tools/ci --frozen python tools/ci/release.py check-version --tag "${tag}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+      - name: Require release preconditions
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          commit="$(git rev-parse HEAD)"
+          test "${commit}" = "${GITHUB_SHA}"
+          tag_type="$(gh api "repos/${GH_REPO}/git/ref/tags/${TAG}" --jq .object.type)"
+          if [[ "${tag_type}" != "tag" ]]; then
+            echo "::error::${TAG} must be an annotated or signed tag."
+            exit 1
+          fi
+          ancestry="$(gh api "repos/${GH_REPO}/compare/master...${commit}" --jq .status)"
+          if [[ "${ancestry}" != "identical" && "${ancestry}" != "behind" ]]; then
+            echo "::error::${TAG} must point to a commit on master."
+            exit 1
+          fi
+          required="$(gh api "repos/${GH_REPO}/commits/${commit}/check-runs?check_name=Linux%20%2F%20Required&filter=all" \
+            --jq '[.check_runs[] | select(.conclusion == "success")] | length')"
+          if [[ "${required}" -lt 1 ]]; then
+            echo "::error::Linux / Required has not passed on ${commit}."
+            exit 1
+          fi
+          nightly="$(gh api "repos/${GH_REPO}/actions/workflows/nightly.yml/runs?head_sha=${commit}&status=success" \
+            --jq .total_count)"
+          if [[ "${nightly}" -lt 1 ]]; then
+            echo "::error::Nightly has not passed on ${commit}. Dispatch it on master before tagging."
+            exit 1
+          fi
+      - name: Run all security scanners
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: make audit
+      - name: Build release assets
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          export SOURCE_DATE_EPOCH
+          uv run --project tools/ci --frozen python tools/ci/release.py build --tag "${TAG}"
+      - name: Write release notes
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          uv run --project tools/ci --frozen python tools/ci/release.py notes \
+            --tag "${TAG}" --notes "${RUNNER_TEMP}/release-notes.md"
+          (cd target/release-assets && sha256sum --check SHA256SUMS)
+      - name: Create draft GitHub release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          prerelease=()
+          if [[ "${TAG}" == *-* ]]; then
+            prerelease=(--prerelease)
+          fi
+          gh release create "${TAG}" \
+            --draft \
+            --verify-tag \
+            "${prerelease[@]}" \
+            --title "dicom-anon ${TAG#v}" \
+            --notes-file "${RUNNER_TEMP}/release-notes.md" \
+            target/release-assets/*
