@@ -927,7 +927,13 @@ mod tests {
         no_siz.extend_from_slice(&[0xFF, 0xD9]);
         let no_tiles = vec![0xFF, 0x4F, 0xFF, 0x51, 0x00, 0x02, 0xFF, 0xD9];
         let delimiter = codestream(&[0xFF, 0x30], &[], &[], true);
+        let eoc_in_body = codestream(&[], &[], &[1, 0xFF, 0xD9, 0x00], true);
+        let bad_sop = codestream(&[], &[], &[0xFF, 0x91, 0x00, 0x05, 0x00, 0x01, 0x00], true);
+        let short_sop = codestream(&[], &[], &[0xFF, 0x91, 0x00, 0x04, 0x00], true);
         for (name, input) in [
+            ("bad-sop", bad_sop),
+            ("short-sop", short_sop),
+            ("eoc-in-body", eoc_in_body),
             ("jp2", jp2),
             ("trailing", trailing),
             ("truncated", truncated_segment),
@@ -939,6 +945,37 @@ mod tests {
         ] {
             assert!(strip_comments(&input).is_err(), "{name}");
         }
+    }
+
+    #[test]
+    fn updates_psot_in_every_commented_tile_part() {
+        let tile_part = |index: u8, header: &[u8], body: &[u8]| {
+            let psot = u32::try_from(12 + header.len() + 2 + body.len()).unwrap();
+            let mut part = vec![0xFF, 0x90, 0x00, 0x0A, 0x00, index];
+            part.extend_from_slice(&psot.to_be_bytes());
+            part.extend_from_slice(&[0x00, 0x01]);
+            part.extend_from_slice(header);
+            part.extend_from_slice(&[0xFF, 0x93]);
+            part.extend_from_slice(body);
+            part
+        };
+        let build = |comments: bool| {
+            let mut output = vec![0xFF, 0x4F, 0xFF, 0x51, 0x00, 0x04, 0xAA, 0xBB];
+            if comments {
+                output.extend_from_slice(&comment(b"MAIN"));
+            }
+            for index in 0..3 {
+                let header = if comments && index != 1 {
+                    comment(&vec![b'T'; usize::from(index) + 1])
+                } else {
+                    Vec::new()
+                };
+                output.extend_from_slice(&tile_part(index, &header, &[index]));
+            }
+            output.extend_from_slice(&[0xFF, 0xD9]);
+            output
+        };
+        assert_eq!(strip_comments(&build(true)).unwrap(), (build(false), 3));
     }
 
     #[test]
