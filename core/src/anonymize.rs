@@ -149,7 +149,11 @@ impl Anonymizer {
         {
             return Err(Error::AlreadyDeidentified);
         }
-        pixel::check_gates(source, &self.options.profile)?;
+        pixel::check_gates(
+            source,
+            Some(source.meta().media_storage_sop_class_uid()),
+            &self.options.profile,
+        )?;
         let transfer_syntax = source.meta().transfer_syntax().trim_end_matches('\0');
         let jpeg2000 = if pixel::is_jpeg2000(transfer_syntax) {
             Some(pixel::clean_jpeg2000(source)?)
