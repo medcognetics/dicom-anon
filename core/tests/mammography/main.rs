@@ -123,6 +123,35 @@ fn item(object: &InMemDicomObject, tag: Tag, index: usize) -> &InMemDicomObject 
         .unwrap_or_else(|| panic!("{tag} is not a sequence"))[index]
 }
 
+/// Safe Harbor temporal attributes that the profile removes or empties, as `(gggg,eeee):VR`:
+/// Patient's Birth Date and Patient's Birth Time.
+const REMOVED_SAFE_HARBOR_TEMPORAL: [&str; 2] = ["(0010,0030):DA", "(0010,0032):TM"];
+
+/// Temporal values keyed by item path, for example `(5200,9230)[1]/(0020,9111)[0]/(0018,9074):DT`.
+fn temporal_values(object: &InMemDicomObject) -> BTreeMap<String, String> {
+    fn collect(object: &InMemDicomObject, prefix: &str, values: &mut BTreeMap<String, String>) {
+        for element in object.iter() {
+            let tag = element.tag();
+            let path = format!("{prefix}({:04X},{:04X})", tag.0, tag.1);
+            if let Value::Sequence(sequence) = element.value() {
+                for (index, item) in sequence.items().iter().enumerate() {
+                    collect(item, &format!("{path}[{index}]/"), values);
+                }
+            } else if matches!(element.vr(), VR::DA | VR::DT | VR::TM) {
+                let value = element.to_str().unwrap_or_default();
+                let vr = element.vr().to_string();
+                values.insert(
+                    format!("{path}:{vr}"),
+                    value.trim_end_matches(['\0', ' ']).to_owned(),
+                );
+            }
+        }
+    }
+    let mut values = BTreeMap::new();
+    collect(object, "", &mut values);
+    values
+}
+
 fn contains_placeholder(bytes: &[u8]) -> bool {
     bytes
         .windows(PLACEHOLDER.len())
@@ -352,7 +381,7 @@ fn view_code_sequence_records_current_behavior() {
 
 #[test]
 fn safe_harbor_generalizes_temporal_values_at_every_depth_and_caps_age() {
-    for (name, policy, _, output) in cases() {
+    for (name, policy, source, output) in cases() {
         let context = format!("{name} / {}", policy.name());
         let age = text(&output, tags::PATIENT_AGE);
         match policy {
@@ -364,29 +393,44 @@ fn safe_harbor_generalizes_temporal_values_at_every_depth_and_caps_age() {
         if policy != Policy::SafeHarbor {
             continue;
         }
-        let mut deepest = 0;
-        visit(&output, 0, &mut |element, depth| {
-            let Ok(value) = element.to_str() else {
-                return;
-            };
-            let value = value.trim_end_matches(['\0', ' ']);
-            if value.is_empty() || !matches!(element.vr(), VR::DA | VR::DT | VR::TM) {
-                return;
-            }
-            deepest = deepest.max(depth);
-            for value in value.split('\\') {
+        let source_values = temporal_values(&source);
+        let output_values = temporal_values(&output);
+        // Frame Content values in the DBT sit at depth 2.
+        assert!(
+            name != "dbt"
+                || source_values
+                    .keys()
+                    .any(|path| path.matches('[').count() == 2),
+            "{context}: no depth-2 temporal source value"
+        );
+        for (path, value) in &output_values {
+            for value in value.split('\\').filter(|value| !value.is_empty()) {
                 let digits = value.bytes().all(|byte| byte.is_ascii_digit());
-                let valid = match element.vr() {
-                    VR::DA => value.len() == 8 && digits && value.ends_with("0101"),
-                    VR::DT => value.len() == 4 && digits,
+                let valid = match path.rsplit(':').next() {
+                    Some("DA") => value.len() == 8 && digits && value.ends_with("0101"),
+                    Some("DT") => value.len() == 4 && digits,
                     _ => value == "000000",
                 };
-                assert!(valid, "{context}: {} = {value}", element.tag());
+                assert!(valid, "{context}: {path} = {value}");
             }
-        });
+        }
+        // Every source temporal value must reach the output, generalized. Only the
+        // attributes that the profile removes or empties are exempt.
+        for path in source_values.keys() {
+            let output = output_values.get(path).map(String::as_str);
+            if REMOVED_SAFE_HARBOR_TEMPORAL
+                .iter()
+                .any(|tag| path.ends_with(tag))
+            {
+                assert!(output.is_none_or(str::is_empty), "{context}: {path}");
+            } else {
+                assert!(
+                    output.is_some_and(|value| !value.is_empty()),
+                    "{context}: {path}"
+                );
+            }
+        }
         if name == "dbt" {
-            // Frame Acquisition DateTime sits in Per-Frame > Frame Content.
-            assert_eq!(deepest, 2, "{context}");
             let frame = item(
                 item(&output, tags::PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE, 1),
                 tags::FRAME_CONTENT_SEQUENCE,
@@ -455,13 +499,38 @@ fn references_and_file_meta_stay_consistent_across_objects() {
             );
         }
 
-        for tag in [tags::STUDY_INSTANCE_UID, tags::PATIENT_ID, tags::DEVICE_UID] {
-            assert_eq!(text(&mammogram, tag), text(&dbt, tag), "{context}: {tag}");
-            assert_eq!(text(&dbt, tag), text(&synthesized, tag), "{context}: {tag}");
+        // Safe Harbor empties Patient ID and links the objects through the subject token.
+        let patient_tag = if policy == Policy::SafeHarbor {
+            for object in [&mammogram, &dbt, &synthesized] {
+                assert_eq!(
+                    text(object, tags::PATIENT_ID).as_deref(),
+                    Some(""),
+                    "{context}"
+                );
+            }
+            tags::CLINICAL_TRIAL_SUBJECT_ID
+        } else {
+            tags::PATIENT_ID
+        };
+        for tag in [tags::STUDY_INSTANCE_UID, tags::DEVICE_UID, patient_tag] {
+            let value = text(&dbt, tag);
+            assert!(
+                value.as_deref().is_some_and(|value| !value.is_empty()),
+                "{context}: {tag}"
+            );
+            assert_eq!(text(&mammogram, tag), value, "{context}: {tag}");
+            assert_eq!(text(&synthesized, tag), value, "{context}: {tag}");
         }
+        let frame_of_reference = text(&dbt, tags::FRAME_OF_REFERENCE_UID);
+        assert!(
+            frame_of_reference
+                .as_deref()
+                .is_some_and(|value| !value.is_empty()),
+            "{context}"
+        );
         assert_eq!(
-            text(&dbt, tags::FRAME_OF_REFERENCE_UID),
             text(&synthesized, tags::FRAME_OF_REFERENCE_UID),
+            frame_of_reference,
             "{context}"
         );
 
