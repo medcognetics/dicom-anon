@@ -678,35 +678,49 @@ fn malformed_jpeg_codestreams_fail_closed() {
 }
 
 #[test]
-fn encapsulated_total_length_follows_segment_removal() {
+fn encapsulated_total_length_follows_segment_removal_and_is_validated() {
+    const CODE: &str = "encapsulated_total_length_mismatch";
+    fn write_with_total_length(
+        object: &mut dicom_anon::DefaultDicomObject,
+        value: usize,
+        path: &Path,
+    ) {
+        object.put(InMemElement::new(
+            tags::ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH,
+            VR::UV,
+            PrimitiveValue::U64(vec![u64::try_from(value).unwrap()].into()),
+        ));
+        let mut bytes = Vec::new();
+        object.write_all(&mut bytes).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
     let directory = tempfile::tempdir().unwrap();
     let samples = synthetic_samples();
     for (transfer_syntax, encode, _) in jpeg_codecs() {
         let clean = encode(&samples);
         let annotated = with_jpeg_metadata(&clean);
-        let source_length = u64::try_from(annotated.len()).unwrap();
         let input = directory.path().join(format!("{transfer_syntax}.dcm"));
         let output = directory.path().join(format!("{transfer_syntax}-out.dcm"));
+        let stale = directory
+            .path()
+            .join(format!("{transfer_syntax}-stale.dcm"));
         let bytes = mammography_bytes(
             MAMMOGRAPHY_FOR_PRESENTATION,
             Some("NO"),
             transfer_syntax,
-            annotated,
+            annotated.clone(),
         );
+        // Each codestream ends with EOI, so the source value excludes only the padding.
         let mut object = dicom_anon::read_dicom(bytes.as_slice()).unwrap();
-        object.put(InMemElement::new(
-            tags::ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH,
-            VR::UV,
-            PrimitiveValue::U64(vec![source_length].into()),
-        ));
-        let mut bytes = Vec::new();
-        object.write_all(&mut bytes).unwrap();
-        std::fs::write(&input, bytes).unwrap();
+        write_with_total_length(&mut object, annotated.len(), &input);
+        let (_, report) = validate(&input, &[]);
+        assert_eq!(finding_severity(&report, CODE), None, "{transfer_syntax}");
 
         let result = anonymize(&input, &output, &[]);
         assert_eq!(result.status.code(), Some(0), "{transfer_syntax}");
-        let output = dicom_anon::read_dicom(std::fs::File::open(&output).unwrap()).unwrap();
-        let total_length = output
+        let mut candidate = dicom_anon::read_dicom(std::fs::File::open(&output).unwrap()).unwrap();
+        let total_length = candidate
             .element(tags::ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH)
             .unwrap()
             .to_int::<u64>()
@@ -715,6 +729,18 @@ fn encapsulated_total_length_follows_segment_removal() {
             total_length,
             u64::try_from(clean.len()).unwrap(),
             "{transfer_syntax}: the declared length must match the rewritten stream"
+        );
+        let (_, report) = validate(&output, &[]);
+        assert_eq!(finding_severity(&report, CODE), None, "{transfer_syntax}");
+
+        // A value that still counts the removed segments is stale.
+        write_with_total_length(&mut candidate, annotated.len(), &stale);
+        let (status, report) = validate(&stale, &[]);
+        assert_eq!(status, Some(1), "{transfer_syntax}");
+        assert_eq!(
+            finding_severity(&report, CODE).as_deref(),
+            Some("error"),
+            "{transfer_syntax}"
         );
     }
 }

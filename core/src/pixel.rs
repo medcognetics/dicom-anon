@@ -247,20 +247,56 @@ fn strip_frames(
     Ok(StrippedFrames { removed, changed })
 }
 
-/// Encapsulated Pixel Data Value Total Length of rewritten fragments.
+/// Fragment byte total without, and with, the trailing zero bytes of the last fragment.
 ///
 /// PS3.3 C.7.6.6 counts every fragment, without the trailing padding of the last fragment.
-/// Each codestream ends with a marker, so trailing zero bytes are padding.
-fn encapsulated_total_length(fragments: &[Vec<u8>]) -> InMemElement {
+fn fragment_total_bounds(fragments: &[Vec<u8>]) -> (u64, u64) {
     let total = fragments.iter().map(Vec::len).sum::<usize>();
-    let last_padding = fragments
+    let last_zeros = fragments
         .last()
         .map_or(0, |last| last.len() - without_zero_padding(last));
+    ((total - last_zeros) as u64, total as u64)
+}
+
+/// Encapsulated Pixel Data Value Total Length of rewritten fragments.
+///
+/// Each codestream ends with a marker, so trailing zero bytes are padding.
+fn encapsulated_total_length(fragments: &[Vec<u8>]) -> InMemElement {
     InMemElement::new(
         tags::ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH,
         VR::UV,
-        PrimitiveValue::U64(vec![(total - last_padding) as u64].into()),
+        PrimitiveValue::U64(vec![fragment_total_bounds(fragments).0].into()),
     )
+}
+
+/// Return whether Encapsulated Pixel Data Value Total Length (7FE0,0003) is present and does
+/// not match the encapsulated fragments under PS3.3 C.7.6.6.
+///
+/// For a codestream transfer syntax, every trailing zero byte of the last fragment is
+/// padding, because each codestream ends with a marker. For another encapsulated transfer
+/// syntax, the padding is not determinable, so any trailing zero bytes can be excluded.
+/// The value must be one 64-bit integer, and Pixel Data must be encapsulated.
+pub(crate) fn total_length_mismatch(object: &InMemDicomObject, transfer_syntax: &str) -> bool {
+    let Some(element) = object.get(tags::ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH) else {
+        return false;
+    };
+    let Ok(values) = element.to_multi_int::<u64>() else {
+        return true;
+    };
+    let [value] = values.as_slice() else {
+        return true;
+    };
+    let Some(Value::PixelSequence(sequence)) =
+        object.get(tags::PIXEL_DATA).map(InMemElement::value)
+    else {
+        return true;
+    };
+    let (unpadded, total) = fragment_total_bounds(sequence.fragments());
+    if Codestream::for_transfer_syntax(transfer_syntax).is_some() {
+        *value != unpadded
+    } else {
+        !(unpadded..=total).contains(value)
+    }
 }
 
 /// Fail when segment removal would change fragment sizes that an Extended Offset Table lists.

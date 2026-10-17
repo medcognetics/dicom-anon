@@ -232,6 +232,16 @@ fn validate_pixel_gates(
         };
         push_finding(report, Severity::Error, code, Some(tag), "root", message);
     }
+    if pixel::total_length_mismatch(object, object.meta().transfer_syntax()) {
+        push_finding(
+            report,
+            Severity::Error,
+            "encapsulated_total_length_mismatch",
+            Some(tags::ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH),
+            "root",
+            "Encapsulated Pixel Data Value Total Length does not match the encapsulated Pixel Data fragments (PS3.3 C.7.6.6)",
+        );
+    }
     let Some(kind) = Codestream::for_transfer_syntax(object.meta().transfer_syntax()) else {
         return;
     };
@@ -996,6 +1006,7 @@ mod tests {
     use super::*;
     use crate::{Anonymizer, Options, SecretKey};
     use dicom_core::value::DataSetSequence;
+    use dicom_core::PrimitiveValue;
     use dicom_dictionary_std::uids;
     use dicom_object::{FileMetaTableBuilder, InMemDicomObject};
 
@@ -1032,6 +1043,74 @@ mod tests {
         .map(|(source, replacement)| (source.to_owned(), replacement.to_owned()))
         .collect();
         options
+    }
+
+    #[test]
+    fn encapsulated_total_length_must_match_fragments() {
+        const RLE: &str = "1.2.840.10008.1.2.5";
+        let encapsulated = || {
+            Some(Value::PixelSequence(
+                dicom_core::value::PixelFragmentSequence::new(
+                    Vec::<u32>::new(),
+                    vec![vec![1, 2, 3, 4], vec![5, 6, 7, 0]],
+                ),
+            ))
+        };
+        let native = || Some(Value::Primitive(PrimitiveValue::from(vec![1_u8, 2])));
+        let mismatch = |transfer_syntax: &str,
+                        pixel_data: Option<Value<InMemDicomObject, Vec<u8>>>,
+                        total_length: Option<Vec<u64>>| {
+            let mut object = InMemDicomObject::new_empty();
+            if let Some(value) = pixel_data {
+                object.put(InMemElement::new(tags::PIXEL_DATA, VR::OB, value));
+            }
+            if let Some(values) = total_length {
+                object.put(InMemElement::new(
+                    tags::ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH,
+                    VR::UV,
+                    PrimitiveValue::U64(values.into()),
+                ));
+            }
+            let object = object
+                .with_meta(FileMetaTableBuilder::new().transfer_syntax(transfer_syntax))
+                .unwrap();
+            let report = validate_object(&object);
+            let findings = report
+                .findings
+                .iter()
+                .filter(|finding| finding.code == "encapsulated_total_length_mismatch")
+                .collect::<Vec<_>>();
+            if let [finding] = findings.as_slice() {
+                assert_eq!(finding.severity, Severity::Error);
+                assert_eq!(finding.tag.as_deref(), Some("(7FE0,0003)"));
+                assert!(!report.conformant);
+            }
+            findings.len() == 1
+        };
+        // PS3.3 C.7.6.6: 8 fragment bytes, without the trailing padding byte of the last one.
+        let jpeg = uids::JPEG_LOSSLESS_SV1;
+        assert!(!mismatch(jpeg, encapsulated(), Some(vec![7])));
+        assert!(!mismatch(jpeg, encapsulated(), None));
+        assert!(!mismatch(jpeg, None, None));
+        for (transfer_syntax, pixel_data, total_length) in [
+            (jpeg, encapsulated(), Some(vec![8])),
+            (jpeg, encapsulated(), Some(vec![6])),
+            (jpeg, encapsulated(), Some(vec![7, 7])),
+            (jpeg, encapsulated(), Some(Vec::new())),
+            (jpeg, None, Some(vec![7])),
+            (uids::EXPLICIT_VR_LITTLE_ENDIAN, native(), Some(vec![2])),
+            (RLE, encapsulated(), Some(vec![6])),
+            (RLE, encapsulated(), Some(vec![9])),
+        ] {
+            assert!(
+                mismatch(transfer_syntax, pixel_data, total_length.clone()),
+                "{transfer_syntax}: {total_length:?}"
+            );
+        }
+        // Without a codestream end marker, a trailing zero byte can be data or padding.
+        for total_length in [7, 8] {
+            assert!(!mismatch(RLE, encapsulated(), Some(vec![total_length])));
+        }
     }
 
     #[test]
