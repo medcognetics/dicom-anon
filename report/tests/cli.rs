@@ -92,6 +92,36 @@ fn dicom_profile_options_require_a_dicom_input() {
 }
 
 #[test]
+fn dicom_gate_options_require_a_dicom_input() {
+    for (args, option) in [
+        (
+            &["--require-no-burned-in-annotation"][..],
+            "--require-no-burned-in-annotation",
+        ),
+        (
+            &["--allow-sop-class", "1.2.840.10008.5.1.4.1.1.1.2"][..],
+            "--allow-sop-class",
+        ),
+    ] {
+        let output = run_with_stdin(
+            Command::new(env!("CARGO_BIN_EXE_report-anon"))
+                .arg("anonymize")
+                .args(args)
+                .args(["--model-dir", "/not/read/before/usage-validation"]),
+            b"Patient report",
+        );
+
+        assert_eq!(output.status.code(), Some(2), "{option}");
+        assert!(output.stdout.is_empty(), "{option}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains(&format!("{option} requires at least one --dicom")),
+            "{option}"
+        );
+    }
+}
+
+#[test]
 fn piped_linkage_requires_an_explicit_association_destination() {
     let output = run_with_stdin(
         Command::new(env!("CARGO_BIN_EXE_report-anon")).args([

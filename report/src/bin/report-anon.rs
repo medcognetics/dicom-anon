@@ -674,6 +674,10 @@ fn validate_dicom_options(args: &AnonymizeArgs) -> Result<(), String> {
         Some("--safe-private-allowlist")
     } else if args.profile.uid_map.is_some() {
         Some("--uid-map")
+    } else if args.profile.require_no_burned_in_annotation {
+        Some("--require-no-burned-in-annotation")
+    } else if !args.profile.allow_sop_class.is_empty() {
+        Some("--allow-sop-class")
     } else {
         None
     };
