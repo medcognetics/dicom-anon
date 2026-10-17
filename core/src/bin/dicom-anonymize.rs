@@ -171,7 +171,8 @@ fn generate_uid_map(
                 .to_owned(),
         );
     }
-    if std::fs::symlink_metadata(map_path).is_ok()
+    let map_exists = std::fs::symlink_metadata(map_path).is_ok();
+    if map_exists
         && !args
             .profile
             .uid_map
@@ -194,7 +195,13 @@ fn generate_uid_map(
     json.push(b'\n');
     // Replace the link target, not a symbolic link that names the loaded map.
     let map_target = normalize(map_path);
-    write_atomic(&map_target, &json)?;
+    // A new map must not replace a file that another process created meanwhile.
+    let persist = if map_exists {
+        Persist::Replace
+    } else {
+        Persist::CreateNew
+    };
+    write_atomic(&map_target, &json, persist)?;
     sync_directory(map_target.parent().unwrap_or_else(|| Path::new(".")))?;
     write_output(output, &bytes)?;
     Ok(report)
@@ -211,7 +218,7 @@ fn read_source(input: &str) -> Result<DefaultDicomObject, String> {
 
 fn write_output(output: &str, bytes: &[u8]) -> Result<(), String> {
     if output != "-" {
-        return write_atomic(Path::new(output), bytes);
+        return write_atomic(Path::new(output), bytes, Persist::Replace);
     }
     let mut stdout = io::stdout().lock();
     stdout
@@ -240,7 +247,14 @@ fn normalize(path: &Path) -> PathBuf {
     }
 }
 
-fn write_atomic(output: &Path, bytes: &[u8]) -> Result<(), String> {
+/// How an atomic write treats an existing destination.
+#[derive(Clone, Copy)]
+enum Persist {
+    Replace,
+    CreateNew,
+}
+
+fn write_atomic(output: &Path, bytes: &[u8], persist: Persist) -> Result<(), String> {
     let parent = output.parent().unwrap_or_else(|| Path::new("."));
     let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| {
         format!(
@@ -255,9 +269,11 @@ fn write_atomic(output: &Path, bytes: &[u8]) -> Result<(), String> {
         .as_file()
         .sync_all()
         .map_err(|error| format!("cannot sync temporary output: {error}"))?;
-    temporary
-        .persist(output)
-        .map_err(|error| format!("cannot replace {}: {}", output.display(), error.error))?;
+    match persist {
+        Persist::Replace => temporary.persist(output).map(drop),
+        Persist::CreateNew => temporary.persist_noclobber(output).map(drop),
+    }
+    .map_err(|error| format!("cannot write {}: {}", output.display(), error.error))?;
     Ok(())
 }
 
@@ -280,4 +296,21 @@ fn sync_directory(directory: &Path) -> Result<(), String> {
 #[cfg(not(unix))]
 fn sync_directory(_directory: &Path) -> Result<(), String> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_file_writes_do_not_replace_a_file_created_after_the_check() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("map.json");
+        std::fs::write(&path, b"created concurrently").unwrap();
+        assert!(write_atomic(&path, b"{}", Persist::CreateNew).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"created concurrently");
+
+        write_atomic(&path, b"{}", Persist::Replace).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"{}");
+    }
 }
