@@ -26,6 +26,7 @@ const JPEG_2000_TRANSFER_SYNTAXES: [&str; 7] = [
     "1.2.840.10008.1.2.4.203",
 ];
 const EXTENDED_OFFSET_TABLE: Tag = Tag(0x7FE0, 0x0001);
+const EXTENDED_OFFSET_TABLE_LENGTHS: Tag = Tag(0x7FE0, 0x0002);
 const ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH: Tag = Tag(0x7FE0, 0x0003);
 
 const SOC: u16 = 0xFF4F;
@@ -125,7 +126,10 @@ pub(crate) fn clean_jpeg2000(object: &InMemDicomObject) -> Result<Jpeg2000Cleani
             removed_segments,
         });
     }
-    if object.get(EXTENDED_OFFSET_TABLE).is_some() {
+    if [EXTENDED_OFFSET_TABLE, EXTENDED_OFFSET_TABLE_LENGTHS]
+        .into_iter()
+        .any(|tag| object.get(tag).is_some())
+    {
         return Err(unsupported(
             "comment removal would invalidate the Extended Offset Table",
         ));
@@ -716,6 +720,20 @@ mod tests {
             .unwrap()
             .replacement
             .is_none());
+        let mut lengths_only = object(
+            None,
+            Vec::new(),
+            vec![pad(codestream(&comment(b"ONE"), &[], &[1], true))],
+        );
+        lengths_only.put(InMemElement::new(
+            EXTENDED_OFFSET_TABLE_LENGTHS,
+            VR::OV,
+            PrimitiveValue::U64(vec![0_u64].into()),
+        ));
+        assert!(matches!(
+            clean_jpeg2000(&lengths_only),
+            Err(Error::UnsupportedJpeg2000(_))
+        ));
         let mut total_length = object(
             None,
             Vec::new(),
