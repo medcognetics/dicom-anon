@@ -192,8 +192,9 @@ impl Anonymizer {
                 report.removed_jpeg_comment_segments = removed.comments;
                 report.removed_jpeg_application_segments = removed.applications;
             }
-            if let Some(replacement) = cleaning.replacement {
-                if output.get(tags::PIXEL_DATA).is_some() {
+            // Replace only elements that profile processing kept.
+            for replacement in cleaning.replacement {
+                if output.get(replacement.tag()).is_some() {
                     output.put(replacement);
                 }
             }

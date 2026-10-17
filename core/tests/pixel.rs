@@ -676,3 +676,45 @@ fn malformed_jpeg_codestreams_fail_closed() {
         );
     }
 }
+
+#[test]
+fn encapsulated_total_length_follows_segment_removal() {
+    let directory = tempfile::tempdir().unwrap();
+    let samples = synthetic_samples();
+    for (transfer_syntax, encode, _) in jpeg_codecs() {
+        let clean = encode(&samples);
+        let annotated = with_jpeg_metadata(&clean);
+        let source_length = u64::try_from(annotated.len()).unwrap();
+        let input = directory.path().join(format!("{transfer_syntax}.dcm"));
+        let output = directory.path().join(format!("{transfer_syntax}-out.dcm"));
+        let bytes = mammography_bytes(
+            MAMMOGRAPHY_FOR_PRESENTATION,
+            Some("NO"),
+            transfer_syntax,
+            annotated,
+        );
+        let mut object = dicom_anon::read_dicom(bytes.as_slice()).unwrap();
+        object.put(InMemElement::new(
+            tags::ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH,
+            VR::UV,
+            PrimitiveValue::U64(vec![source_length].into()),
+        ));
+        let mut bytes = Vec::new();
+        object.write_all(&mut bytes).unwrap();
+        std::fs::write(&input, bytes).unwrap();
+
+        let result = anonymize(&input, &output, &[]);
+        assert_eq!(result.status.code(), Some(0), "{transfer_syntax}");
+        let output = dicom_anon::read_dicom(std::fs::File::open(&output).unwrap()).unwrap();
+        let total_length = output
+            .element(tags::ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH)
+            .unwrap()
+            .to_int::<u64>()
+            .unwrap();
+        assert_eq!(
+            total_length,
+            u64::try_from(clean.len()).unwrap(),
+            "{transfer_syntax}: the declared length must match the rewritten stream"
+        );
+    }
+}

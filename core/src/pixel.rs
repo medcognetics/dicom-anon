@@ -5,10 +5,11 @@
 //! marker segments, and JPEG and JPEG-LS comment (COM) and application (APPn)
 //! marker segments. These segments can carry text outside the image samples.
 
+use std::borrow::Cow;
 use std::ops::Range;
 
 use dicom_core::value::{PixelFragmentSequence, Value};
-use dicom_core::Tag;
+use dicom_core::{PrimitiveValue, Tag, VR};
 use dicom_dictionary_std::tags;
 use dicom_object::mem::{InMemDicomObject, InMemElement};
 
@@ -166,8 +167,9 @@ impl RemovedSegments {
 /// Result of metadata-segment removal for one Pixel Data element.
 #[derive(Debug)]
 pub(crate) struct CodestreamCleaning {
-    /// Replacement Pixel Data, or `None` when no removable segment was present.
-    pub replacement: Option<InMemElement>,
+    /// Replacement Pixel Data and, when present in the source, Encapsulated Pixel Data Value
+    /// Total Length. Empty when no removable segment was present.
+    pub replacement: Vec<InMemElement>,
     /// Removed marker segments.
     pub removed: RemovedSegments,
 }
@@ -187,62 +189,138 @@ pub(crate) fn count_removable_segments(
     object: &InMemDicomObject,
     kind: Codestream,
 ) -> Result<RemovedSegments> {
-    clean_codestreams(object, kind).map(|cleaning| cleaning.removed)
+    encapsulated_frames(object)
+        .and_then(|frames| match frames {
+            Some((_, _, frames)) => {
+                let stripped = strip_frames(&frames, kind, false)?;
+                check_extended_offset_table(object, stripped.removed)?;
+                Ok(stripped.removed)
+            }
+            None => Ok(RemovedSegments::default()),
+        })
+        .map_err(|reason| kind.error(reason))
 }
 
-fn clean_frames(object: &InMemDicomObject, kind: Codestream) -> Parse<CodestreamCleaning> {
+/// Pixel Data element, its fragment sequence, and the fragments of each frame.
+type Frames<'a> = Option<(
+    &'a InMemElement,
+    &'a PixelFragmentSequence<Vec<u8>>,
+    Vec<&'a [Vec<u8>]>,
+)>;
+
+fn encapsulated_frames(object: &InMemDicomObject) -> Parse<Frames<'_>> {
     let Some(element) = object.get(tags::PIXEL_DATA) else {
-        return Ok(CodestreamCleaning {
-            replacement: None,
-            removed: RemovedSegments::default(),
-        });
+        return Ok(None);
     };
     let Value::PixelSequence(sequence) = element.value() else {
         return Err("Pixel Data is not encapsulated");
     };
     let frames = frame_fragments(object, sequence)?;
-    let mut cleaned = Vec::with_capacity(frames.len());
+    Ok(Some((element, sequence, frames)))
+}
+
+/// Result of one parse over every frame.
+struct StrippedFrames {
+    removed: RemovedSegments,
+    /// Rewritten codestream of each changed frame, and `None` for each unchanged frame.
+    changed: Vec<Option<Vec<u8>>>,
+}
+
+/// Parse every frame once and count its removable segments.
+///
+/// Without `keep_changed`, `changed` stays empty, and no rewritten frame is retained.
+fn strip_frames(
+    frames: &[&[Vec<u8>]],
+    kind: Codestream,
+    keep_changed: bool,
+) -> Parse<StrippedFrames> {
     let mut removed = RemovedSegments::default();
-    for frame in &frames {
-        let codestream = frame
-            .iter()
-            .flat_map(|fragment| fragment.iter().copied())
-            .collect::<Vec<_>>();
-        let (output, frame_removed) = kind.strip(&codestream)?;
+    let mut changed = Vec::with_capacity(if keep_changed { frames.len() } else { 0 });
+    for frame in frames {
+        let (output, frame_removed) = kind.strip(&frame_codestream(frame))?;
         removed.comments += frame_removed.comments;
         removed.applications += frame_removed.applications;
-        cleaned.push(output);
+        if keep_changed {
+            changed.push((!frame_removed.is_empty()).then_some(output));
+        }
     }
+    Ok(StrippedFrames { removed, changed })
+}
+
+/// Encapsulated Pixel Data Value Total Length of rewritten fragments.
+///
+/// PS3.3 C.7.6.6 counts every fragment, without the trailing padding of the last fragment.
+/// Each codestream ends with a marker, so trailing zero bytes are padding.
+fn encapsulated_total_length(fragments: &[Vec<u8>]) -> InMemElement {
+    let total = fragments.iter().map(Vec::len).sum::<usize>();
+    let last_padding = fragments
+        .last()
+        .map_or(0, |last| last.len() - without_zero_padding(last));
+    InMemElement::new(
+        tags::ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH,
+        VR::UV,
+        PrimitiveValue::U64(vec![(total - last_padding) as u64].into()),
+    )
+}
+
+/// Fail when segment removal would change fragment sizes that an Extended Offset Table lists.
+fn check_extended_offset_table(object: &InMemDicomObject, removed: RemovedSegments) -> Parse<()> {
+    if !removed.is_empty() && object.get(EXTENDED_OFFSET_TABLE).is_some() {
+        return Err("segment removal would invalidate the Extended Offset Table");
+    }
+    Ok(())
+}
+
+/// Join the fragments of one frame. A single-fragment frame is borrowed without a copy.
+fn frame_codestream(frame: &[Vec<u8>]) -> Cow<'_, [u8]> {
+    match frame {
+        [fragment] => Cow::Borrowed(fragment),
+        _ => Cow::Owned(frame.concat()),
+    }
+}
+
+fn clean_frames(object: &InMemDicomObject, kind: Codestream) -> Parse<CodestreamCleaning> {
+    let Some((element, sequence, frames)) = encapsulated_frames(object)? else {
+        return Ok(CodestreamCleaning {
+            replacement: Vec::new(),
+            removed: RemovedSegments::default(),
+        });
+    };
+    let StrippedFrames { removed, changed } = strip_frames(&frames, kind, true)?;
     if removed.is_empty() {
         return Ok(CodestreamCleaning {
-            replacement: None,
+            replacement: Vec::new(),
             removed,
         });
     }
-    if object.get(EXTENDED_OFFSET_TABLE).is_some() {
-        return Err("segment removal would invalidate the Extended Offset Table");
-    }
+    check_extended_offset_table(object, removed)?;
 
-    let mut fragments = Vec::with_capacity(cleaned.len());
-    let mut offsets = Vec::with_capacity(cleaned.len());
+    let keep_offset_table = !sequence.offset_table().is_empty();
+    let mut fragments = Vec::with_capacity(frames.len());
+    let mut offsets = Vec::new();
     let mut offset = 0_u64;
-    for mut fragment in cleaned {
+    for (frame, output) in frames.iter().zip(changed) {
+        // An unchanged frame keeps its source bytes, including its padding.
+        let mut fragment = output.unwrap_or_else(|| frame_codestream(frame).into_owned());
         if fragment.len() % 2 == 1 {
             fragment.push(0);
         }
-        offsets.push(u32::try_from(offset).map_err(|_| "Basic Offset Table overflow")?);
-        offset += 8 + fragment.len() as u64;
+        if keep_offset_table {
+            offsets.push(u32::try_from(offset).map_err(|_| "Basic Offset Table overflow")?);
+            offset += 8 + fragment.len() as u64;
+        }
         fragments.push(fragment);
     }
-    if sequence.offset_table().is_empty() {
-        offsets.clear();
-    }
+    let total_length = object
+        .get(tags::ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH)
+        .map(|_| encapsulated_total_length(&fragments));
+    let pixel_data = InMemElement::new(
+        tags::PIXEL_DATA,
+        element.vr(),
+        Value::PixelSequence(PixelFragmentSequence::new(offsets, fragments)),
+    );
     Ok(CodestreamCleaning {
-        replacement: Some(InMemElement::new(
-            tags::PIXEL_DATA,
-            element.vr(),
-            Value::PixelSequence(PixelFragmentSequence::new(offsets, fragments)),
-        )),
+        replacement: std::iter::once(pixel_data).chain(total_length).collect(),
         removed,
     })
 }
@@ -382,6 +460,9 @@ fn strip_comments(input: &[u8]) -> Parse<(Vec<u8>, u64)> {
             }
             position += length;
         }
+        if has_marker_code(&input[position + 2..tile_end]) {
+            return Err("tile-part data contains a marker code");
+        }
         output.extend_from_slice(&input[position..tile_end]);
         position = tile_end;
         if tile_removed > 0 {
@@ -400,6 +481,34 @@ fn strip_comments(input: &[u8]) -> Parse<(Vec<u8>, u64)> {
     }
     output.extend_from_slice(&input[data_end..end]);
     Ok((output, removed))
+}
+
+/// Return true when tile-part data contains a marker code other than SOP or EPH.
+///
+/// Bit stuffing in packet headers and code-block data never puts a byte above `0x8F`
+/// after `0xFF`. A marker code in the data therefore shows appended content, such as a
+/// second EOC followed by a COM segment, that must not be copied as tile data. The
+/// sequence number in a six-byte SOP segment is not stuffed, so the scan skips it.
+fn has_marker_code(data: &[u8]) -> bool {
+    let mut position = 0;
+    while position + 1 < data.len() {
+        if data[position] != 0xFF {
+            position += 1;
+            continue;
+        }
+        match data[position + 1] {
+            0x91 if data
+                .get(position + 2..position + 6)
+                .is_some_and(|sop| sop[..2] == [0, 4]) =>
+            {
+                position += 6;
+            }
+            0x92 => position += 2,
+            byte if byte > 0x8F => return true,
+            _ => position += 2,
+        }
+    }
+    false
 }
 
 /// Remove COM segments and removable APPn segments from a JPEG or JPEG-LS codestream.
@@ -423,14 +532,21 @@ fn strip_jpeg_segments(input: &[u8], jpeg_ls: bool) -> Parse<(Vec<u8>, RemovedSe
     let mut pieces: Vec<(Range<usize>, Option<u16>)> = vec![(0..2, None)];
     let mut removed = RemovedSegments::default();
     let mut frame: Option<Range<usize>> = None;
+    let mut first_scan = None;
     let mut scans = 0_usize;
     let mut position = 2;
     while position < data_end {
         let code = marker(input, position).ok_or("expected a marker segment")?;
         if code == 0xFFFF {
-            // A fill byte before a marker.
-            pieces.push((position..position + 1, None));
-            position += 1;
+            // Fill bytes before a marker, kept as one piece. The last 0xFF of the run starts
+            // the next marker, or the run ends at EOI. Each iteration consumes at least one byte.
+            let start = position;
+            let run_end = input[position..data_end]
+                .iter()
+                .position(|&byte| byte != 0xFF)
+                .map_or(data_end, |offset| position + offset - 1);
+            pieces.push((start..run_end, None));
+            position = run_end;
             continue;
         }
         let length = jpeg_segment_length(input, position, data_end)?;
@@ -442,6 +558,7 @@ fn strip_jpeg_segments(input: &[u8], jpeg_ls: bool) -> Parse<(Vec<u8>, RemovedSe
                     return Err("SOS precedes the frame header");
                 }
                 let scan_end = entropy_coded_end(input, position, data_end, jpeg_ls);
+                first_scan.get_or_insert(pieces.len());
                 pieces.push((segment.start..scan_end, None));
                 position = scan_end;
                 scans += 1;
@@ -458,7 +575,7 @@ fn strip_jpeg_segments(input: &[u8], jpeg_ls: bool) -> Parse<(Vec<u8>, RemovedSe
             DRI => pieces.push((segment, None)),
             LSE if jpeg_ls => pieces.push((segment, None)),
             DQT | DHT | DAC if !jpeg_ls => pieces.push((segment, None)),
-            DNL if !jpeg_ls && scans > 0 => pieces.push((segment, None)),
+            DNL if scans > 0 => pieces.push((segment, None)),
             _ => return Err("unsupported marker in a codestream header"),
         }
     }
@@ -468,15 +585,18 @@ fn strip_jpeg_segments(input: &[u8], jpeg_ls: bool) -> Parse<(Vec<u8>, RemovedSe
     let frame = frame.ok_or("codestream has no frame header")?;
     let components = frame_components(input, &frame)?;
     let component_count = components.len() / 3;
-    let adobe = adobe_segment(input, &pieces, component_count)?;
-    let has_jfif = pieces.iter().any(|(range, application)| {
+    let header_pieces = first_scan.expect("a scan was parsed");
+    let adobe = adobe_segment(input, &pieces, header_pieces, component_count)?;
+    let has_jfif = pieces[..header_pieces].iter().any(|(range, application)| {
         *application == Some(APP0) && input[range.start + 4..range.end].starts_with(b"JFIF\0")
     });
-    if has_jfif && component_count == 3 {
-        // libjpeg reads JFIF as YCbCr before it reads Adobe or the component identifiers.
+    if !jpeg_ls && has_jfif && component_count == 3 {
+        // libjpeg-turbo reads JFIF as YCbCr before it reads Adobe or the component
+        // identifiers. Without either marker, it reads lossless frames as RGB.
+        let lossless = matches!(marker(input, frame.start), Some(0xFFC3 | 0xFFCB));
         let ycbcr_without_jfif = match adobe {
             Some(index) => input[pieces[index].0.end - 1] != 0,
-            None => !is_rgb_component_ids(components),
+            None => !lossless && !is_rgb_component_ids(components),
         };
         if !ycbcr_without_jfif {
             return Err("JFIF segment removal would change the decoded color space");
@@ -498,10 +618,13 @@ fn strip_jpeg_segments(input: &[u8], jpeg_ls: bool) -> Parse<(Vec<u8>, RemovedSe
 /// Return the index of the APP14 Adobe segment that a color frame needs, if any.
 ///
 /// For three or four components, the Adobe transform flag selects RGB, YCbCr, CMYK, or
-/// YCCK. A JPEG-LS `mrfx` color transform segment cannot be kept or removed safely.
+/// YCCK. libjpeg reads it only before the first scan, at index `header_pieces`, so a later
+/// Adobe segment is ambiguous. A JPEG-LS `mrfx` color transform segment cannot be kept or
+/// removed safely.
 fn adobe_segment(
     input: &[u8],
     pieces: &[(Range<usize>, Option<u16>)],
+    header_pieces: usize,
     component_count: usize,
 ) -> Parse<Option<usize>> {
     if !matches!(component_count, 3 | 4) {
@@ -518,6 +641,9 @@ fn adobe_segment(
         }
         if code != APP14 || !payload.starts_with(b"Adobe") {
             continue;
+        }
+        if index > header_pieces {
+            return Err("Adobe APP14 segment follows the first scan");
         }
         // Identifier, version, two flag words, and the transform byte.
         if payload.len() != 12 {
@@ -686,8 +812,8 @@ mod tests {
 
     #[test]
     fn strips_main_and_tile_comments_and_updates_psot() {
-        // Tile data contains bytes that look like COM and SOT markers.
-        let body = [0xFF, 0x64, 0x00, 0x04, 0xFF, 0x90, 0x12];
+        // Tile data contains bytes that look like a COM marker segment.
+        let body = [0xFF, 0x64, 0x00, 0x04, 0xFF, 0x8F, 0x12];
         let clean = codestream(&[], &[], &body, true);
         for explicit in [true, false] {
             let commented = codestream(&comment(b"MAIN"), &comment(b"TILE"), &body, explicit);
@@ -732,6 +858,32 @@ mod tests {
     }
 
     #[test]
+    fn marker_codes_in_tile_data_fail_closed() {
+        // A comment and a second EOC appended after the real EOC look like tile data.
+        let mut appended = vec![1, 2, 0xFF, 0xD9];
+        appended.extend_from_slice(&comment(b"SYNTHAPPENDED"));
+        for explicit in [false, true] {
+            let input = codestream(&[], &[], &appended, explicit);
+            assert!(strip_comments(&input).is_err(), "explicit Psot: {explicit}");
+        }
+        // SOP and EPH markers and stuffed bytes are valid in tile data. The SOP sequence
+        // number is not stuffed, so marker-like values must not count as marker codes.
+        for nsop in [[0x00, 0x00], [0xFF, 0x90], [0xFF, 0xD9], [0x00, 0xFF]] {
+            let mut body = vec![0xFF, 0x91, 0x00, 0x04];
+            body.extend_from_slice(&nsop);
+            body.extend_from_slice(&[0xC0, 0xFF, 0x92, 0xFF, 0x8F, 0x12]);
+            for explicit in [false, true] {
+                assert!(
+                    strip_comments(&codestream(&[], &[], &body, explicit)).is_ok(),
+                    "{nsop:02X?}"
+                );
+            }
+        }
+        let truncated_sop = [0x12, 0xFF, 0x91, 0x00, 0x04, 0x00];
+        assert!(strip_comments(&codestream(&[], &[], &truncated_sop, false)).is_err());
+    }
+
+    #[test]
     fn tile_comment_with_tlm_fails_closed() {
         let tlm = [0xFF, 0x55, 0x00, 0x04, 0x00, 0x00];
         let main_only = codestream(&[&tlm[..], &comment(b"MAIN")].concat(), &[], &[1], true);
@@ -755,7 +907,7 @@ mod tests {
             clean_codestreams(&object(Some("2"), offsets, fragments), Codestream::Jpeg2000)
                 .unwrap();
         assert_eq!(cleaning.removed.comments, 1);
-        let replacement = cleaning.replacement.unwrap();
+        let [replacement] = <[_; 1]>::try_from(cleaning.replacement).unwrap();
         let Value::PixelSequence(sequence) = replacement.value() else {
             panic!("encapsulated output");
         };
@@ -779,7 +931,7 @@ mod tests {
         )
         .unwrap()
         .replacement
-        .unwrap();
+        .remove(0);
         let Value::PixelSequence(sequence) = without_table.value() else {
             panic!("encapsulated output");
         };
@@ -824,6 +976,10 @@ mod tests {
             clean_codestreams(&extended, Codestream::Jpeg2000),
             Err(Error::UnsupportedJpeg2000(_))
         ));
+        assert!(matches!(
+            count_removable_segments(&extended, Codestream::Jpeg2000),
+            Err(Error::UnsupportedJpeg2000(_))
+        ));
         let mut clean_extended = object(None, Vec::new(), vec![second]);
         clean_extended.put(InMemElement::new(
             EXTENDED_OFFSET_TABLE,
@@ -833,7 +989,7 @@ mod tests {
         assert!(clean_codestreams(&clean_extended, Codestream::Jpeg2000)
             .unwrap()
             .replacement
-            .is_none());
+            .is_empty());
 
         let mut native = InMemDicomObject::new_empty();
         native.put(InMemElement::new(
@@ -973,6 +1129,32 @@ mod tests {
     }
 
     #[test]
+    fn jpeg_fill_byte_runs_are_copied_as_one_piece() {
+        let gray = frame_header(0xC3, &[1]);
+        let fill = vec![0xFF; 1000];
+        let input = jpeg(
+            &[&fill[..], &segment(0xFE, b"SYNTH")].concat(),
+            &gray,
+            &[],
+            &[T81_SCAN],
+        );
+        let (output, removed) = strip_jpeg_segments(&input, false).unwrap();
+        assert_eq!(output, jpeg(&fill, &gray, &[], &[T81_SCAN]));
+        assert_eq!(removed.comments, 1);
+
+        // Fill bytes directly before EOI, after a post-scan segment.
+        let scanned = jpeg(&[], &gray, &[], &[T81_SCAN]);
+        let body = &scanned[..scanned.len() - 2];
+        for fill in [&[0xFF][..], &[0xFF, 0xFF, 0xFF]] {
+            let input = [body, &segment(0xFE, b"SYNTH"), fill, &[0xFF, 0xD9]].concat();
+            let (output, removed) = strip_jpeg_segments(&input, false).unwrap();
+            assert_eq!(output, [body, fill, &[0xFF, 0xD9]].concat());
+            assert_eq!(removed.comments, 1);
+        }
+        assert!(strip_jpeg_segments(&[0xFF, 0xD8, 0xFF, 0xFF, 0xD9], false).is_err());
+    }
+
+    #[test]
     fn jpeg_color_segments_are_kept_or_fail_closed() {
         let ycbcr = frame_header(0xC0, &[1, 2, 3]);
         let rgb = frame_header(0xC0, b"RGB");
@@ -997,7 +1179,22 @@ mod tests {
             let (_, removed) = strip(&header, frame, false).unwrap();
             assert_eq!(removed.applications, 1);
         }
+        let lossless_ycbcr_ids = frame_header(0xC3, &[1, 2, 3]);
+        let (_, removed) = strip(&[jfif(), adobe(1)].concat(), &lossless_ycbcr_ids, false).unwrap();
+        assert_eq!(removed.applications, 1);
+        // JPEG-LS decoders do not use JFIF for the color space.
+        let (_, removed) = strip(&jfif(), &frame_header(0xF7, b"RGB"), true).unwrap();
+        assert_eq!(removed.applications, 1);
+        // libjpeg fixes the color space at the first SOS, so a later Adobe segment does not count.
+        let late_adobe = jpeg(&jfif(), &rgb, &adobe(1), &[T81_SCAN, T81_SCAN]);
+        assert!(strip_jpeg_segments(&late_adobe, false).is_err());
         for (name, header, frame, jpeg_ls) in [
+            (
+                "jfif-lossless-default-rgb",
+                jfif(),
+                &lossless_ycbcr_ids,
+                false,
+            ),
             ("jfif-rgb-ids", jfif(), &rgb, false),
             ("jfif-adobe-rgb", [jfif(), adobe(0)].concat(), &ycbcr, false),
             ("two-adobe", [adobe(1), adobe(1)].concat(), &ycbcr, false),
@@ -1096,6 +1293,60 @@ mod tests {
         }
         let dnl = jpeg(&[], &gray, &segment(0xDC, &[0, 2]), &[T81_SCAN, T81_SCAN]);
         assert!(strip_jpeg_segments(&dnl, false).is_ok());
+        // T.87 also permits DNL after the first scan.
+        let gray_ls = frame_header(0xF7, &[1]);
+        let dnl = jpeg(
+            &[],
+            &gray_ls,
+            &segment(0xDC, &[0, 2]),
+            &[T87_SCAN, T87_SCAN],
+        );
+        assert!(strip_jpeg_segments(&dnl, true).is_ok());
+        let dnl_first = jpeg(&segment(0xDC, &[0, 2]), &gray_ls, &[], &[T87_SCAN]);
+        assert!(strip_jpeg_segments(&dnl_first, true).is_err());
+    }
+
+    #[test]
+    fn total_length_matches_rewritten_fragments() {
+        let gray = frame_header(0xC3, &[1]);
+        let scan = [&[0x34][..], T81_SCAN].concat();
+        let clean = jpeg(&[], &gray, &[], &[&scan]);
+        assert_eq!(clean.len() % 2, 1, "the clean frame needs one padding byte");
+        let commented = |text: &[u8]| jpeg(&segment(0xFE, text), &gray, &[], &[&scan]);
+        let total_length = |frames: Vec<Vec<u8>>| {
+            let count = frames.len().to_string();
+            let fragments = frames.into_iter().map(pad).collect();
+            let mut object = object(Some(&count), Vec::new(), fragments);
+            // A stale source value is replaced, not adjusted.
+            object.put(InMemElement::new(
+                tags::ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH,
+                VR::UV,
+                PrimitiveValue::U64(vec![1].into()),
+            ));
+            object
+        };
+        // PS3.3 C.7.6.6: all fragments, without the trailing padding of the last fragment.
+        // Removal of the 7-byte segment adds a padding byte to the first frame.
+        for (frames, expected) in [
+            (
+                vec![commented(b"ODD"), commented(b"EVEN")],
+                clean.len() + 1 + clean.len(),
+            ),
+            (vec![commented(b"ODD")], clean.len()),
+            (
+                vec![commented(b"ODD"), clean.clone()],
+                clean.len() + 1 + clean.len(),
+            ),
+        ] {
+            let cleaning = clean_codestreams(&total_length(frames), Codestream::Jpeg).unwrap();
+            let [pixel_data, length] = <[_; 2]>::try_from(cleaning.replacement).unwrap();
+            let Value::PixelSequence(sequence) = pixel_data.value() else {
+                panic!("encapsulated output");
+            };
+            let fragments: usize = sequence.fragments().iter().map(Vec::len).sum();
+            assert_eq!(fragments, expected + 1);
+            assert_eq!(length.to_int::<u64>().unwrap(), expected as u64);
+        }
     }
 
     #[test]
@@ -1114,7 +1365,7 @@ mod tests {
                 applications: 1
             }
         );
-        let replacement = cleaning.replacement.unwrap();
+        let [replacement] = <[_; 1]>::try_from(cleaning.replacement).unwrap();
         let Value::PixelSequence(sequence) = replacement.value() else {
             panic!("encapsulated output");
         };
