@@ -36,6 +36,7 @@ const JPEG_TRANSFER_SYNTAXES: [&str; 4] = [
 /// JPEG-LS (ITU-T T.87) lossless and near-lossless transfer syntaxes.
 const JPEG_LS_TRANSFER_SYNTAXES: [&str; 2] = ["1.2.840.10008.1.2.4.80", "1.2.840.10008.1.2.4.81"];
 const EXTENDED_OFFSET_TABLE: Tag = Tag(0x7FE0, 0x0001);
+const EXTENDED_OFFSET_TABLE_LENGTHS: Tag = Tag(0x7FE0, 0x0002);
 
 const SOC: u16 = 0xFF4F;
 const SIZ: u16 = 0xFF51;
@@ -359,9 +360,11 @@ pub(crate) fn repair_total_length(
     }
 }
 
-/// Fail when segment removal would change fragment sizes that an Extended Offset Table lists.
+/// Fail when segment removal would change fragment offsets or lengths that an Extended Offset
+/// Table or its lengths attribute lists, also when only one of the two is present.
 fn check_extended_offset_table(object: &InMemDicomObject, removed: RemovedSegments) -> Parse<()> {
-    if !removed.is_empty() && object.get(EXTENDED_OFFSET_TABLE).is_some() {
+    let extended = [EXTENDED_OFFSET_TABLE, EXTENDED_OFFSET_TABLE_LENGTHS];
+    if !removed.is_empty() && extended.iter().any(|&tag| object.get(tag).is_some()) {
         return Err("segment removal would invalidate the Extended Offset Table");
     }
     Ok(())
@@ -690,8 +693,9 @@ fn strip_jpeg_segments(input: &[u8], jpeg_ls: bool) -> Parse<(Vec<u8>, RemovedSe
         // libjpeg-turbo reads JFIF as YCbCr before it reads Adobe or the component
         // identifiers. Without either marker, it reads lossless frames as RGB.
         let lossless = matches!(marker(input, frame.start), Some(0xFFC3 | 0xFFCB));
+        // Only the Adobe transform value 1 means YCbCr for three components.
         let ycbcr_without_jfif = match adobe {
-            Some(index) => input[pieces[index].0.end - 1] != 0,
+            Some(index) => input[pieces[index].0.end - 1] == 1,
             None => !lossless && !is_rgb_component_ids(components),
         };
         if !ycbcr_without_jfif {
@@ -1099,7 +1103,7 @@ mod tests {
             );
         }
 
-        let mut extended = object(None, Vec::new(), vec![first]);
+        let mut extended = object(None, Vec::new(), vec![first.clone()]);
         extended.put(InMemElement::new(
             EXTENDED_OFFSET_TABLE,
             VR::OV,
@@ -1113,6 +1117,14 @@ mod tests {
             count_removable_segments(&extended, Codestream::Jpeg2000),
             Err(Error::UnsupportedJpeg2000(_))
         ));
+        let mut lengths_only = object(None, Vec::new(), vec![first.clone()]);
+        lengths_only.put(InMemElement::new(
+            EXTENDED_OFFSET_TABLE_LENGTHS,
+            VR::OV,
+            PrimitiveValue::U64(vec![0_u64].into()),
+        ));
+        assert!(clean_codestreams(&lengths_only, Codestream::Jpeg2000).is_err());
+        assert!(count_removable_segments(&lengths_only, Codestream::Jpeg2000).is_err());
         let mut clean_extended = object(None, Vec::new(), vec![second]);
         clean_extended.put(InMemElement::new(
             EXTENDED_OFFSET_TABLE,
@@ -1330,6 +1342,12 @@ mod tests {
             ),
             ("jfif-rgb-ids", jfif(), &rgb, false),
             ("jfif-adobe-rgb", [jfif(), adobe(0)].concat(), &ycbcr, false),
+            (
+                "jfif-adobe-ycck",
+                [jfif(), adobe(2)].concat(),
+                &ycbcr,
+                false,
+            ),
             ("two-adobe", [adobe(1), adobe(1)].concat(), &ycbcr, false),
             (
                 "adobe-length",
