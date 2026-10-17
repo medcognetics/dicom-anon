@@ -662,18 +662,33 @@ fn validate_dicom_options(args: &AnonymizeArgs) -> Result<(), String> {
     if !args.dicom.is_empty() {
         return Ok(());
     }
-    let option = if !matches!(args.profile.policy, ProfilePreset::DicomExtended) {
+    // Destructure every field so that a new profile flag must be classified here.
+    let ProfileArgs {
+        policy,
+        enable_option,
+        disable_option,
+        descriptor_map,
+        safe_private_allowlist,
+        uid_map,
+        require_no_burned_in_annotation,
+        allow_sop_class,
+    } = &args.profile;
+    let option = if !matches!(policy, ProfilePreset::DicomExtended) {
         Some("--policy")
-    } else if !args.profile.enable_option.is_empty() {
+    } else if !enable_option.is_empty() {
         Some("--enable-option")
-    } else if !args.profile.disable_option.is_empty() {
+    } else if !disable_option.is_empty() {
         Some("--disable-option")
-    } else if args.profile.descriptor_map.is_some() {
+    } else if descriptor_map.is_some() {
         Some("--descriptor-map")
-    } else if args.profile.safe_private_allowlist.is_some() {
+    } else if safe_private_allowlist.is_some() {
         Some("--safe-private-allowlist")
-    } else if args.profile.uid_map.is_some() {
+    } else if uid_map.is_some() {
         Some("--uid-map")
+    } else if *require_no_burned_in_annotation {
+        Some("--require-no-burned-in-annotation")
+    } else if !allow_sop_class.is_empty() {
+        Some("--allow-sop-class")
     } else {
         None
     };
