@@ -680,11 +680,20 @@ fn format_tag(tag: Tag) -> String {
 }
 
 fn profile_name(profile: &ProfileConfiguration) -> String {
+    // The fail-on-unmapped guard does not change the output, so it does not
+    // change the profile name.
+    let is_preset = |preset: ProfileConfiguration| {
+        *profile
+            == ProfileConfiguration {
+                fail_on_unmapped: profile.fail_on_unmapped.clone(),
+                ..preset
+            }
+    };
     match profile.policy {
-        DeidentificationPolicy::Dicom if *profile == ProfileConfiguration::dicom_extended() => {
+        DeidentificationPolicy::Dicom if is_preset(ProfileConfiguration::dicom_extended()) => {
             PROFILE_NAME.to_owned()
         }
-        DeidentificationPolicy::Dicom if *profile == ProfileConfiguration::dicom() => {
+        DeidentificationPolicy::Dicom if is_preset(ProfileConfiguration::dicom()) => {
             "DICOM PS3.15 Basic Application Level Confidentiality Profile".to_owned()
         }
         DeidentificationPolicy::Dicom => {
@@ -812,8 +821,11 @@ fn validate_safe_harbor_value(element: &InMemElement, path: &str, report: &mut V
 pub fn validate_source_object(
     source: &DefaultDicomObject,
     candidate: &DefaultDicomObject,
-    anonymization_options: Options,
+    mut anonymization_options: Options,
 ) -> Result<ValidationReport> {
+    // The fail-on-unmapped guard applies only during anonymization. A candidate
+    // that exists was produced without a guarded miss, so the guard is ignored.
+    anonymization_options.profile.fail_on_unmapped.clear();
     let validation_options = ValidationOptions {
         profile: anonymization_options.profile.clone(),
     };
@@ -930,6 +942,13 @@ mod tests {
 
     const KEY: [u8; 32] = [9; 32];
 
+    #[test]
+    fn fail_on_unmapped_does_not_change_the_profile_name() {
+        let mut profile = ProfileConfiguration::dicom_extended();
+        profile.fail_on_unmapped.insert("00080100".to_owned());
+        assert_eq!(profile_name(&profile), PROFILE_NAME);
+    }
+
     fn source() -> DefaultDicomObject {
         let mut object = InMemDicomObject::new_empty();
         object.put_str(
@@ -974,6 +993,26 @@ mod tests {
             .findings
             .iter()
             .any(|finding| finding.code == "source_not_compared"));
+    }
+
+    #[test]
+    fn source_comparison_ignores_the_anonymize_time_fail_on_unmapped_guard() {
+        let mut source = source();
+        source.put_str(tags::PROTOCOL_NAME, VR::LO, "Synthetic protocol");
+        let options = Options::new(SecretKey::new(KEY).unwrap());
+        let (candidate, report) = Anonymizer::new(options.clone())
+            .unwrap()
+            .anonymize(&source)
+            .unwrap();
+        assert_eq!(report.unmapped_dummy_replacements["00181030"], 1);
+
+        let mut guarded = options;
+        guarded
+            .profile
+            .fail_on_unmapped
+            .insert("00181030".to_owned());
+        let report = validate_source_object(&source, &candidate, guarded).unwrap();
+        assert!(report.conformant, "{:#?}", report.findings);
     }
 
     #[test]

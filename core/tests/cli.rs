@@ -802,3 +802,18 @@ fn fail_on_unmapped_rejects_malformed_tags() {
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("eight hexadecimal digits"));
 }
+
+#[test]
+fn validator_rejects_the_anonymize_only_fail_on_unmapped_option() {
+    let output = run_with_stdin(
+        Command::new(env!("CARGO_BIN_EXE_dicom-validate")).args([
+            "-",
+            "--fail-on-unmapped",
+            "00080100",
+        ]),
+        &source_bytes(),
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--fail-on-unmapped"));
+}

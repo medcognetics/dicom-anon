@@ -76,6 +76,11 @@ fn main() -> ExitCode {
 }
 
 fn load_and_validate(args: &Args) -> Result<ValidationReport, String> {
+    if !args.profile.fail_on_unmapped.is_empty() {
+        return Err(
+            "--fail-on-unmapped applies only to dicom-anonymize; inspect unmapped_dummy_replacements in its --verbose anonymization report".to_owned(),
+        );
+    }
     let profile = args.profile.load()?;
     let mut reader: Box<dyn Read> = if args.input == "-" {
         Box::new(io::stdin().lock())

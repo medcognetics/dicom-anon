@@ -139,10 +139,13 @@ pub struct ProfileConfiguration {
     /// Original UID -> independently assigned replacement UID.
     #[serde(default)]
     pub uid_mappings: BTreeMap<String, String>,
-    /// Canonical hexadecimal tags that must not receive a dummy value.
+    /// Canonical hexadecimal tags that must not receive an unmapped dummy value.
     ///
-    /// De-identification fails when an attribute with one of these tags would
-    /// receive a dummy value at any nesting level.
+    /// De-identification fails when a clean action on a non-sequence attribute
+    /// with one of these tags finds no descriptor-map entry, at any nesting
+    /// level. Dummy values that the profile requires do not fail: `D` actions,
+    /// items of a `D` sequence, and items of a sequence that a clean option
+    /// replaces as a whole. Validation ignores this field.
     #[serde(default)]
     pub fail_on_unmapped: BTreeSet<String>,
 }

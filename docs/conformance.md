@@ -113,9 +113,22 @@ The anonymization report gives two per-tag counts at every nesting level:
 - `dummy_replacements`: all dummy values, including dummy values that Table E.1-1 or an option column requires;
 - `unmapped_dummy_replacements`: dummy values written because a `C` action found no descriptor-map entry.
 
-`--fail-on-unmapped TAG`, or the `fail_on_unmapped` configuration field, stops the run when an attribute with that tag gets a dummy value because no descriptor-map entry matched. The command writes no output and exits with status 2. The error gives the tag and the sequence path, for example `(0054,0220)[0]/(0054,0222)[0]/(0008,0100)`. It does not give the value. Dummy values that the profile requires, such as the items of Institution Code Sequence, do not stop the run. They are counted only in `dummy_replacements`.
+`--fail-on-unmapped TAG`, or the `fail_on_unmapped` configuration field, stops the run when an attribute with that tag gets a dummy value because no descriptor-map entry matched. The command writes no output and exits with status 2. The error gives the tag and the sequence path, for example `(0054,0220)[0]/(0054,0222)[0]/(0008,0100)`. It does not give the value. Dummy values that the profile requires do not stop the run, because the descriptor map does not apply to them. They are counted only in `dummy_replacements`. These include:
 
-For an inference pipeline, use the shipped map with `--fail-on-unmapped` for `00080100`, `00080102`, and `00080104`. Add a reviewed map and `--fail-on-unmapped` entries for the device attributes that the model uses.
+- attributes with the `D` action, and the items of a `D` sequence, such as Institution Code Sequence `(0008,0082)`;
+- the items of a sequence that Clean Descriptors or Clean Structured Content replaces as a whole, such as Acquisition Context Sequence `(0040,0555)` and the diagnosis and reason code sequences.
+
+Use `dummy_replacements` to detect a change to coded content in these sequences.
+
+The guard applies only to anonymization. `dicom-validate` rejects `--fail-on-unmapped`. Library and binding validation ignore `fail_on_unmapped`, because a dummy value in a candidate does not show whether a descriptor-map miss or a profile requirement produced it.
+
+The descriptor map and the guard apply to a tag at every nesting level, not to a sequence path. Thus `--fail-on-unmapped 00080100` also stops the run for any other kept code sequence whose codes are not in a map. MG and DBT objects often contain such sequences, for example Purpose of Reference Code Sequence `(0040,A170)` in Source Image Sequence `(0008,2112)`, Derivation Code Sequence `(0008,9215)`, and Partial View Code Sequence `(0028,1352)`. The shipped map does not contain these codes.
+
+For an inference pipeline:
+
+1. Run Safe Harbor anonymization with the shipped map and without the guard on a representative synthetic or approved sample. Read `unmapped_dummy_replacements` in the reports.
+2. For each other code sequence that the sample contains, add a reviewed map with the standard codes of its context group.
+3. Then use `--fail-on-unmapped` for `00080100`, `00080102`, and `00080104`. Add a reviewed map and `--fail-on-unmapped` entries for the device attributes that the model uses.
 
 ## Inserted attributes
 

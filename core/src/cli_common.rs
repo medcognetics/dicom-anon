@@ -1,7 +1,7 @@
 //! Shared implementation details for the bundled commands.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
 
@@ -35,7 +35,7 @@ pub struct ProfileArgs {
     /// JSON exact descriptor source-to-safe-output mappings; repeat to merge maps.
     #[arg(long, value_name = "PATH")]
     pub descriptor_map: Vec<PathBuf>,
-    /// Fail when an attribute with this tag (eight hexadecimal digits) would receive a dummy value; repeat as needed.
+    /// Fail when a cleaned attribute with this tag (eight hexadecimal digits) has no descriptor-map entry; repeat as needed.
     #[arg(long, value_name = "TAG", value_parser = parse_tag)]
     pub fail_on_unmapped: Vec<String>,
     /// JSON safe-private creator and element-offset allowlist.
@@ -65,10 +65,9 @@ impl ProfileArgs {
             profile.options.remove(option);
         }
         for path in &self.descriptor_map {
-            let document: DescriptorMapDocument = read_json(path, "descriptor map")?;
             merge_descriptor_mappings(
                 &mut profile.descriptor_mappings,
-                document.into_mappings(),
+                read_descriptor_map(path)?,
                 path,
             )?;
         }
@@ -87,49 +86,92 @@ impl ProfileArgs {
     }
 }
 
-/// Descriptor-map file: a bare tag map, or a versioned document with provenance.
-#[derive(serde::Deserialize)]
-#[serde(untagged)]
-enum DescriptorMapDocument {
-    Versioned(VersionedDescriptorMap),
-    Bare(BTreeMap<String, BTreeMap<String, String>>),
-}
+type DescriptorMappings = BTreeMap<String, BTreeMap<String, String>>;
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct VersionedDescriptorMap {
-    #[serde(rename = "format")]
-    _format: VersionedDescriptorMapFormat,
-    #[serde(rename = "name")]
-    _name: String,
-    #[serde(rename = "version")]
-    _version: String,
-    #[serde(rename = "source")]
-    _source: String,
-    #[serde(rename = "notes", default)]
-    _notes: Vec<String>,
-    mappings: BTreeMap<String, BTreeMap<String, String>>,
-}
+const DESCRIPTOR_MAP_FORMAT: &str = "dicom-anon-descriptor-map/1";
 
-#[derive(serde::Deserialize)]
-enum VersionedDescriptorMapFormat {
-    #[serde(rename = "dicom-anon-descriptor-map/1")]
-    V1,
-}
-
-impl DescriptorMapDocument {
-    fn into_mappings(self) -> BTreeMap<String, BTreeMap<String, String>> {
-        match self {
-            Self::Versioned(document) => document.mappings,
-            Self::Bare(mappings) => mappings,
+/// Read a bare tag map, or a versioned document with provenance.
+///
+/// A descriptor map holds source values, so the errors name only fixed member
+/// names and canonical tags. They never echo a value or an unrecognized key.
+fn read_descriptor_map(path: &Path) -> Result<DescriptorMappings, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("cannot read descriptor map {}: {error}", path.display()))?;
+    let invalid = |reason: String| format!("invalid descriptor map {}: {reason}", path.display());
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+        invalid(format!(
+            "malformed JSON at line {} column {}",
+            error.line(),
+            error.column()
+        ))
+    })?;
+    let serde_json::Value::Object(document) = value else {
+        return Err(invalid("the document must be a JSON object".to_owned()));
+    };
+    if !document.contains_key("format") {
+        return descriptor_mappings(document).map_err(invalid);
+    }
+    const MEMBERS: [&str; 6] = ["format", "name", "version", "source", "notes", "mappings"];
+    if document.keys().any(|key| !MEMBERS.contains(&key.as_str())) {
+        return Err(invalid(format!(
+            "a versioned map may contain only these members: {}",
+            MEMBERS.join(", ")
+        )));
+    }
+    if document["format"].as_str() != Some(DESCRIPTOR_MAP_FORMAT) {
+        return Err(invalid(format!("format must be {DESCRIPTOR_MAP_FORMAT}")));
+    }
+    for member in ["name", "version", "source"] {
+        if !document
+            .get(member)
+            .is_some_and(serde_json::Value::is_string)
+        {
+            return Err(invalid(format!("{member} must be a string")));
         }
     }
+    if let Some(notes) = document.get("notes") {
+        if !notes
+            .as_array()
+            .is_some_and(|notes| notes.iter().all(serde_json::Value::is_string))
+        {
+            return Err(invalid("notes must be an array of strings".to_owned()));
+        }
+    }
+    match document.get("mappings") {
+        Some(serde_json::Value::Object(mappings)) => {
+            descriptor_mappings(mappings.clone()).map_err(invalid)
+        }
+        _ => Err(invalid("mappings must be a JSON object".to_owned())),
+    }
+}
+
+fn descriptor_mappings(
+    object: serde_json::Map<String, serde_json::Value>,
+) -> Result<DescriptorMappings, String> {
+    let mut mappings = BTreeMap::new();
+    for (tag, values) in object {
+        if parse_tag(&tag).as_deref() != Ok(tag.as_str()) {
+            return Err("every tag must be eight uppercase hexadecimal digits".to_owned());
+        }
+        let serde_json::Value::Object(values) = values else {
+            return Err(format!("the value of tag {tag} must be a JSON object"));
+        };
+        let mut entries = BTreeMap::new();
+        for (source, output) in values {
+            let serde_json::Value::String(output) = output else {
+                return Err(format!("every output for tag {tag} must be a string"));
+            };
+            entries.insert(source, output);
+        }
+        mappings.insert(tag, entries);
+    }
+    Ok(mappings)
 }
 
 fn merge_descriptor_mappings(
     target: &mut BTreeMap<String, BTreeMap<String, String>>,
     source: BTreeMap<String, BTreeMap<String, String>>,
-    path: &std::path::Path,
+    path: &Path,
 ) -> Result<(), String> {
     for (tag, values) in source {
         let entries = target.entry(tag.clone()).or_default();
@@ -309,6 +351,37 @@ mod tests {
         )
         .unwrap();
         assert!(profile_args(vec![unknown_format]).load().is_err());
+
+        let misspelled = directory.path().join("misspelled.json");
+        std::fs::write(
+            &misspelled,
+            r#"{"format": "dicom-anon-descriptor-map/1", "name": "n", "version": "v", "source": "s", "mapings": {}}"#,
+        )
+        .unwrap();
+        let error = profile_args(vec![misspelled]).load().unwrap_err();
+        assert!(error.contains("may contain only these members"), "{error}");
+
+        for (name, contents) in [
+            ("bare-type.json", r#"{"00181030": "Synthetic Leak Value"}"#),
+            (
+                "inner-type.json",
+                r#"{"00181030": {"Synthetic Leak Value": 7}}"#,
+            ),
+            (
+                "versioned-type.json",
+                r#"{"format": "dicom-anon-descriptor-map/1", "name": "n", "version": "v", "source": "s", "mappings": {"00181030": {"Synthetic Leak Value": ["x"]}}}"#,
+            ),
+            ("malformed-tag.json", r#"{"Synthetic Leak Value": {}}"#),
+            (
+                "syntax.json",
+                r#"{"00181030": {"Synthetic Leak Value" "x"}}"#,
+            ),
+        ] {
+            let path = directory.path().join(name);
+            std::fs::write(&path, contents).unwrap();
+            let error = profile_args(vec![path]).load().unwrap_err();
+            assert!(!error.contains("Synthetic Leak Value"), "{error}");
+        }
     }
 
     #[test]
