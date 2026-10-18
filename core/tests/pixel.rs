@@ -746,3 +746,39 @@ fn sop_class_allowlist_rejects_a_mismatched_media_storage_sop_class() {
     // Without the gate, the mismatch is not a pixel-gate failure.
     assert_eq!(anonymize(&input, &output, &[]).status.code(), Some(0));
 }
+
+#[test]
+fn retired_jpeg_transfer_syntaxes_fail_closed() {
+    let directory = tempfile::tempdir().unwrap();
+    let annotated = with_jpeg_metadata(&jpeg_lossless_codestream(&synthetic_samples()));
+    let baseline = mammography_bytes(
+        MAMMOGRAPHY_FOR_PRESENTATION,
+        Some("NO"),
+        "1.2.840.10008.1.2.4.50",
+        annotated,
+    );
+    let uid = b"1.2.840.10008.1.2.4.50";
+    let offset = baseline
+        .windows(uid.len())
+        .position(|window| window == uid)
+        .unwrap();
+    // Retired non-hierarchical (.55) and hierarchical (.61) JPEG transfer syntaxes. The DICOM
+    // parser rejects them at read time, so no output is written.
+    for minor in [b"55", b"61"] {
+        let mut bytes = baseline.clone();
+        bytes[offset + uid.len() - 2..offset + uid.len()].copy_from_slice(minor);
+        let name = String::from_utf8_lossy(minor);
+        let input = directory.path().join(format!("{name}.dcm"));
+        let output = directory.path().join(format!("{name}-out.dcm"));
+        std::fs::write(&input, bytes).unwrap();
+        let result = anonymize(&input, &output, &[]);
+        assert_eq!(result.status.code(), Some(2), "{name}");
+        assert!(!output.exists(), "{name}");
+        let validation = Command::new(env!("CARGO_BIN_EXE_dicom-validate"))
+            .arg(&input)
+            .output()
+            .unwrap();
+        assert_ne!(validation.status.code(), Some(0), "{name}");
+        assert!(String::from_utf8_lossy(&result.stderr).contains("transfer syntax"));
+    }
+}
