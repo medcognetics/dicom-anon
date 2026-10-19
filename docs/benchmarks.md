@@ -95,6 +95,34 @@ The cumulative PDF pixel limit adds one checked multiplication and addition per 
 
 Decision: ship the resource guard. Its fixed per-page accounting prevents unbounded aggregate rendering work, and no core DICOM benchmark showed a meaningful regression. The asset-backed report integration target remains the functional gate for native model, OCR, and PDFium execution.
 
+## Encapsulated segment-removal memory check
+
+The JPEG, JPEG-LS, and JPEG 2000 rewrite path previously held three Pixel Data copies at its peak: the source, the replacement fragments, and a copy of the source Pixel Data that profile processing made before the replacement overwrote it. The file and stream paths also kept the source object while the encoder wrote the output, and the `dicom-object` 0.10 encoder copies each element while it writes. The candidate passes the pending replacement elements into root data-set processing, which inserts a replacement for a kept element without copying the source value. `anonymize_file` and `anonymize_reader` drop the source object before encoding. Codestream parsing, segment removal, and the Extended Offset Table check still complete before any output element is built.
+
+The new `dicom_processing_jpeg_8x1m_segments` group uses a synthetic JPEG Lossless SV1 object with 8 frames. Each frame has one APP1 segment, one COM segment, and 1 MiB of scan data. The group uses 20 samples; the other groups keep their earlier sample counts.
+
+```console
+cargo bench --locked -p dicom-anon --bench anonymization -- --sample-size 100
+```
+
+Measurements were taken on October 17, 2026, on macOS 27.0.1 with Rust 1.96.0 and an Apple M4 Max. These results are not comparable with the earlier Linux sections. The intervals are Criterion 95% confidence intervals for the mean. The first two columns are the saved baseline and the first candidate run. The last column gives the midpoint range of two more alternating baseline and candidate runs.
+
+| Workload | Baseline interval | Candidate interval | Criterion result | Repeat midpoints, baseline / candidate |
+|---|---:|---:|---|---|
+| Six common rule lookups | 16.933 to 17.063 ns | 16.793 to 16.989 ns | Within noise threshold | Not repeated |
+| Anonymize parsed 1 MiB object | 14.893 to 15.326 µs | 16.925 to 18.033 µs | 14.8% slower | 18.070, 18.352 / 22.040, 18.945 µs |
+| Parse, anonymize, and write 1 MiB | 74.653 to 76.292 µs | 78.386 to 78.798 µs | 4.6% slower | 72.552, 73.912 / 91.402, 78.629 µs |
+| Validate parsed 1 MiB object | 2.0080 to 2.0329 µs | 1.9696 to 1.9882 µs | 2.7% faster | 2.0084, 1.9940 / 2.2210, 2.0369 µs |
+| Anonymize parsed 8-frame JPEG | 2.2814 to 2.3477 ms | 2.1600 to 2.3104 ms | Within noise threshold | 2.3452, 2.2712 / 2.4500, 2.1556 ms |
+| Parse, anonymize, and write 8-frame JPEG | 3.5519 to 3.6854 ms | 3.4402 to 3.6947 ms | No change detected | 3.5759, 3.3320 / 3.6495, 3.2804 ms |
+| Validate parsed 8-frame JPEG | 2.1734 to 2.2138 ms | 2.3408 to 2.5384 ms | 9.7% slower | 3.0952, 2.1336 / 2.1893, 2.1407 ms |
+
+Run-to-run variation on this host was up to about 20% for the parsed-object and JPEG validation workloads, and the repeat runs do not reproduce the parsed 1 MiB and JPEG validation changes in a consistent direction. The new validation check sums fragment lengths and scans trailing zero bytes of the last fragment, which is small relative to the codestream parse. The 1 MiB parse/anonymize/write change is reproducible. An isolation run with and without only the source drop measured 72.184 to 72.624 µs and 71.569 to 71.796 µs without the drop, and 77.711 to 78.098 µs and 77.661 to 77.985 µs with the drop. The early release of a 1 MiB buffer before the encoder allocates its element copy adds about 6 µs on this allocator. The same isolation run showed no difference for the 8-frame JPEG workload.
+
+Peak memory was measured separately with a synthetic 134,220,786-byte Part 10 file: 32 JPEG Lossless SV1 frames, each with one APP1 segment, one COM segment, and 4 MiB of scan data. A counting global allocator in a scratch program recorded peak live heap bytes after parsing. Anonymization peaked at 384.0 MiB before the change and 256.0 MiB after it, which is three and two Pixel Data copies. The `dicom-anonymize` release binary peaked at 417,218,560 to 417,267,712 bytes of maximum resident set size in three runs before the change, and at 281,952,256 to 282,001,408 bytes in three runs after it. Both binaries wrote byte-identical output. These are snapshots against a warm page cache, not statistical comparisons. No network operations occur.
+
+Decision: ship. The change removes one complete Pixel Data copy from the peak memory of the rewrite path and of the file-to-file command, about 32% of peak resident memory for the 128 MiB fixture. This matters for multi-gigabyte breast tomosynthesis objects. The accepted cost is about 6 µs for each in-memory parse/anonymize/write of a 1 MiB native object. The remaining peak during encoding comes from the element copy in the `dicom-object` writer, and the parsed source still occupies one copy during anonymization because the public API borrows it.
+
 ## Safe Harbor UID resolver check
 
 Issue #19 routes every `U` action through a per-object UID resolver and records the sequence item path for each nested dataset. The ordinary anonymization path adds one `RefCell` borrow per remapped UID and two per sequence item. A before-and-after run on October 17, 2026 used the unchanged workload with `--sample-size 100`. Master `7dda93a` was the saved baseline.

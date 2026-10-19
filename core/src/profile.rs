@@ -141,6 +141,12 @@ pub struct ProfileConfiguration {
     /// Original UID -> independently assigned replacement UID.
     #[serde(default)]
     pub uid_mappings: BTreeMap<String, String>,
+    /// Reject input unless Burned In Annotation (0028,0301) is exactly `NO`.
+    #[serde(default)]
+    pub require_no_burned_in_annotation: bool,
+    /// Permitted SOP Class UIDs. An empty set permits every SOP Class.
+    #[serde(default)]
+    pub sop_class_allowlist: BTreeSet<String>,
     /// Canonical hexadecimal tags that must not receive an unmapped dummy value.
     ///
     /// De-identification fails when a clean action on a non-sequence attribute
@@ -150,12 +156,6 @@ pub struct ProfileConfiguration {
     /// replaces as a whole. Validation ignores this field.
     #[serde(default)]
     pub fail_on_unmapped: BTreeSet<String>,
-    /// Reject input unless Burned In Annotation (0028,0301) is exactly `NO`.
-    #[serde(default)]
-    pub require_no_burned_in_annotation: bool,
-    /// Permitted SOP Class UIDs. An empty set permits every SOP Class.
-    #[serde(default)]
-    pub sop_class_allowlist: BTreeSet<String>,
 }
 
 impl Default for ProfileConfiguration {
@@ -174,9 +174,9 @@ impl ProfileConfiguration {
             descriptor_mappings: BTreeMap::new(),
             safe_private_allowlist: BTreeSet::new(),
             uid_mappings: BTreeMap::new(),
-            fail_on_unmapped: BTreeSet::new(),
             require_no_burned_in_annotation: false,
             sop_class_allowlist: BTreeSet::new(),
+            fail_on_unmapped: BTreeSet::new(),
         }
     }
 
