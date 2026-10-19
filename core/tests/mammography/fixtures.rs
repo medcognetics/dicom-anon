@@ -2,9 +2,9 @@
 //!
 //! The objects use placeholder text and fixed `2.25` UUID-derived UIDs only. Every identifier
 //! value contains [`PLACEHOLDER`] so that a recursive output scan can find any retained value.
-//! The JPEG 2000 Pixel Data fragments are real 4 x 4 codestreams from the pinned `pure_jpeg2k`
-//! test encoder, because the anonymizer parses every JPEG 2000 frame and fails closed on
-//! unparseable data. They contain no COM segment, so the anonymizer copies them unchanged.
+//! The JPEG 2000 Pixel Data fragments are structurally valid codestreams with synthetic tile
+//! data and no comment segments, so the anonymizer's codestream scan accepts them. No test
+//! decodes them.
 
 use dicom_core::value::{DataSetSequence, PixelFragmentSequence};
 use dicom_core::{DataElement, PrimitiveValue, Tag, VR};
@@ -112,7 +112,7 @@ pub fn mammogram() -> DefaultDicomObject {
     object.put_str(tags::VIEW_POSITION, VR::CS, "MLO");
     object.put(view_code("399368009", "medio-lateral oblique"));
     pixel_module(&mut object, None);
-    object.put(pixel_data(vec![], vec![frame(0)]));
+    object.put(pixel_data(vec![], vec![frame(0, 32)]));
     finish(object, MG_FOR_PRESENTATION, SOP_MG)
 }
 
@@ -243,11 +243,9 @@ pub fn tomosynthesis() -> DefaultDicomObject {
 
     pixel_module(&mut object, Some(2));
     // Frame 2 spans two fragments, so the Basic Offset Table holds the frame boundaries.
-    let first = frame(1);
-    let second = frame(2);
-    // Split at an even offset so that both fragments have even lengths.
-    let split = (second.len() / 2) & !1;
-    let second = [second[..split].to_vec(), second[split..].to_vec()];
+    let first = frame(1, 40);
+    let second = frame(2, 40);
+    let second = [second[..24].to_vec(), second[24..].to_vec()];
     let first_frame_length = u32::try_from(first.len() + 8).unwrap();
     object.put(pixel_data(
         vec![0, first_frame_length],
@@ -283,7 +281,7 @@ pub fn synthesized() -> DefaultDicomObject {
     source.put_str(tags::REFERENCED_SOP_INSTANCE_UID, VR::UI, SOP_DBT);
     object.put(sequence(tags::SOURCE_IMAGE_SEQUENCE, vec![source]));
     pixel_module(&mut object, None);
-    object.put(pixel_data(vec![0], vec![frame(4)]));
+    object.put(pixel_data(vec![0], vec![frame(4, 48)]));
     finish(object, MG_FOR_PRESENTATION, SOP_SYNTHESIZED)
 }
 
@@ -483,23 +481,20 @@ fn pixel_module(object: &mut InMemDicomObject, frames: Option<u32>) {
     }
 }
 
-/// Even-length lossless JPEG 2000 codestream of synthetic 12-bit samples.
-fn frame(seed: u16) -> Vec<u8> {
-    let samples: Vec<u16> = (0..16_u16)
-        .map(|index| (seed * 257 + index * 241) & 0x0FFF)
-        .collect();
-    let mut bytes = Vec::new();
-    jpeg2k::encode(
-        &samples,
-        4,
-        4,
-        &jpeg2k::Jpeg2kOptions::default(),
-        &mut bytes,
-    )
-    .unwrap();
-    if bytes.len() % 2 == 1 {
-        bytes.push(0);
-    }
+/// Even-length JPEG 2000 codestream: SOC, a short SIZ segment, one tile-part, and EOC.
+///
+/// The tile data bytes stay below 0x80, so they contain no marker codes.
+fn frame(seed: u8, length: usize) -> Vec<u8> {
+    const OVERHEAD: usize = 2 + 6 + 12 + 2 + 2;
+    let body = length - OVERHEAD;
+    let psot = u32::try_from(12 + 2 + body).unwrap();
+    let mut bytes = vec![0xFF, 0x4F, 0xFF, 0x51, 0x00, 0x04, seed, 0x00];
+    bytes.extend_from_slice(&[0xFF, 0x90, 0x00, 0x0A, 0x00, 0x00]);
+    bytes.extend_from_slice(&psot.to_be_bytes());
+    bytes.extend_from_slice(&[0x00, 0x01, 0xFF, 0x93]);
+    bytes.extend((0..body).map(|index| seed.wrapping_mul(31).wrapping_add(index as u8) & 0x7F));
+    bytes.extend_from_slice(&[0xFF, 0xD9]);
+    assert_eq!(bytes.len(), length);
     bytes
 }
 

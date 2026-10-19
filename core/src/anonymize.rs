@@ -89,10 +89,13 @@ pub struct AnonymizationReport {
     /// Temporal attributes generalized to year-level Safe Harbor values.
     pub generalized_temporal_attributes: u64,
     /// JPEG 2000 comment (COM) marker segments removed from Pixel Data.
+    #[serde(default)]
     pub removed_jpeg2000_comment_segments: u64,
     /// JPEG and JPEG-LS comment (COM) marker segments removed from Pixel Data.
+    #[serde(default)]
     pub removed_jpeg_comment_segments: u64,
     /// JPEG and JPEG-LS application (APPn) marker segments removed from Pixel Data.
+    #[serde(default)]
     pub removed_jpeg_application_segments: u64,
     /// Dummy-value replacements by canonical hexadecimal tag, at all nesting levels.
     #[serde(default)]
@@ -1076,6 +1079,29 @@ mod tests {
             element_text(&one, tags::PATIENT_ID),
             element_text(&two, tags::PATIENT_ID)
         );
+    }
+
+    #[test]
+    fn report_from_an_earlier_release_deserializes_with_default_counters() {
+        let (_, report) = anonymizer()
+            .anonymize(&test_object("patient", "20200101", "1.2.3"))
+            .unwrap();
+        let mut json = serde_json::to_value(&report).unwrap();
+        let fields = json.as_object_mut().unwrap();
+        for added in [
+            "dummy_replacements",
+            "unmapped_dummy_replacements",
+            "removed_jpeg2000_comment_segments",
+            "removed_jpeg_comment_segments",
+            "removed_jpeg_application_segments",
+        ] {
+            fields.remove(added).unwrap();
+        }
+        let parsed: AnonymizationReport = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.removed_jpeg2000_comment_segments, 0);
+        assert_eq!(parsed.removed_jpeg_comment_segments, 0);
+        assert_eq!(parsed.removed_jpeg_application_segments, 0);
+        assert!(parsed.dummy_replacements.is_empty());
     }
 
     #[test]
