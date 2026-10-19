@@ -122,3 +122,16 @@ Run-to-run variation on this host was up to about 20% for the parsed-object and 
 Peak memory was measured separately with a synthetic 134,220,786-byte Part 10 file: 32 JPEG Lossless SV1 frames, each with one APP1 segment, one COM segment, and 4 MiB of scan data. A counting global allocator in a scratch program recorded peak live heap bytes after parsing. Anonymization peaked at 384.0 MiB before the change and 256.0 MiB after it, which is three and two Pixel Data copies. The `dicom-anonymize` release binary peaked at 417,218,560 to 417,267,712 bytes of maximum resident set size in three runs before the change, and at 281,952,256 to 282,001,408 bytes in three runs after it. Both binaries wrote byte-identical output. These are snapshots against a warm page cache, not statistical comparisons. No network operations occur.
 
 Decision: ship. The change removes one complete Pixel Data copy from the peak memory of the rewrite path and of the file-to-file command, about 32% of peak resident memory for the 128 MiB fixture. This matters for multi-gigabyte breast tomosynthesis objects. The accepted cost is about 6 µs for each in-memory parse/anonymize/write of a 1 MiB native object. The remaining peak during encoding comes from the element copy in the `dicom-object` writer, and the parsed source still occupies one copy during anonymization because the public API borrows it.
+
+## Safe Harbor UID resolver check
+
+Issue #19 routes every `U` action through a per-object UID resolver and records the sequence item path for each nested dataset. The ordinary anonymization path adds one `RefCell` borrow per remapped UID and two per sequence item. A before-and-after run on October 17, 2026 used the unchanged workload with `--sample-size 100`. Master `7dda93a` was the saved baseline.
+
+| Workload | Baseline 95% interval | Candidate 95% interval | Criterion result |
+|---|---:|---:|---|
+| Six common rule lookups | 16.989 to 17.119 ns | 17.942 to 18.093 ns | +5.6%, code unchanged |
+| Anonymize parsed 1 MiB object | 18.470 to 19.364 µs | 14.965 to 15.622 µs | −19.9% |
+| Parse, anonymize, and write 1 MiB | 73.925 to 74.496 µs | 73.617 to 74.221 µs | No change detected |
+| Validate parsed 1 MiB object | 2.0111 to 2.0375 µs | 1.9506 to 1.9636 µs | −3.4% |
+
+The rule-lookup and validation code did not change, so their shifts show the noise on this shared host. The parsed-object improvement is also inside that noise and is not an optimization claim. The end-to-end workload showed no change. Decision: ship the resolver. Path-aware errors and the shared listing and generation logic need it, and no workload showed a regression larger than host noise.
