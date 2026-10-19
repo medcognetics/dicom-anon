@@ -43,7 +43,10 @@ fn run_with_stdin(command: &mut Command, input: &[u8]) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(input).unwrap();
+    // A command that rejects its arguments can exit before it reads stdin.
+    if let Err(error) = child.stdin.take().unwrap().write_all(input) {
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe, "{error}");
+    }
     child.wait_with_output().unwrap()
 }
 

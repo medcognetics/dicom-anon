@@ -82,6 +82,19 @@ Source-aware validation reconstructs the exact expected output from the source, 
 
 The validator is a confidentiality-policy validator, not a complete SOP Class or IOD validator. A passing report does not establish that Type 1 and Type 2 requirements for a particular SOP Class are satisfied.
 
+## Verified mammography object types
+
+The `core/tests/mammography` suite generates synthetic Digital Mammography X-Ray Image Storage - For Presentation, Breast Tomosynthesis Image Storage with two frames and functional groups, and a synthesized 2D image that references the tomosynthesis instance. All three use JPEG 2000 Lossless encapsulated Pixel Data. The suite processes each object with the `dicom`, `dicom-extended`, and `safe-harbor-metadata` policies. It checks metadata only:
+
+- No placeholder identifier or source UID remains in File Meta Information or in any nested item.
+- Transfer Syntax UID, Image Pixel module attributes, the Basic Offset Table, and the Pixel Data fragments do not change.
+- Image Laterality, Laterality, View Position, Presentation Intent Type, Image Type, Frame Type, and Frame Laterality do not change.
+- In Safe Harbor mode, every nested DA, DT, and TM value is generalized to year level, and Patient Age `092Y` becomes `090Y`.
+- The Source Image Sequence, Dimension Organization UID, and File Meta SOP Instance UID stay consistent with the output instances.
+- Source-aware validation passes through the library and through `dicom-validate`.
+
+In Safe Harbor mode, the View Code Sequence code values are replaced with `ANONYMIZED` at this revision. Issue #20 tracks this behavior.
+
 ## Pixel and disclosure limits
 
 Pixel Data is copied without decoding or inspection. The validator emits `pixel_data_not_assessed` when Pixel Data is present and `burned_in_annotation_present` when Burned In Annotation is `YES`. DICOM PS3.15 notes that applying an attribute confidentiality profile does not guarantee that the complete information object is de-identified.
