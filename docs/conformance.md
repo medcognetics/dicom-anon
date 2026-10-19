@@ -21,7 +21,7 @@ The following metadata options are configurable: Clean Graphics, Clean Structure
 | `X` | Remove the attribute and its sequence content. |
 | `Z` | Write a zero-length value. Safe Harbor also requires empty Patient ID and Patient Name. |
 | `D` | Write a non-empty VR-compatible dummy. For sequences, retain item structure and recursively dummy every non-private value. |
-| `U` | In DICOM mode, derive a deterministic UID from the secret and original UID. In Safe Harbor mode, require the exact caller-supplied mapping. |
+| `U` | In DICOM mode, derive a deterministic UID from the secret and original UID. In Safe Harbor mode, require the exact caller-supplied mapping, or assign a random replacement when the caller requests map generation. |
 | `K` | Keep primitive values and recursively process sequence items. |
 | `C` | Apply the transformation associated with the enabled option: descriptor mapping, age category, temporal transformation, or recursive content cleaning. |
 | compound actions | Select the non-removal action needed by Type 1/2 uses: `D` for `Z/D`, `X/D`, and `X/Z/D`; `Z` for `X/Z`; recursive UID handling for `X/Z/U*`. |
@@ -54,7 +54,7 @@ The month, day, and time are synthetic or removed. Only the source year is retai
 
 The Safe Harbor preset enables Clean Graphics, Clean Structured Content, Clean Descriptors, Retain Patient Characteristics, and Retain Modified Dates. These options may be disabled for more conservative option-column actions; the Safe Harbor-specific transformations still apply. The policy rejects Full Dates, Retain Device Identity, Retain Institution Identity, Retain UIDs, and both unsupported pixel options.
 
-The caller must provide an independently assigned non-PHI patient scope. The tool derives a keyed stable subject token from it, stores the token in Clinical Trial Subject ID, and empties Patient ID and Patient Name. The caller must also provide a complete original-to-output UID map. Invalid UIDs, duplicate outputs, replacements equal to any source UID, and missing source mappings fail before an output is written.
+The caller must provide an independently assigned non-PHI patient scope. The tool derives a keyed stable subject token from it, stores the token in Clinical Trial Subject ID, and empties Patient ID and Patient Name. The caller must also provide a complete original-to-output UID map. Invalid UIDs, duplicate outputs, replacements equal to any source UID, and missing source mappings fail before an output is written. A missing-mapping error names the attribute path and not the UID value. `required_uids` and `--list-required-uids` list each source UID that the `U` action replaces, with its path, through the same rule decisions. Map generation assigns random version 4 UUID-derived replacements from the operating-system CSPRNG under the UID root and returns the complete map. These functions apply to metadata only.
 
 For metadata the tool controls, the policy removes or safely replaces the Safe Harbor identifier classes: names, address/geographic attributes, direct identifiers, dates below year precision, device and institution identity, original UIDs, unapproved descriptions, and unknown person-name, text, URI, and UID values. A report may state that the configured Safe Harbor metadata policy passed. It does not state that the DICOM instance or repository is HIPAA compliant.
 

@@ -56,7 +56,7 @@ Anonymization and validation share these profile arguments:
 | `--descriptor-map PATH` | Load a descriptor map. Repeat to merge maps; two maps that give different outputs for the same tag and source value cause an error. |
 | `--fail-on-unmapped TAG` | Fail when a cleaned attribute with this tag gets a dummy value because no descriptor-map entry matched. Dummy values that the profile requires do not fail; see [Conformance and scope](conformance.md#detection-and-fail-closed-control). `dicom-validate` rejects this option with exit status 2. `TAG` is eight hexadecimal digits, for example `00080100`. Repeat for multiple tags. |
 | `--safe-private-allowlist PATH` | Load a JSON array of `{ "creator": STRING, "element_offset": INTEGER }`. |
-| `--uid-map PATH` | Load a JSON object from original UID to replacement UID. Required for Safe Harbor anonymization. |
+| `--uid-map PATH` | Load a JSON object from original UID to replacement UID. Required for Safe Harbor anonymization unless `--generate-uid-map` assigns the missing entries. |
 | `--require-no-burned-in-annotation` | Fail unless Burned In Annotation `(0028,0301)` is exactly `NO`. A `YES`, empty, or absent value fails. |
 | `--allow-sop-class UID` | Permit only the given SOP Class UID; repeat for multiple SOP Classes. An absent or other SOP Class UID fails, and so does a Media Storage SOP Class UID `(0002,0002)` that differs from it. |
 
@@ -93,6 +93,32 @@ Example descriptor map:
     "MAMMO SCRN BIL W/CAD TOMO": "MAMMO SCREENING BILATERAL"
   }
 }
+```
+
+Safe Harbor UID map arguments:
+
+| Argument | Meaning |
+|---|---|
+| `--list-required-uids` | Print a JSON object `{"required_uids": [{"path": PATH, "uid": UID}, ...]}` to stdout and write no DICOM output. The list contains each source UID occurrence that the configured profile replaces, in traversal order. It uses the same rule decisions as anonymization and fails for the same input errors, except a missing UID mapping. It conflicts with `OUTPUT`, `--in-place`, `--generate-uid-map`, and `--verbose`. |
+| `--generate-uid-map PATH` | Safe Harbor only. Start from the `--uid-map` contents, or an empty map. Assign each missing replacement from the operating-system CSPRNG under `--uid-root`, then write the complete map to `PATH` before the DICOM output. `PATH` must not name the input, output, key, descriptor-map, or safe-private allowlist file, also through a symbolic link. It may name the `--uid-map` file, so that one map grows over a study. If `PATH` already exists, it must be the same file as `--uid-map`; the command does not replace a map that it did not load. Conflicts with `--in-place`. |
+
+A path has one `(gggg,eeee)[n]/` component for each enclosing sequence item and ends with the attribute tag. A missing Safe Harbor mapping fails with that path and never the UID value. See [Security model](security.md) for map custody rules.
+
+```console
+dicom-anonymize input.dcm \
+  --policy safe-harbor-metadata \
+  --patient-scope SUBJECT-42 \
+  --key-file deidentification.key \
+  --list-required-uids
+```
+
+```console
+dicom-anonymize input.dcm output.dcm \
+  --policy safe-harbor-metadata \
+  --patient-scope SUBJECT-42 \
+  --uid-map study-uid-map.json \
+  --generate-uid-map study-uid-map.json \
+  --key-file deidentification.key
 ```
 
 A descriptor map is a JSON object keyed by canonical eight-digit tag, then exact source value and safe output value, as above. A map can also be a versioned document that records its provenance:
@@ -133,7 +159,7 @@ Exit status:
 - `0`: the complete output was written;
 - `2`: invalid arguments, missing key material, parse failure, policy failure including a `--fail-on-unmapped` match, or output failure.
 
-The command has no text or JSON primary-output mode because its primary output is a DICOM byte stream. The report is secondary diagnostic data and stays on stderr.
+Except for `--list-required-uids`, the command has no text or JSON primary-output mode because its primary output is a DICOM byte stream. The report is secondary diagnostic data and stays on stderr.
 
 ## `dicom-validate`
 

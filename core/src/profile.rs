@@ -346,7 +346,7 @@ fn canonical_tag(tag: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte))
 }
 
-fn valid_uid(uid: &str) -> bool {
+pub(crate) fn valid_uid(uid: &str) -> bool {
     !uid.is_empty()
         && uid.len() <= 64
         && uid.split('.').all(|component| {
