@@ -529,3 +529,294 @@ fn unsupported_pixel_option_is_rejected_before_processing() {
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported"));
 }
+
+const SHIPPED_BREAST_MAP: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../descriptor-maps/breast-imaging-ps3.16-2026d.json"
+);
+const CODE_TAGS: [&str; 3] = ["00080100", "00080102", "00080104"];
+
+fn code_item(value: &str, scheme: &str, meaning: &str) -> InMemDicomObject {
+    let mut item = InMemDicomObject::new_empty();
+    item.put_str(tags::CODE_VALUE, VR::SH, value);
+    item.put_str(tags::CODING_SCHEME_DESIGNATOR, VR::SH, scheme);
+    item.put_str(tags::CODE_MEANING, VR::LO, meaning);
+    item
+}
+
+fn put_sequence(object: &mut InMemDicomObject, tag: dicom_core::Tag, items: Vec<InMemDicomObject>) {
+    object.put(dicom_object::mem::InMemElement::new(
+        tag,
+        VR::SQ,
+        dicom_core::value::DataSetSequence::from(items),
+    ));
+}
+
+/// Synthetic breast image with view, view modifier, and anatomic region codes.
+fn breast_object(
+    sop_class: &str,
+    view: (&str, &str, &str),
+    modifier: (&str, &str, &str),
+    region: (&str, &str, &str),
+    region_in_frame_anatomy: bool,
+) -> InMemDicomObject {
+    let mut object = InMemDicomObject::new_empty();
+    object.put_str(tags::SOP_CLASS_UID, VR::UI, sop_class);
+    object.put_str(tags::SOP_INSTANCE_UID, VR::UI, "2.25.311840512079451122934");
+    object.put_str(
+        tags::STUDY_INSTANCE_UID,
+        VR::UI,
+        "2.25.311840512079451122935",
+    );
+    object.put_str(
+        tags::SERIES_INSTANCE_UID,
+        VR::UI,
+        "2.25.311840512079451122936",
+    );
+    object.put_str(tags::PATIENT_ID, VR::LO, "SYNTH-PATIENT");
+    object.put_str(tags::PATIENT_NAME, VR::PN, "Synthetic^Placeholder");
+    object.put_str(tags::MODALITY, VR::CS, "MG");
+    object.put_str(tags::MANUFACTURER, VR::LO, "SYNTHVENDOR");
+    object.put_str(tags::MANUFACTURER_MODEL_NAME, VR::LO, "SYNTHMODEL");
+    let mut view_item = code_item(view.0, view.1, view.2);
+    put_sequence(
+        &mut view_item,
+        tags::VIEW_MODIFIER_CODE_SEQUENCE,
+        vec![code_item(modifier.0, modifier.1, modifier.2)],
+    );
+    put_sequence(&mut object, tags::VIEW_CODE_SEQUENCE, vec![view_item]);
+    let region_item = code_item(region.0, region.1, region.2);
+    if region_in_frame_anatomy {
+        let mut frame_anatomy = InMemDicomObject::new_empty();
+        frame_anatomy.put_str(tags::FRAME_LATERALITY, VR::CS, "L");
+        put_sequence(
+            &mut frame_anatomy,
+            tags::ANATOMIC_REGION_SEQUENCE,
+            vec![region_item],
+        );
+        let mut shared = InMemDicomObject::new_empty();
+        put_sequence(
+            &mut shared,
+            tags::FRAME_ANATOMY_SEQUENCE,
+            vec![frame_anatomy],
+        );
+        put_sequence(
+            &mut object,
+            tags::SHARED_FUNCTIONAL_GROUPS_SEQUENCE,
+            vec![shared],
+        );
+    } else {
+        put_sequence(
+            &mut object,
+            tags::ANATOMIC_REGION_SEQUENCE,
+            vec![region_item],
+        );
+    }
+    object
+}
+
+fn encode(object: InMemDicomObject) -> Vec<u8> {
+    let object = object
+        .with_meta(FileMetaTableBuilder::new().transfer_syntax(uids::EXPLICIT_VR_LITTLE_ENDIAN))
+        .unwrap();
+    let mut bytes = Vec::new();
+    object.write_all(&mut bytes).unwrap();
+    bytes
+}
+
+fn write_breast_uid_map(path: &std::path::Path) {
+    std::fs::write(
+        path,
+        serde_json::to_vec(&serde_json::json!({
+            "2.25.311840512079451122934": "2.25.901",
+            "2.25.311840512079451122935": "2.25.902",
+            "2.25.311840512079451122936": "2.25.903"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+fn safe_harbor_command(uid_map: &std::path::Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dicom-anonymize"));
+    command
+        .args(["-", "--policy", "safe-harbor-metadata", "--uid-map"])
+        .arg(uid_map)
+        .args([
+            "--patient-scope",
+            "SUBJ-0001",
+            "--key-env",
+            KEY_ENV,
+            "--verbose",
+        ])
+        .env(KEY_ENV, KEY);
+    command
+}
+
+fn sequence_items(object: &InMemDicomObject, tag: dicom_core::Tag) -> &[InMemDicomObject] {
+    object.element(tag).unwrap().items().unwrap()
+}
+
+fn code_triplet(item: &InMemDicomObject) -> [String; 3] {
+    [
+        tags::CODE_VALUE,
+        tags::CODING_SCHEME_DESIGNATOR,
+        tags::CODE_MEANING,
+    ]
+    .map(|tag| item.element(tag).unwrap().to_str().unwrap().into_owned())
+}
+
+#[test]
+fn shipped_breast_map_keeps_mg_and_dbt_code_sequences() {
+    let directory = tempfile::tempdir().unwrap();
+    let uid_map = directory.path().join("uid-map.json");
+    write_breast_uid_map(&uid_map);
+    let cases = [
+        (
+            uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION,
+            ("R-10242", "SRT", "cranio-caudal"),
+            ("R-102D6", "SRT", "Magnification"),
+            ("T-04000", "SRT", "Breast"),
+            false,
+        ),
+        (
+            uids::BREAST_TOMOSYNTHESIS_IMAGE_STORAGE,
+            ("399368009", "SCT", "medio-lateral oblique"),
+            ("399011000", "SCT", "Axillary Tail"),
+            ("76752008", "SCT", "Breast"),
+            true,
+        ),
+    ];
+    for (sop_class, view, modifier, region, in_frame_anatomy) in cases {
+        let source = breast_object(sop_class, view, modifier, region, in_frame_anatomy);
+        let mut command = safe_harbor_command(&uid_map);
+        command.arg("--descriptor-map").arg(SHIPPED_BREAST_MAP);
+        for tag in CODE_TAGS {
+            command.args(["--fail-on-unmapped", tag]);
+        }
+        let output = run_with_stdin(&mut command, &encode(source));
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let object = dicom_anon::read_dicom(&output.stdout[..]).unwrap();
+        let view_item = &sequence_items(&object, tags::VIEW_CODE_SEQUENCE)[0];
+        assert_eq!(code_triplet(view_item), [view.0, view.1, view.2]);
+        assert_eq!(
+            code_triplet(&sequence_items(view_item, tags::VIEW_MODIFIER_CODE_SEQUENCE)[0]),
+            [modifier.0, modifier.1, modifier.2]
+        );
+        let region_parent = if in_frame_anatomy {
+            let shared = &sequence_items(&object, tags::SHARED_FUNCTIONAL_GROUPS_SEQUENCE)[0];
+            sequence_items(shared, tags::FRAME_ANATOMY_SEQUENCE)[0].clone()
+        } else {
+            object.clone().into_inner()
+        };
+        assert_eq!(
+            code_triplet(&sequence_items(&region_parent, tags::ANATOMIC_REGION_SEQUENCE)[0]),
+            [region.0, region.1, region.2]
+        );
+
+        // Unmapped device type attributes stay visible in the per-tag counts.
+        let report: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+        let counts = report["dummy_replacements"].as_object().unwrap();
+        let unmapped = report["unmapped_dummy_replacements"].as_object().unwrap();
+        for counts in [counts, unmapped] {
+            assert_eq!(counts["00080070"], 1);
+            assert_eq!(counts["00081090"], 1);
+            for tag in CODE_TAGS {
+                assert!(!counts.contains_key(tag), "{tag}");
+            }
+        }
+
+        let validation = run_with_stdin(
+            Command::new(env!("CARGO_BIN_EXE_dicom-validate"))
+                .args(["-", "--policy", "safe-harbor-metadata", "--format", "json"])
+                .args(["--descriptor-map", SHIPPED_BREAST_MAP]),
+            &output.stdout,
+        );
+        assert_eq!(
+            validation.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&validation.stdout)
+        );
+    }
+}
+
+#[test]
+fn unlisted_code_is_counted_and_fails_closed_when_requested() {
+    let directory = tempfile::tempdir().unwrap();
+    let uid_map = directory.path().join("uid-map.json");
+    write_breast_uid_map(&uid_map);
+    let source = encode(breast_object(
+        uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION,
+        ("R-10242", "SRT", "cranio-caudal"),
+        ("SYNTH-UNLISTED", "SRT", "Synthetic unlisted modifier"),
+        ("T-04000", "SRT", "Breast"),
+        false,
+    ));
+
+    // Without the option, the replacement succeeds but the report counts it.
+    let mut permissive = safe_harbor_command(&uid_map);
+    permissive.arg("--descriptor-map").arg(SHIPPED_BREAST_MAP);
+    let output = run_with_stdin(&mut permissive, &source);
+    assert_eq!(output.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    for counts in ["dummy_replacements", "unmapped_dummy_replacements"] {
+        assert_eq!(report[counts]["00080100"], 1);
+        assert_eq!(report[counts]["00080104"], 1);
+        assert!(report[counts].get("00080102").is_none());
+    }
+
+    let output_path = directory.path().join("out.dcm");
+    let mut strict = Command::new(env!("CARGO_BIN_EXE_dicom-anonymize"));
+    strict
+        .arg(directory.path().join("in.dcm"))
+        .arg(&output_path)
+        .args(["--policy", "safe-harbor-metadata", "--uid-map"])
+        .arg(&uid_map)
+        .args(["--patient-scope", "SUBJ-0001", "--key-env", KEY_ENV])
+        .args(["--descriptor-map", SHIPPED_BREAST_MAP])
+        .args(["--fail-on-unmapped", "00080100"])
+        .env(KEY_ENV, KEY);
+    std::fs::write(directory.path().join("in.dcm"), &source).unwrap();
+    let output = strict.output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(!output_path.exists());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("(0008,0100) at (0054,0220)[0]/(0054,0222)[0]/(0008,0100)"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("SYNTH-UNLISTED"), "{stderr}");
+    assert!(!stderr.contains("Synthetic unlisted"), "{stderr}");
+}
+
+#[test]
+fn fail_on_unmapped_rejects_malformed_tags() {
+    let output = Command::new(env!("CARGO_BIN_EXE_dicom-anonymize"))
+        .args(["-", "--fail-on-unmapped", "(0008,0100)"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("eight hexadecimal digits"));
+}
+
+#[test]
+fn validator_rejects_the_anonymize_only_fail_on_unmapped_option() {
+    let output = run_with_stdin(
+        Command::new(env!("CARGO_BIN_EXE_dicom-validate")).args([
+            "-",
+            "--fail-on-unmapped",
+            "00080100",
+        ]),
+        &source_bytes(),
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--fail-on-unmapped"));
+}

@@ -53,7 +53,8 @@ Anonymization and validation share these profile arguments:
 | `--policy dicom\|dicom-extended\|safe-harbor-metadata` | Select a profile preset. The default is `dicom-extended`. |
 | `--enable-option OPTION` | Enable an option; repeat for multiple options. |
 | `--disable-option OPTION` | Disable an option enabled by the selected preset; repeat for multiple options. |
-| `--descriptor-map PATH` | Load a JSON object keyed by canonical eight-digit tag, then exact source value and safe output value. |
+| `--descriptor-map PATH` | Load a descriptor map. Repeat to merge maps; two maps that give different outputs for the same tag and source value cause an error. |
+| `--fail-on-unmapped TAG` | Fail when a cleaned attribute with this tag gets a dummy value because no descriptor-map entry matched. Dummy values that the profile requires do not fail; see [Conformance and scope](conformance.md#detection-and-fail-closed-control). `dicom-validate` rejects this option with exit status 2. `TAG` is eight hexadecimal digits, for example `00080100`. Repeat for multiple tags. |
 | `--safe-private-allowlist PATH` | Load a JSON array of `{ "creator": STRING, "element_offset": INTEGER }`. |
 | `--uid-map PATH` | Load a JSON object from original UID to replacement UID. Required for Safe Harbor anonymization. |
 
@@ -77,12 +78,43 @@ Example descriptor map:
 }
 ```
 
+A descriptor map is a JSON object keyed by canonical eight-digit tag, then exact source value and safe output value, as above. A map can also be a versioned document that records its provenance:
+
+```json
+{
+  "format": "dicom-anon-descriptor-map/1",
+  "name": "example-map",
+  "version": "1",
+  "source": "Reviewed site vocabulary",
+  "notes": [],
+  "mappings": {
+    "00080070": { "SYNTHVENDOR": "SYNTHVENDOR" }
+  }
+}
+```
+
+`descriptor-maps/breast-imaging-ps3.16-2026d.json` is a reviewed versioned map for the mammography view, view modifier, and breast anatomic region codes. [Conformance and scope](conformance.md#text-attributes-outside-table-e1-1) gives its contents and the attributes that Safe Harbor mode changes. The guard applies to a tag at every nesting level. Before you enable it, add reviewed maps for the other code sequences that your objects contain, such as Purpose of Reference Code Sequence; [Conformance and scope](conformance.md#detection-and-fail-closed-control) gives the procedure. For a mammography inference pipeline:
+
+```console
+dicom-anonymize input.dcm output.dcm \
+  --policy safe-harbor-metadata \
+  --patient-scope SUBJ-0001 \
+  --uid-map uid-map.json \
+  --key-file deidentification.key \
+  --descriptor-map descriptor-maps/breast-imaging-ps3.16-2026d.json \
+  --fail-on-unmapped 00080100 \
+  --fail-on-unmapped 00080102 \
+  --fail-on-unmapped 00080104
+```
+
+The `--verbose` report includes `dummy_replacements` and `unmapped_dummy_replacements`, which count dummy values by tag without source values.
+
 The default successful invocation writes no text. `--verbose` writes the JSON anonymization report to stderr. DICOM bytes are the only stdout content. `--quiet` and `--verbose` are mutually exclusive. Color affects diagnostics only; `--no-color` overrides `--color`. Auto mode tests stderr because diagnostics are written there.
 
 Exit status:
 
 - `0`: the complete output was written;
-- `2`: invalid arguments, missing key material, parse failure, policy failure, or output failure.
+- `2`: invalid arguments, missing key material, parse failure, policy failure including a `--fail-on-unmapped` match, or output failure.
 
 The command has no text or JSON primary-output mode because its primary output is a DICOM byte stream. The report is secondary diagnostic data and stays on stderr.
 

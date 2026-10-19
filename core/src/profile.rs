@@ -139,6 +139,15 @@ pub struct ProfileConfiguration {
     /// Original UID -> independently assigned replacement UID.
     #[serde(default)]
     pub uid_mappings: BTreeMap<String, String>,
+    /// Canonical hexadecimal tags that must not receive an unmapped dummy value.
+    ///
+    /// De-identification fails when a clean action on a non-sequence attribute
+    /// with one of these tags finds no descriptor-map entry, at any nesting
+    /// level. Dummy values that the profile requires do not fail: `D` actions,
+    /// items of a `D` sequence, and items of a sequence that a clean option
+    /// replaces as a whole. Validation ignores this field.
+    #[serde(default)]
+    pub fail_on_unmapped: BTreeSet<String>,
 }
 
 impl Default for ProfileConfiguration {
@@ -157,6 +166,7 @@ impl ProfileConfiguration {
             descriptor_mappings: BTreeMap::new(),
             safe_private_allowlist: BTreeSet::new(),
             uid_mappings: BTreeMap::new(),
+            fail_on_unmapped: BTreeSet::new(),
         }
     }
 
@@ -186,6 +196,7 @@ impl ProfileConfiguration {
             descriptor_mappings: BTreeMap::new(),
             safe_private_allowlist: BTreeSet::new(),
             uid_mappings: BTreeMap::new(),
+            fail_on_unmapped: BTreeSet::new(),
         }
     }
 
@@ -230,11 +241,7 @@ impl ProfileConfiguration {
             }
         }
         for (tag, mappings) in &self.descriptor_mappings {
-            if tag.len() != 8
-                || !tag
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte))
-            {
+            if !canonical_tag(tag) {
                 return Err(Error::InvalidProfileConfiguration(
                     "descriptor-map tags must be eight uppercase hexadecimal digits".to_owned(),
                 ));
@@ -248,6 +255,11 @@ impl ProfileConfiguration {
                         .to_owned(),
                 ));
             }
+        }
+        if !self.fail_on_unmapped.iter().all(|tag| canonical_tag(tag)) {
+            return Err(Error::InvalidProfileConfiguration(
+                "fail-on-unmapped tags must be eight uppercase hexadecimal digits".to_owned(),
+            ));
         }
         if self
             .safe_private_allowlist
@@ -315,6 +327,13 @@ impl ProfileConfiguration {
             .binary_search(&(creator, element_offset))
             .is_ok()
     }
+}
+
+fn canonical_tag(tag: &str) -> bool {
+    tag.len() == 8
+        && tag
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte))
 }
 
 fn valid_uid(uid: &str) -> bool {
@@ -738,6 +757,19 @@ mod tests {
             .insert("0008-1030".to_owned(), BTreeMap::new());
         assert!(matches!(
             descriptor.validate(),
+            Err(Error::InvalidProfileConfiguration(_))
+        ));
+
+        let mut fail_on_unmapped = ProfileConfiguration::default();
+        fail_on_unmapped
+            .fail_on_unmapped
+            .insert("00080100".to_owned());
+        assert!(fail_on_unmapped.validate().is_ok());
+        fail_on_unmapped
+            .fail_on_unmapped
+            .insert("(0008,0104)".to_owned());
+        assert!(matches!(
+            fail_on_unmapped.validate(),
             Err(Error::InvalidProfileConfiguration(_))
         ));
 

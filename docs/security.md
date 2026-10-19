@@ -21,7 +21,7 @@ The transformation is one-way and does not store a lookup table. Losing the key 
 
 Safe Harbor metadata mode adds two sensitive inputs: the independently assigned patient scope and the original-to-output UID map. Treat both as controlled linkage material. Do not place either in reports, logs, test fixtures, or public configuration repositories. The implementation reports missing, invalid, identity-preserving, colliding, and mismatched mappings without printing their contents. Temporal diagnostics identify only the affected tag and VR, never the source value.
 
-Descriptor maps and safe-private allowlists are disclosure decisions. Review every approved output and private creator/offset against the intended release. An exact configuration match proves that the configured transformation occurred; it does not prove that the approved output is non-identifying.
+Descriptor maps and safe-private allowlists are disclosure decisions. Review every approved output and private creator/offset against the intended release. An exact configuration match proves that the configured transformation occurred; it does not prove that the approved output is non-identifying. The shipped breast-imaging map contains only standard DICOM PS3.16 terminology. Review any map that adds site values, such as Manufacturer, before release. The `--fail-on-unmapped` error gives only the tag and sequence path, never the source value.
 
 ## Input behavior
 
