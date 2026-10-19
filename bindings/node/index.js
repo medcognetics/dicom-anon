@@ -588,5 +588,7 @@ if (!nativeBinding) {
 
 module.exports = nativeBinding
 module.exports.anonymize = nativeBinding.anonymize
+module.exports.anonymizeWithGeneratedUidMap = nativeBinding.anonymizeWithGeneratedUidMap
+module.exports.requiredUids = nativeBinding.requiredUids
 module.exports.validate = nativeBinding.validate
 module.exports.validateWithSource = nativeBinding.validateWithSource

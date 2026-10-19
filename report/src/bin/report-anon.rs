@@ -505,7 +505,7 @@ fn validate_output_paths(
         .iter()
         .map(PathBuf::as_path)
         .chain(args.key_file.as_deref())
-        .chain(args.profile.descriptor_map.as_deref())
+        .chain(args.profile.descriptor_map.iter().map(PathBuf::as_path))
         .chain(args.profile.safe_private_allowlist.as_deref())
         .chain(args.profile.uid_map.as_deref())
         .collect::<Vec<_>>();
@@ -668,8 +668,10 @@ fn validate_dicom_options(args: &AnonymizeArgs) -> Result<(), String> {
         Some("--enable-option")
     } else if !args.profile.disable_option.is_empty() {
         Some("--disable-option")
-    } else if args.profile.descriptor_map.is_some() {
+    } else if !args.profile.descriptor_map.is_empty() {
         Some("--descriptor-map")
+    } else if !args.profile.fail_on_unmapped.is_empty() {
+        Some("--fail-on-unmapped")
     } else if args.profile.safe_private_allowlist.is_some() {
         Some("--safe-private-allowlist")
     } else if args.profile.uid_map.is_some() {

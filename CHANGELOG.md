@@ -18,6 +18,9 @@ This is the first tagged release. Version 0.1.0 was not tagged or released.
 - `--version` for `dicom-anonymize`, `dicom-validate`, and `report-anon` prints the crate version and the source commit that the build recorded.
 - A tag-triggered release workflow. It builds Linux x86_64 `dicom-anonymize` and `dicom-validate` binaries, an abi3 Python wheel, CycloneDX SBOMs of the Rust lock and of the Python and Node build-tool locks, SHA-256 checksums, and the dependency audit evidence. It attaches them to a draft GitHub release.
 - This changelog and the [known anomaly list](docs/known-anomalies.md).
+- Safe Harbor UID support ([#19](https://github.com/medcognetics/dicom-anon/issues/19)): `--list-required-uids` and the matching library and binding calls list each source UID that needs a map entry, with its sequence path. `--generate-uid-map PATH` assigns missing replacements from the operating-system CSPRNG and returns them in the caller map. A missing mapping error gives the tag path and never the value.
+- Fail-closed descriptor option ([#20](https://github.com/medcognetics/dicom-anon/issues/20)): `--fail-on-unmapped TAG` stops when a descriptor-map miss would write a dummy value for that tag. Reports count dummy and unmapped dummy replacements by tag.
+- Mammography, breast tomosynthesis, synthesized 2D, and JPEG 2000 conformance fixtures in CI ([#21](https://github.com/medcognetics/dicom-anon/issues/21)).
 
 ### Changed
 

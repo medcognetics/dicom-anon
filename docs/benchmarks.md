@@ -94,3 +94,16 @@ The cumulative PDF pixel limit adds one checked multiplication and addition per 
 | Validate parsed 1 MiB object | 4.2551 to 4.2610 µs | 4.2824 to 4.2894 µs | Within noise threshold |
 
 Decision: ship the resource guard. Its fixed per-page accounting prevents unbounded aggregate rendering work, and no core DICOM benchmark showed a meaningful regression. The asset-backed report integration target remains the functional gate for native model, OCR, and PDFium execution.
+
+## Safe Harbor UID resolver check
+
+Issue #19 routes every `U` action through a per-object UID resolver and records the sequence item path for each nested dataset. The ordinary anonymization path adds one `RefCell` borrow per remapped UID and two per sequence item. A before-and-after run on October 17, 2026 used the unchanged workload with `--sample-size 100`. Master `7dda93a` was the saved baseline.
+
+| Workload | Baseline 95% interval | Candidate 95% interval | Criterion result |
+|---|---:|---:|---|
+| Six common rule lookups | 16.989 to 17.119 ns | 17.942 to 18.093 ns | +5.6%, code unchanged |
+| Anonymize parsed 1 MiB object | 18.470 to 19.364 µs | 14.965 to 15.622 µs | −19.9% |
+| Parse, anonymize, and write 1 MiB | 73.925 to 74.496 µs | 73.617 to 74.221 µs | No change detected |
+| Validate parsed 1 MiB object | 2.0111 to 2.0375 µs | 1.9506 to 1.9636 µs | −3.4% |
+
+The rule-lookup and validation code did not change, so their shifts show the noise on this shared host. The parsed-object improvement is also inside that noise and is not an optimization claim. The end-to-end workload showed no change. Decision: ship the resolver. Path-aware errors and the shared listing and generation logic need it, and no workload showed a regression larger than host noise.
