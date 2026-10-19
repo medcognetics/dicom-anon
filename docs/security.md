@@ -37,7 +37,7 @@ The generated map is the only link from output UIDs to source UIDs. It is a re-i
 
 The anonymization report, error text, and DICOM output never contain map contents or source UIDs. `--verbose` prints only the report.
 
-Descriptor maps and safe-private allowlists are disclosure decisions. Review every approved output and private creator/offset against the intended release. An exact configuration match proves that the configured transformation occurred; it does not prove that the approved output is non-identifying.
+Descriptor maps and safe-private allowlists are disclosure decisions. Review every approved output and private creator/offset against the intended release. An exact configuration match proves that the configured transformation occurred; it does not prove that the approved output is non-identifying. The shipped breast-imaging map contains only standard DICOM PS3.16 terminology. Review any map that adds site values, such as Manufacturer, before release. The `--fail-on-unmapped` error gives only the tag and sequence path, never the source value.
 
 ## Input behavior
 

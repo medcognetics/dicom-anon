@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use dicom_core::value::Value;
-use dicom_core::{Tag, VR};
+use dicom_core::VR;
 use dicom_object::{DefaultDicomObject, InMemDicomObject};
 use serde::{Deserialize, Serialize};
 
@@ -54,21 +54,16 @@ enum Mode {
 /// Per-object UID resolution state shared by all anonymizer modes.
 pub(crate) struct UidResolver {
     mode: Mode,
-    path: Vec<(Tag, usize)>,
 }
 
 impl UidResolver {
     pub(crate) const fn mapped() -> Self {
-        Self {
-            mode: Mode::Mapped,
-            path: Vec::new(),
-        }
+        Self { mode: Mode::Mapped }
     }
 
     pub(crate) const fn collect() -> Self {
         Self {
             mode: Mode::Collect(Vec::new()),
-            path: Vec::new(),
         }
     }
 
@@ -105,28 +100,21 @@ impl UidResolver {
         reserved.extend(map.values().cloned());
         Ok(Self {
             mode: Mode::Generate { map, reserved },
-            path: Vec::new(),
         })
     }
 
-    pub(crate) fn enter_item(&mut self, sequence: Tag, index: usize) {
-        self.path.push((sequence, index));
-    }
-
-    pub(crate) fn leave_item(&mut self) {
-        self.path.pop();
-    }
-
-    /// Return the replacement for one source UID at `tag` in the current item.
+    /// Return the replacement for one source UID.
+    ///
+    /// `path` gives the attribute path. It is called only to record or report one.
     pub(crate) fn resolve(
         &mut self,
         original: &str,
-        tag: Tag,
+        path: impl FnOnce() -> String,
         options: &Options,
     ) -> Result<String> {
         if let Mode::Collect(found) = &mut self.mode {
             found.push(RequiredUid {
-                path: format_path(&self.path, tag),
+                path: path(),
                 uid: original.to_owned(),
             });
             return Ok(original.to_owned());
@@ -140,9 +128,7 @@ impl UidResolver {
                     return Ok(replacement.clone());
                 }
                 if !valid_uid(original) {
-                    return Err(Error::InvalidSourceUid {
-                        path: format_path(&self.path, tag),
-                    });
+                    return Err(Error::InvalidSourceUid { path: path() });
                 }
                 let replacement = unique_random_uid(&options.uid_root, reserved)?;
                 map.insert(original.to_owned(), replacement.clone());
@@ -153,9 +139,7 @@ impl UidResolver {
                 .uid_mappings
                 .get(original)
                 .cloned()
-                .ok_or_else(|| Error::MissingSafeHarborUidMapping {
-                    path: format_path(&self.path, tag),
-                }),
+                .ok_or_else(|| Error::MissingSafeHarborUidMapping { path: path() }),
         }
     }
 
@@ -174,18 +158,6 @@ impl UidResolver {
             _ => BTreeMap::new(),
         }
     }
-}
-
-fn format_path(items: &[(Tag, usize)], tag: Tag) -> String {
-    let mut path = String::new();
-    for (sequence, index) in items {
-        path.push_str(&format!(
-            "({:04X},{:04X})[{index}]/",
-            sequence.0, sequence.1
-        ));
-    }
-    path.push_str(&format!("({:04X},{:04X})", tag.0, tag.1));
-    path
 }
 
 /// Add every UI value in `object`, at every depth, to `uids`.

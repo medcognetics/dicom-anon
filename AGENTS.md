@@ -11,6 +11,8 @@ This workspace implements deterministic, configurable DICOM metadata de-identifi
 - `core/src/profile.rs`: profile configuration and option resolution
 - `core/src/profile_generated.rs`: generated frozen PS3.15 rule matrix and safe-private registry
 - `tools/generate_profile.py`: reproducible edition-checked profile generator
+- `tools/generate_breast_descriptor_map.py`: edition-checked generator for the shipped PS3.16 breast-imaging descriptor map
+- `descriptor-maps/`: reviewed, versioned descriptor maps; regenerate rather than edit by hand
 - `core/src/pseudonym.rs`: keyed patient and UID transformations
 - `core/src/uid_map.rs`: UID resolution with attribute paths, required-UID listing, and random Safe Harbor map generation
 - `core/src/temporal.rs`: DICOM DA, DT, and TM shifting with paired-date rollover

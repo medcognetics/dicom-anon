@@ -158,12 +158,12 @@ fn generate_uid_map(
         (args.input != "-").then(|| PathBuf::from(&args.input)),
         (output != "-").then(|| PathBuf::from(output)),
         args.key_file.clone(),
-        args.profile.descriptor_map.clone(),
         args.profile.safe_private_allowlist.clone(),
     ];
     if protected
         .iter()
         .flatten()
+        .chain(&args.profile.descriptor_map)
         .any(|path| same_path(map_path, path))
     {
         return Err(
