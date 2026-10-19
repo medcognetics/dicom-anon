@@ -83,6 +83,16 @@ pub enum Error {
     /// A configured UID replacement was invalid or collided with another mapping.
     #[error("invalid Safe Harbor UID mapping: {0}")]
     InvalidSafeHarborUidMapping(String),
+    /// A fail-on-unmapped attribute would receive a dummy value.
+    #[error(
+        "attribute {tag} at {path} has no descriptor-map entry and would receive a dummy value"
+    )]
+    UnmappedDummyReplacement {
+        /// DICOM tag rendered as `(gggg,eeee)`.
+        tag: String,
+        /// Sequence path to the attribute, with zero-based item indices.
+        path: String,
+    },
     /// Patient's Age did not contain a valid DICOM AS value.
     #[error("invalid Patient's Age value")]
     InvalidPatientAge,

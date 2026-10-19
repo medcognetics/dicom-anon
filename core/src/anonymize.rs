@@ -1,5 +1,7 @@
 //! Core de-identification engine.
 
+use std::collections::BTreeMap;
+
 use dicom_core::header::Header;
 use dicom_core::value::{DataSetSequence, Value};
 use dicom_core::{DataElement, PrimitiveValue, Tag, VR};
@@ -84,6 +86,12 @@ pub struct AnonymizationReport {
     pub shifted_temporal_attributes: u64,
     /// Temporal attributes generalized to year-level Safe Harbor values.
     pub generalized_temporal_attributes: u64,
+    /// Dummy-value replacements by canonical hexadecimal tag, at all nesting levels.
+    #[serde(default)]
+    pub dummy_replacements: BTreeMap<String, u64>,
+    /// Subset of `dummy_replacements` where a clean action found no descriptor-map entry.
+    #[serde(default)]
+    pub unmapped_dummy_replacements: BTreeMap<String, u64>,
     /// JPEG 2000 comment (COM) marker segments removed from Pixel Data.
     pub removed_jpeg2000_comment_segments: u64,
 }
@@ -109,6 +117,8 @@ impl AnonymizationReport {
             remapped_uid_attributes: 0,
             shifted_temporal_attributes: 0,
             generalized_temporal_attributes: 0,
+            dummy_replacements: BTreeMap::new(),
+            unmapped_dummy_replacements: BTreeMap::new(),
             removed_jpeg2000_comment_segments: 0,
         }
     }
@@ -181,6 +191,7 @@ impl Anonymizer {
             patient_pseudonym: &patient_pseudonym,
             date_shift_days,
             time_shift_hours: i32::from(time_shift_hours),
+            path: String::new(),
         };
 
         let mut output = self.process_dataset(source, &context, &mut report)?;
@@ -464,6 +475,7 @@ impl Anonymizer {
                     report.removed_attributes += 1;
                     return Ok(None);
                 }
+                self.record_unmapped(tag, context, report)?;
                 report.replaced_attributes += 1;
                 self.dummy_element(element, context, report).map(Some)
             }
@@ -524,7 +536,10 @@ impl Anonymizer {
         let items = sequence
             .items()
             .iter()
-            .map(|item| self.process_dataset(item, context, report))
+            .enumerate()
+            .map(|(index, item)| {
+                self.process_dataset(item, &context.item(element.tag(), index), report)
+            })
             .collect::<Result<Vec<_>>>()?;
         Ok(InMemElement::new(
             element.tag(),
@@ -540,6 +555,9 @@ impl Anonymizer {
         report: &mut AnonymizationReport,
     ) -> Result<InMemElement> {
         let tag = element.tag();
+        if element.vr() != VR::SQ {
+            record_dummy(tag, report);
+        }
         let value = match element.vr() {
             VR::SQ => return self.dummy_sequence(element, context, report),
             VR::AE | VR::CS | VR::LO | VR::LT | VR::SH | VR::ST | VR::UC | VR::UR | VR::UT => {
@@ -583,10 +601,14 @@ impl Anonymizer {
         let Value::Sequence(sequence) = element.value() else {
             return Err(Error::InvalidSequence(format_tag(element.tag())));
         };
+        record_dummy(element.tag(), report);
         let mut items = sequence
             .items()
             .iter()
-            .map(|item| self.dummy_dataset(item, context, report))
+            .enumerate()
+            .map(|(index, item)| {
+                self.dummy_dataset(item, &context.item(element.tag(), index), report)
+            })
             .collect::<Result<Vec<_>>>()?;
         if items.is_empty() {
             items.push(InMemDicomObject::new_empty());
@@ -619,12 +641,58 @@ impl Anonymizer {
         }
         Ok(output)
     }
+
+    /// Record a clean action that found no descriptor-map entry, or fail closed.
+    fn record_unmapped(
+        &self,
+        tag: Tag,
+        context: &Context<'_>,
+        report: &mut AnonymizationReport,
+    ) -> Result<()> {
+        let key = format!("{:04X}{:04X}", tag.0, tag.1);
+        if self.options.profile.fail_on_unmapped.contains(&key) {
+            return Err(Error::UnmappedDummyReplacement {
+                tag: format_tag(tag),
+                path: context.element_path(tag),
+            });
+        }
+        *report.unmapped_dummy_replacements.entry(key).or_default() += 1;
+        Ok(())
+    }
+}
+
+fn record_dummy(tag: Tag, report: &mut AnonymizationReport) {
+    *report
+        .dummy_replacements
+        .entry(format!("{:04X}{:04X}", tag.0, tag.1))
+        .or_default() += 1;
 }
 
 struct Context<'a> {
     patient_pseudonym: &'a str,
     date_shift_days: i32,
     time_shift_hours: i32,
+    /// Path of the enclosing sequence item; empty at the top level.
+    path: String,
+}
+
+impl<'a> Context<'a> {
+    fn item(&self, tag: Tag, index: usize) -> Context<'a> {
+        Context {
+            patient_pseudonym: self.patient_pseudonym,
+            date_shift_days: self.date_shift_days,
+            time_shift_hours: self.time_shift_hours,
+            path: format!("{}[{index}]", self.element_path(tag)),
+        }
+    }
+
+    fn element_path(&self, tag: Tag) -> String {
+        if self.path.is_empty() {
+            format_tag(tag)
+        } else {
+            format!("{}/{}", self.path, format_tag(tag))
+        }
+    }
 }
 
 fn paired_day_adjustment(
@@ -1054,7 +1122,16 @@ mod tests {
             DataSetSequence::from(vec![institution]),
         ));
 
-        let (output, _) = anonymizer().anonymize(&source).unwrap();
+        let mut strict = Options::new(SecretKey::new(KEY).unwrap());
+        strict
+            .profile
+            .fail_on_unmapped
+            .insert("00080100".to_owned());
+        let (output, report) = Anonymizer::new(strict).unwrap().anonymize(&source).unwrap();
+        // A profile-mandated dummy sequence is not a descriptor-map miss.
+        assert_eq!(report.dummy_replacements["00080082"], 1);
+        assert_eq!(report.dummy_replacements["00080100"], 1);
+        assert!(report.unmapped_dummy_replacements.is_empty());
         let item = output
             .get(tags::INSTITUTION_CODE_SEQUENCE)
             .unwrap()
@@ -1374,6 +1451,7 @@ mod tests {
             patient_pseudonym,
             date_shift_days: 1,
             time_shift_hours: 1,
+            path: String::new(),
         };
         let mut report = AnonymizationReport::new(
             patient_pseudonym.to_owned(),
