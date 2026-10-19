@@ -60,7 +60,7 @@ For metadata the tool controls, the policy removes or safely replaces the Safe H
 
 The exact Safe Harbor responsibilities outside this result are:
 
-- Pixel Data, recognizable visual features, burned-in annotations, and identifying graphics encoded only in unsupported pixel formats are not inspected.
+- Pixel samples, recognizable visual features, burned-in annotations, and identifying graphics encoded only in unsupported pixel formats are not inspected. The optional gates in [Pixel and disclosure limits](#pixel-and-disclosure-limits) reject input by declared attributes; they do not inspect pixels.
 - The caller controls whether descriptor outputs, safe-private entries, the independently assigned patient scope, and replacement UID assignments contain or encode PHI.
 - The covered entity must satisfy the Safe Harbor re-identification-code controls and must not disclose the key or mapping mechanism.
 - The covered entity retains the required “actual knowledge” assessment that remaining information could not identify an individual.
@@ -149,7 +149,7 @@ The validator is a confidentiality-policy validator, not a complete SOP Class or
 The `core/tests/mammography` suite generates synthetic Digital Mammography X-Ray Image Storage - For Presentation, Breast Tomosynthesis Image Storage with two frames and functional groups, and a synthesized 2D image that references the tomosynthesis instance. All three use JPEG 2000 Lossless encapsulated Pixel Data. The suite processes each object with the `dicom`, `dicom-extended`, and `safe-harbor-metadata` policies. It checks metadata only:
 
 - No placeholder identifier or source UID remains in File Meta Information or in any nested item.
-- Transfer Syntax UID, Image Pixel module attributes, the Basic Offset Table, and the Pixel Data fragments do not change.
+- Transfer Syntax UID, Image Pixel module attributes, the Basic Offset Table, and the Pixel Data fragments do not change. The fixture codestreams contain no comment segments, so the JPEG 2000 comment removal leaves them unchanged.
 - Image Laterality, Laterality, View Position, Presentation Intent Type, Image Type, Frame Type, and Frame Laterality do not change.
 - In Safe Harbor mode, every nested DA, DT, and TM value is generalized to year level, and Patient Age `092Y` becomes `090Y`.
 - The Source Image Sequence, Dimension Organization UID, and File Meta SOP Instance UID stay consistent with the output instances.
@@ -159,7 +159,26 @@ In Safe Harbor mode, the View Code Sequence code values are replaced with `ANONY
 
 ## Pixel and disclosure limits
 
-Pixel Data is copied without decoding or inspection. The validator emits `pixel_data_not_assessed` when Pixel Data is present and `burned_in_annotation_present` when Burned In Annotation is `YES`. DICOM PS3.15 notes that applying an attribute confidentiality profile does not guarantee that the complete information object is de-identified.
+The tool does not decode pixel samples and does not claim the Clean Pixel Data Option. The validator emits the warning `pixel_data_not_assessed` when Pixel Data is present. DICOM PS3.15 notes that applying an attribute confidentiality profile does not guarantee that the complete information object is de-identified.
+
+The tool controls these pixel risks:
+
+| Risk | Control | Validator finding |
+|---|---|---|
+| Burned In Annotation `(0028,0301)` is `YES`, empty, absent, or another value | Optional `require_no_burned_in_annotation` gate. Only the exact value `NO` passes. The anonymizer fails and writes no output. | `burned_in_annotation_not_no` error when the gate is active. Without the gate, `YES` gives the `burned_in_annotation_present` warning. |
+| SOP Class where burned-in text is expected | Optional `sop_class_allowlist` gate. An absent or other SOP Class UID fails, and no output is written. The Media Storage SOP Class UID `(0002,0002)` in the File Meta Information must also equal the SOP Class UID `(0008,0016)`, so a data-set value that differs from the declared file class cannot pass. An empty list disables the gate. | `sop_class_not_allowed` error when the gate is active. |
+| JPEG 2000 comment (COM, `0xFF64`) marker segments | Always active for transfer syntaxes `1.2.840.10008.1.2.4.90`, `.91`, `.92`, `.93`, `.201`, `.202`, and `.203`. The anonymizer removes COM segments from the main header and every tile-part header and decrements each affected `Psot`. Entropy-coded tile data is copied byte for byte, so decoded samples do not change. | `jpeg2000_comment_present` error. |
+| JPEG 2000 codestream that cannot be rewritten safely | The anonymizer fails and writes no output. This includes a codestream without `SOC` and `SIZ`, a JP2 file wrapper, a truncated or out-of-range marker segment or tile-part, a marker code above `0xFF8F` in tile-part data other than a valid `SOP` segment and `EPH` (for example an earlier `EOC`), data after `EOC` other than zero padding, multi-frame Pixel Data without a Basic Offset Table or one fragment per frame (this includes JPEG 2000 Part 2 objects in which several frames share one component-collection codestream), a Basic Offset Table that does not match fragment boundaries, a tile-part comment with a `TLM` segment, and a comment in an object with an Extended Offset Table, Extended Offset Table Lengths, or Encapsulated Pixel Data Value Total Length. | `jpeg2000_codestream_unparseable` error. |
+
+When no COM segment is present, the anonymizer copies the encapsulated Pixel Data unchanged. When it removes a segment, it writes one fragment for each frame, pads odd lengths with one zero byte, and rebuilds the Basic Offset Table if the source had one. The gate result is not written to the De-identification Method or its code sequence.
+
+These pixel risks stay with the caller:
+
+- burned-in text, faces, and other identifying content in the pixel samples, also when Burned In Annotation is `NO`, because that value is a source declaration that the tool cannot verify;
+- comment, application (`APPn`), and other metadata segments in JPEG baseline, JPEG extended, JPEG lossless, JPEG-LS, JPEG XL, and video transfer syntaxes, and any other encapsulated format that is not JPEG 2000;
+- JPEG 2000 data in the entropy-coded tile-part bodies, and markers or boxes that are not COM segments;
+- Pixel Data in nested items, such as icon images, which the profile removes, and pixel data in referenced or external files;
+- the choice of SOP Classes in the allowlist and the review of any input that a gate rejects.
 
 Primary references:
 

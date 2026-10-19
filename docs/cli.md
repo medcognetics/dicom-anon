@@ -57,6 +57,8 @@ Anonymization and validation share these profile arguments:
 | `--fail-on-unmapped TAG` | Fail when a cleaned attribute with this tag gets a dummy value because no descriptor-map entry matched. Dummy values that the profile requires do not fail; see [Conformance and scope](conformance.md#detection-and-fail-closed-control). `dicom-validate` rejects this option with exit status 2. `TAG` is eight hexadecimal digits, for example `00080100`. Repeat for multiple tags. |
 | `--safe-private-allowlist PATH` | Load a JSON array of `{ "creator": STRING, "element_offset": INTEGER }`. |
 | `--uid-map PATH` | Load a JSON object from original UID to replacement UID. Required for Safe Harbor anonymization unless `--generate-uid-map` assigns the missing entries. |
+| `--require-no-burned-in-annotation` | Fail unless Burned In Annotation `(0028,0301)` is exactly `NO`. A `YES`, empty, or absent value fails. |
+| `--allow-sop-class UID` | Permit only the given SOP Class UID; repeat for multiple SOP Classes. An absent or other SOP Class UID fails, and so does a Media Storage SOP Class UID `(0002,0002)` that differs from it. |
 
 The presets enable these options before applying `--enable-option` and `--disable-option`:
 
@@ -67,6 +69,17 @@ The presets enable these options before applying `--enable-option` and `--disabl
 | `safe-harbor-metadata` | `clean-graphics`, `clean-structured-content`, `clean-descriptors`, `retain-modified-dates`, `retain-patient-characteristics` |
 
 Both commands default to `dicom-extended`. The `dicom` and `dicom-extended` presets use the serialized policy value `dicom`; reports distinguish them through `active_options`. `clean-pixel-data` and `clean-recognizable-visual-features` are accepted names but produce unsupported-option errors.
+
+The two pixel-risk gates are off by default and apply to every preset. With a gate active, `dicom-anonymize` exits with status 2 and writes no output for a failing input, and `dicom-validate` reports the error finding `burned_in_annotation_not_no` or `sop_class_not_allowed`. For mammography, a typical gate is:
+
+```console
+dicom-anonymize IN OUT --policy safe-harbor-metadata --patient-scope SUBJ-0001 \
+  --uid-map MAP --key-file KEY --require-no-burned-in-annotation \
+  --allow-sop-class 1.2.840.10008.5.1.4.1.1.1.2 \
+  --allow-sop-class 1.2.840.10008.5.1.4.1.1.13.1.3
+```
+
+For JPEG 2000 transfer syntaxes, `dicom-anonymize` always parses each frame codestream and removes comment (COM) marker segments. It fails with status 2 when it cannot do this safely. `--verbose` reports the number of removed segments as `removed_jpeg2000_comment_segments`. `dicom-validate` reports `jpeg2000_comment_present` or `jpeg2000_codestream_unparseable` as errors. See [Conformance](conformance.md#pixel-and-disclosure-limits) for the exact conditions.
 
 Example descriptor map:
 
@@ -188,7 +201,7 @@ Sanitized text or PDF bytes are the primary output. They are the only stdout con
 
 PDF input defaults to `--pdf-text-mode auto`. Auto mode uses character geometry from usable embedded text and also applies Tesseract to every rendered page so an incomplete text layer cannot hide text stored in an image. `embedded` uses only embedded text and fails when a page has none. `ocr` uses only Tesseract. Every output page is a raster image inside a new PDF document. In auto mode, aggregate detection counts describe both localization passes and can count the same visible span twice.
 
-Repeat `--dicom PATH` to derive source-to-output identifier mappings from related original DICOMs. All selected DICOMs must resolve to one patient scope. Linkage requires the same key and DICOM profile arguments used by `dicom-anonymize`. DICOM profile, mapping, key, patient-scope, UID-root, and re-anonymization options are rejected unless at least one `--dicom` is present. File output defaults to `OUTPUT.association.json`; stdout output requires `--association PATH`. The association JSON never shares stdout with sanitized data.
+Repeat `--dicom PATH` to derive source-to-output identifier mappings from related original DICOMs. All selected DICOMs must resolve to one patient scope. Linkage requires the same key and DICOM profile arguments used by `dicom-anonymize`. DICOM profile, mapping, pixel-risk gate (`--require-no-burned-in-annotation`, `--allow-sop-class`), key, patient-scope, UID-root, and re-anonymization options are rejected unless at least one `--dicom` is present. File output defaults to `OUTPUT.association.json`; stdout output requires `--association PATH`. The association JSON never shares stdout with sanitized data.
 
 `OUTPUT`, `--report`, and `--association` cannot replace a DICOM, key file, descriptor map, safe-private allowlist, UID map, or file inventoried by an installed bundle's `asset-manifest.json`. Required model paths and resolved ONNX Runtime and PDFium libraries receive the same protection when no installed manifest is present. The sidecars must also use distinct paths and cannot replace the primary document output or source report. Existing paths and parent directories are canonicalized before comparison so relative and symbolic-link aliases receive the same check.
 

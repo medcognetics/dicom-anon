@@ -10,6 +10,7 @@ use dicom_object::mem::{InMemDicomObject, InMemElement};
 use dicom_object::DefaultDicomObject;
 use serde::{Deserialize, Serialize};
 
+use crate::pixel::{self, PixelGateViolation};
 use crate::profile::{
     profile_basic_action, profile_option_action, profile_rule_for, safe_private_tags,
     DeidentificationPolicy, DicomOption, ProfileAction, ProfileConfiguration, PROFILE_NAME,
@@ -156,8 +157,10 @@ pub fn validate_object_with_options(
             "pixel data was not inspected for burned-in identifying information; the Clean Pixel Data Option is not claimed",
         );
     }
-    if element_text(object, tags::BURNED_IN_ANNOTATION)
-        .is_some_and(|value| value.eq_ignore_ascii_case("YES"))
+    validate_pixel_gates(object, &options.profile, &mut report);
+    if !options.profile.require_no_burned_in_annotation
+        && element_text(object, tags::BURNED_IN_ANNOTATION)
+            .is_some_and(|value| value.eq_ignore_ascii_case("YES"))
     {
         push_finding(
             &mut report,
@@ -207,6 +210,54 @@ pub fn validate_object_with_options(
         .iter()
         .any(|finding| finding.severity == Severity::Error);
     Ok(report)
+}
+
+fn validate_pixel_gates(
+    object: &DefaultDicomObject,
+    profile: &ProfileConfiguration,
+    report: &mut ValidationReport,
+) {
+    for violation in pixel::gate_violations(
+        object,
+        Some(object.meta().media_storage_sop_class_uid()),
+        profile,
+    ) {
+        let (code, tag, message) = match violation {
+            PixelGateViolation::BurnedInAnnotationNotNo => (
+                "burned_in_annotation_not_no",
+                tags::BURNED_IN_ANNOTATION,
+                "Burned In Annotation is not NO; the configured gate requires NO",
+            ),
+            PixelGateViolation::SopClassNotAllowed => (
+                "sop_class_not_allowed",
+                tags::SOP_CLASS_UID,
+                "SOP Class UID is not in the configured SOP Class allowlist",
+            ),
+        };
+        push_finding(report, Severity::Error, code, Some(tag), "root", message);
+    }
+    if !pixel::is_jpeg2000(object.meta().transfer_syntax()) {
+        return;
+    }
+    let finding = match pixel::count_jpeg2000_comments(object) {
+        Ok(0) => return,
+        Ok(_) => (
+            "jpeg2000_comment_present",
+            "JPEG 2000 Pixel Data contains comment (COM) marker segments",
+        ),
+        Err(_) => (
+            "jpeg2000_codestream_unparseable",
+            "JPEG 2000 Pixel Data could not be parsed for comment (COM) marker segments",
+        ),
+    };
+    push_finding(
+        report,
+        Severity::Error,
+        finding.0,
+        Some(tags::PIXEL_DATA),
+        "root",
+        finding.1,
+    );
 }
 
 fn require_method_description(

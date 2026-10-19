@@ -2,7 +2,9 @@
 //!
 //! The objects use placeholder text and fixed `2.25` UUID-derived UIDs only. Every identifier
 //! value contains [`PLACEHOLDER`] so that a recursive output scan can find any retained value.
-//! The JPEG 2000 Pixel Data fragments are opaque synthetic bytes; no test decodes them.
+//! The JPEG 2000 Pixel Data fragments are structurally valid codestreams with synthetic tile
+//! data and no comment segments, so the anonymizer's codestream scan accepts them. No test
+//! decodes them.
 
 use dicom_core::value::{DataSetSequence, PixelFragmentSequence};
 use dicom_core::{DataElement, PrimitiveValue, Tag, VR};
@@ -242,7 +244,8 @@ pub fn tomosynthesis() -> DefaultDicomObject {
     pixel_module(&mut object, Some(2));
     // Frame 2 spans two fragments, so the Basic Offset Table holds the frame boundaries.
     let first = frame(1, 40);
-    let second = [frame(2, 24), frame(3, 16)];
+    let second = frame(2, 40);
+    let second = [second[..24].to_vec(), second[24..].to_vec()];
     let first_frame_length = u32::try_from(first.len() + 8).unwrap();
     object.put(pixel_data(
         vec![0, first_frame_length],
@@ -478,10 +481,20 @@ fn pixel_module(object: &mut InMemDicomObject, frames: Option<u32>) {
     }
 }
 
-/// Opaque, even-length fragment that starts with a JPEG 2000 SOC and SIZ marker.
+/// Even-length JPEG 2000 codestream: SOC, a short SIZ segment, one tile-part, and EOC.
+///
+/// The tile data bytes stay below 0x80, so they contain no marker codes.
 fn frame(seed: u8, length: usize) -> Vec<u8> {
-    let mut bytes = vec![0xFF, 0x4F, 0xFF, 0x51];
-    bytes.extend((0..length - 4).map(|index| seed.wrapping_mul(31).wrapping_add(index as u8)));
+    const OVERHEAD: usize = 2 + 6 + 12 + 2 + 2;
+    let body = length - OVERHEAD;
+    let psot = u32::try_from(12 + 2 + body).unwrap();
+    let mut bytes = vec![0xFF, 0x4F, 0xFF, 0x51, 0x00, 0x04, seed, 0x00];
+    bytes.extend_from_slice(&[0xFF, 0x90, 0x00, 0x0A, 0x00, 0x00]);
+    bytes.extend_from_slice(&psot.to_be_bytes());
+    bytes.extend_from_slice(&[0x00, 0x01, 0xFF, 0x93]);
+    bytes.extend((0..body).map(|index| seed.wrapping_mul(31).wrapping_add(index as u8) & 0x7F));
+    bytes.extend_from_slice(&[0xFF, 0xD9]);
+    assert_eq!(bytes.len(), length);
     bytes
 }
 

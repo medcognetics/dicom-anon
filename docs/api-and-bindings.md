@@ -135,6 +135,8 @@ configuration_json = json.dumps({
     "safe_private_allowlist": [],
     "uid_mappings": {},
     "fail_on_unmapped": [],
+    "require_no_burned_in_annotation": False,
+    "sop_class_allowlist": [],
 })
 conformant, validation_json = dicom_anon_python.validate(
     output, configuration_json
@@ -144,7 +146,7 @@ exact, exact_json = dicom_anon_python.validate_with_source(
 )
 ```
 
-The configuration JSON above is the explicit form of the `dicom-extended` preset. `fail_on_unmapped` lists canonical eight-digit tags that must not get a dummy value because no `descriptor_mappings` entry matched; a match is an error during anonymization. Validation ignores the field. To use a shipped versioned descriptor map, copy its `mappings` member into `descriptor_mappings`. The report JSON includes the per-tag `dummy_replacements` and `unmapped_dummy_replacements` counts. Omitting `configuration_json` selects the same options. Use `"policy": "dicom"` with an empty `options` array for the option-free Basic Profile.
+The configuration JSON above is the explicit form of the `dicom-extended` preset. `fail_on_unmapped` lists canonical eight-digit tags that must not get a dummy value because no `descriptor_mappings` entry matched; a match is an error during anonymization. Validation ignores the field. To use a shipped versioned descriptor map, copy its `mappings` member into `descriptor_mappings`. The report JSON includes the per-tag `dummy_replacements` and `unmapped_dummy_replacements` counts. Omitting `configuration_json` selects the same options. Use `"policy": "dicom"` with an empty `options` array for the option-free Basic Profile. Set `require_no_burned_in_annotation` to `true` to reject input unless Burned In Annotation is `NO`. Put SOP Class UIDs in `sop_class_allowlist` to reject other SOP Classes; an empty list permits all SOP Classes. Both fields are optional and default to off. The same fields apply to the Rust `ProfileConfiguration` and to the Node.js binding. The function signatures do not change.
 
 `required_uids(data, key, patient_scope, configuration_json)` returns a JSON array of `{path, uid}` objects. `anonymize_with_generated_uid_map(data, key, patient_scope, configuration_json)` returns `(output_bytes, report_json, uid_map_json)`. Pass the returned map as `uid_mappings` in the next configuration to keep one study consistent.
 
