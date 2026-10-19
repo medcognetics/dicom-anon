@@ -79,7 +79,13 @@ dicom-anonymize IN OUT --policy safe-harbor-metadata --patient-scope SUBJ-0001 \
   --allow-sop-class 1.2.840.10008.5.1.4.1.1.13.1.3
 ```
 
-For JPEG 2000 transfer syntaxes, `dicom-anonymize` always parses each frame codestream and removes comment (COM) marker segments. It fails with status 2 when it cannot do this safely. `--verbose` reports the number of removed segments as `removed_jpeg2000_comment_segments`. `dicom-validate` reports `jpeg2000_comment_present` or `jpeg2000_codestream_unparseable` as errors. See [Conformance](conformance.md#pixel-and-disclosure-limits) for the exact conditions.
+For JPEG 2000 transfer syntaxes, `dicom-anonymize` always parses each frame codestream and removes comment (COM) marker segments. It fails with status 2 when it cannot do this safely. `--verbose` reports the number of removed segments as `removed_jpeg2000_comment_segments`. `dicom-validate` reports `jpeg2000_comment_present` or `jpeg2000_codestream_unparseable` as errors.
+
+For JPEG transfer syntaxes `1.2.840.10008.1.2.4.50`, `.51`, `.57`, and `.70`, and JPEG-LS transfer syntaxes `.80` and `.81`, `dicom-anonymize` always parses each frame codestream and removes comment (COM) and application (APPn) marker segments. It keeps an APP14 `Adobe` segment only when a three- or four-component frame needs its color transform flag. It fails with status 2 when it cannot do this safely, and for input with a retired JPEG transfer syntax (`.52` to `.56` and `.58` to `.66`). `--verbose` reports `removed_jpeg_comment_segments` and `removed_jpeg_application_segments`. `dicom-validate` reports `jpeg_comment_present`, `jpeg_application_segment_present`, or `jpeg_codestream_unparseable` as errors.
+
+When `(7FE0,0003)` does not match the output fragments, `dicom-anonymize` replaces it. When Pixel Data is absent or native, or when the padding cannot be determined, it removes it. For every input, `dicom-validate` reports `encapsulated_total_length_mismatch` as an error when `(7FE0,0003)` is present and does not match the encapsulated fragments.
+
+See [Conformance](conformance.md#pixel-and-disclosure-limits) for the exact conditions.
 
 Example descriptor map:
 

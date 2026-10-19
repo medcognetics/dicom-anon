@@ -134,9 +134,9 @@ configuration_json = json.dumps({
     "descriptor_mappings": {},
     "safe_private_allowlist": [],
     "uid_mappings": {},
-    "fail_on_unmapped": [],
     "require_no_burned_in_annotation": False,
     "sop_class_allowlist": [],
+    "fail_on_unmapped": [],
 })
 conformant, validation_json = dicom_anon_python.validate(
     output, configuration_json

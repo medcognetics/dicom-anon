@@ -27,6 +27,8 @@ pub fn anonymize_reader(
 ) -> Result<(Vec<u8>, AnonymizationReport)> {
     let source = read_dicom(reader)?;
     let (output, report) = anonymizer.anonymize(&source)?;
+    // The encoder copies each element while it writes. Release the source first.
+    drop(source);
     let mut bytes = Vec::new();
     write_dicom(&output, &mut bytes)?;
     Ok((bytes, report))
@@ -45,6 +47,8 @@ pub fn anonymize_file(
     let source = File::open(input).map_err(|source| io_error(input, source))?;
     let object = read_dicom(source)?;
     let (anonymized, report) = anonymizer.anonymize(&object)?;
+    // The encoder copies each element while it writes. Release the source first.
+    drop(object);
 
     let parent = output.parent().unwrap_or_else(|| Path::new("."));
     let mut temporary =

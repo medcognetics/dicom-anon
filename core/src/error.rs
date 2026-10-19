@@ -124,4 +124,7 @@ pub enum Error {
     /// JPEG 2000 comment segments could not be removed safely.
     #[error("cannot safely remove JPEG 2000 comment segments: {0}")]
     UnsupportedJpeg2000(String),
+    /// JPEG or JPEG-LS comment and application segments could not be removed safely.
+    #[error("cannot safely remove JPEG comment and application segments: {0}")]
+    UnsupportedJpeg(String),
 }

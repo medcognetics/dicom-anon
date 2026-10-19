@@ -88,15 +88,21 @@ pub struct AnonymizationReport {
     pub shifted_temporal_attributes: u64,
     /// Temporal attributes generalized to year-level Safe Harbor values.
     pub generalized_temporal_attributes: u64,
+    /// JPEG 2000 comment (COM) marker segments removed from Pixel Data.
+    #[serde(default)]
+    pub removed_jpeg2000_comment_segments: u64,
+    /// JPEG and JPEG-LS comment (COM) marker segments removed from Pixel Data.
+    #[serde(default)]
+    pub removed_jpeg_comment_segments: u64,
+    /// JPEG and JPEG-LS application (APPn) marker segments removed from Pixel Data.
+    #[serde(default)]
+    pub removed_jpeg_application_segments: u64,
     /// Dummy-value replacements by canonical hexadecimal tag, at all nesting levels.
     #[serde(default)]
     pub dummy_replacements: BTreeMap<String, u64>,
     /// Subset of `dummy_replacements` where a clean action found no descriptor-map entry.
     #[serde(default)]
     pub unmapped_dummy_replacements: BTreeMap<String, u64>,
-    /// JPEG 2000 comment (COM) marker segments removed from Pixel Data.
-    #[serde(default)]
-    pub removed_jpeg2000_comment_segments: u64,
 }
 
 impl AnonymizationReport {
@@ -120,9 +126,11 @@ impl AnonymizationReport {
             remapped_uid_attributes: 0,
             shifted_temporal_attributes: 0,
             generalized_temporal_attributes: 0,
+            removed_jpeg2000_comment_segments: 0,
+            removed_jpeg_comment_segments: 0,
+            removed_jpeg_application_segments: 0,
             dummy_replacements: BTreeMap::new(),
             unmapped_dummy_replacements: BTreeMap::new(),
-            removed_jpeg2000_comment_segments: 0,
         }
     }
 }
@@ -210,11 +218,9 @@ impl Anonymizer {
             &self.options.profile,
         )?;
         let transfer_syntax = source.meta().transfer_syntax().trim_end_matches('\0');
-        let jpeg2000 = if pixel::is_jpeg2000(transfer_syntax) {
-            Some(pixel::clean_jpeg2000(source)?)
-        } else {
-            None
-        };
+        let codestream = pixel::Codestream::for_transfer_syntax(transfer_syntax)
+            .map(|kind| pixel::clean_codestreams(source, kind).map(|cleaning| (kind, cleaning)))
+            .transpose()?;
 
         let patient_scope = self.patient_scope(source)?;
         let patient_pseudonym = self.options.secret.patient_id(&patient_scope);
@@ -241,14 +247,25 @@ impl Anonymizer {
             uids: &uids,
         };
 
-        let mut output = self.process_dataset(source, &context, &mut report)?;
-        if let Some(cleaning) = jpeg2000 {
-            report.removed_jpeg2000_comment_segments = cleaning.removed_segments;
-            if let Some(replacement) = cleaning.replacement {
-                if output.get(tags::PIXEL_DATA).is_some() {
-                    output.put(replacement);
+        let replacements = match codestream {
+            Some((kind, cleaning)) => {
+                let removed = cleaning.removed;
+                if kind == pixel::Codestream::Jpeg2000 {
+                    report.removed_jpeg2000_comment_segments = removed.comments;
+                } else {
+                    report.removed_jpeg_comment_segments = removed.comments;
+                    report.removed_jpeg_application_segments = removed.applications;
                 }
+                cleaning.replacement
             }
+            None => Vec::new(),
+        };
+        let mut output = self.process_dataset(source, &context, &mut report, replacements)?;
+        // A source value that profile processing kept can be stale or wrong.
+        match pixel::repair_total_length(&mut output, transfer_syntax) {
+            Some(pixel::TotalLengthRepair::Replaced) => report.replaced_attributes += 1,
+            Some(pixel::TotalLengthRepair::Removed) => report.removed_attributes += 1,
+            None => {}
         }
         add_deidentification_markers(&mut output, &self.options.profile, &patient_pseudonym);
         let meta = FileMetaTableBuilder::new()
@@ -283,11 +300,17 @@ impl Anonymizer {
         Err(Error::MissingPatientScope)
     }
 
+    /// Process one data set.
+    ///
+    /// Each element of `replacements` replaces the element with the same tag when profile
+    /// processing keeps that element. A kept element is not copied from the source, so peak
+    /// memory does not include a third copy of rewritten Pixel Data.
     fn process_dataset(
         &self,
         source: &InMemDicomObject,
         context: &Context<'_>,
         report: &mut AnonymizationReport,
+        mut replacements: Vec<InMemElement>,
     ) -> Result<InMemDicomObject> {
         let mut output = InMemDicomObject::new_empty();
         let mut date_adjustments = Vec::new();
@@ -339,6 +362,20 @@ impl Anonymizer {
                 {
                     date_adjustments.push(adjustment);
                 }
+            }
+            if let Some(index) = replacements
+                .iter()
+                .position(|replacement| replacement.tag() == tag)
+            {
+                let replacement = replacements.swap_remove(index);
+                if action == ProfileAction::Keep
+                    || self
+                        .process_element(element, action, context, report)?
+                        .is_some()
+                {
+                    output.put(replacement);
+                }
+                continue;
             }
             if let Some(processed) = self.process_element(element, action, context, report)? {
                 output.put(processed);
@@ -579,7 +616,12 @@ impl Anonymizer {
             .iter()
             .enumerate()
             .map(|(index, item)| {
-                self.process_dataset(item, &context.item(element.tag(), index), report)
+                self.process_dataset(
+                    item,
+                    &context.item(element.tag(), index),
+                    report,
+                    Vec::new(),
+                )
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(InMemElement::new(
@@ -1050,11 +1092,15 @@ mod tests {
             "dummy_replacements",
             "unmapped_dummy_replacements",
             "removed_jpeg2000_comment_segments",
+            "removed_jpeg_comment_segments",
+            "removed_jpeg_application_segments",
         ] {
             fields.remove(added).unwrap();
         }
         let parsed: AnonymizationReport = serde_json::from_value(json).unwrap();
         assert_eq!(parsed.removed_jpeg2000_comment_segments, 0);
+        assert_eq!(parsed.removed_jpeg_comment_segments, 0);
+        assert_eq!(parsed.removed_jpeg_application_segments, 0);
         assert!(parsed.dummy_replacements.is_empty());
     }
 
