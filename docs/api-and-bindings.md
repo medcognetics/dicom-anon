@@ -119,6 +119,7 @@ configuration_json = json.dumps({
     "uid_mappings": {},
     "require_no_burned_in_annotation": False,
     "sop_class_allowlist": [],
+    "fail_on_unmapped": [],
 })
 conformant, validation_json = dicom_anon_python.validate(
     output, configuration_json
@@ -128,7 +129,7 @@ exact, exact_json = dicom_anon_python.validate_with_source(
 )
 ```
 
-The configuration JSON above is the explicit form of the `dicom-extended` preset. Omitting `configuration_json` selects the same options. Use `"policy": "dicom"` with an empty `options` array for the option-free Basic Profile. Set `require_no_burned_in_annotation` to `true` to reject input unless Burned In Annotation is `NO`. Put SOP Class UIDs in `sop_class_allowlist` to reject other SOP Classes; an empty list permits all SOP Classes. Both fields are optional and default to off. The same fields apply to the Rust `ProfileConfiguration` and to the Node.js binding. The function signatures do not change.
+The configuration JSON above is the explicit form of the `dicom-extended` preset. `fail_on_unmapped` lists canonical eight-digit tags that must not get a dummy value because no `descriptor_mappings` entry matched; a match is an error during anonymization. Validation ignores the field. To use a shipped versioned descriptor map, copy its `mappings` member into `descriptor_mappings`. The report JSON includes the per-tag `dummy_replacements` and `unmapped_dummy_replacements` counts. Omitting `configuration_json` selects the same options. Use `"policy": "dicom"` with an empty `options` array for the option-free Basic Profile. Set `require_no_burned_in_annotation` to `true` to reject input unless Burned In Annotation is `NO`. Put SOP Class UIDs in `sop_class_allowlist` to reject other SOP Classes; an empty list permits all SOP Classes. Both fields are optional and default to off. The same fields apply to the Rust `ProfileConfiguration` and to the Node.js binding. The function signatures do not change.
 
 `anonymize` accepts optional `patient_scope` and `configuration_json` arguments. `validate` accepts optional configuration JSON. `validate_with_source` is a separate function so candidate-only `validate` retains its original meaning. Errors become `ValueError`. The JSON fields match the Rust report models.
 
