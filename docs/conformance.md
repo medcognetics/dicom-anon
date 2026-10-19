@@ -68,6 +68,68 @@ The exact Safe Harbor responsibilities outside this result are:
 
 These are scope boundaries, not relaxed transformations of metadata the policy processes.
 
+### Text attributes outside Table E.1-1
+
+This section applies to metadata only. Pixel Data is not assessed.
+
+In Safe Harbor metadata mode, an attribute that Table E.1-1 does not list and that has VR AE, LO, LT, PN, SH, ST, UC, UR, or UT receives the `C` action at every nesting level. An exact descriptor-map entry gives the output value. If no entry matches, the value becomes `ANONYMIZED` (`ANON^ANON` for PN). An unlisted UI attribute is remapped through the UID map. CS, numeric, and binary attributes outside the table are kept. The `dicom` and `dicom-extended` presets keep all of these attributes.
+
+The table below lists the attributes in mammography and breast tomosynthesis objects that this rule changes when no descriptor-map entry matches. It is not a complete list. Any other attribute with one of the VRs above is changed in the same way.
+
+| Attribute | Tag | VR | Inference effect without a map entry |
+|---|---|---|---|
+| Code Value | `(0008,0100)` | SH | The view, view modifier, and anatomic region code becomes `ANONYMIZED`. The coded entry is not valid, and View Code Sequence no longer identifies CC, MLO, or another view. |
+| Coding Scheme Designator | `(0008,0102)` | SH | The coding scheme is lost. A consumer cannot interpret any code. |
+| Coding Scheme Version | `(0008,0103)` | SH | The scheme version is lost. |
+| Code Meaning | `(0008,0104)` | LO | The human-readable concept is lost. |
+| Manufacturer | `(0008,0070)` | LO | Vendor-specific preprocessing cannot select the vendor. |
+| Manufacturer's Model Name | `(0008,1090)` | LO | Model-specific preprocessing cannot select the model. |
+| Software Versions | `(0018,1020)` | LO | Software-dependent processing cannot select the version. |
+| Acquisition Device Processing Code | `(0018,1401)` | LO | The vendor processing code is lost. |
+| Detector Description | `(0018,7006)` | LT | The detector description is lost. |
+| Paddle Description | `(0018,11A4)` | LO | The compression paddle description is lost. |
+| Window Center & Width Explanation | `(0028,1055)` | LO | The names of the VOI windows are lost. The window values are kept. |
+| LUT Explanation | `(0028,3003)` | LO | The name of the VOI LUT is lost. The LUT data is kept. |
+
+Code Value, Coding Scheme Designator, and Code Meaning are changed in every code sequence that is kept, which includes View Code Sequence `(0054,0220)`, View Modifier Code Sequence `(0054,0222)`, and Anatomic Region Sequence `(0008,2218)`, also when they are nested in functional group sequences.
+
+#### Shipped breast-imaging descriptor map
+
+`descriptor-maps/breast-imaging-ps3.16-2026d.json` keeps the standard coded values of these DICOM PS3.16 2026d context groups:
+
+- CID 4013 Anatomic Region for Mammography;
+- CID 4014 View for Mammography;
+- CID 4015 View Modifier for Mammography;
+- the Breast row of CID 4031 Common Anatomic Region.
+
+Each entry maps a value to itself. The map contains the SCT Code Value, the SRT value from the SNOMED-RT ID column of the same row, the exact Code Meaning text, and the designators `DCM`, `SCT`, and `SRT`. No row of these context groups uses the DCM scheme in 2026d. `tools/generate_breast_descriptor_map.py` regenerates the file and fails if the published standard is not the 2026d edition. Do not edit the file by hand.
+
+A descriptor-map entry applies to its tag at every nesting level. Thus a value in the shipped map is also kept when it occurs in a different code sequence. All values in the map are standard terminology, not identifiers. A Code Meaning from an earlier edition of the standard, for example a different capitalization, does not match the map. Add such values in a separate reviewed map. Device attributes such as Manufacturer are not in the shipped map, because their values are site-specific. Review and add them in a separate map.
+
+#### Detection and fail-closed control
+
+The anonymization report gives two per-tag counts at every nesting level:
+
+- `dummy_replacements`: all dummy values, including dummy values that Table E.1-1 or an option column requires;
+- `unmapped_dummy_replacements`: dummy values written because a `C` action found no descriptor-map entry.
+
+`--fail-on-unmapped TAG`, or the `fail_on_unmapped` configuration field, stops the run when an attribute with that tag gets a dummy value because no descriptor-map entry matched. The command writes no output and exits with status 2. The error gives the tag and the sequence path, for example `(0054,0220)[0]/(0054,0222)[0]/(0008,0100)`. It does not give the value. Dummy values that the profile requires do not stop the run, because the descriptor map does not apply to them. They are counted only in `dummy_replacements`. These include:
+
+- attributes with the `D` action, and the items of a `D` sequence, such as Institution Code Sequence `(0008,0082)`;
+- the items of a sequence that Clean Descriptors or Clean Structured Content replaces as a whole, such as Acquisition Context Sequence `(0040,0555)` and the diagnosis and reason code sequences.
+
+Use `dummy_replacements` to detect a change to coded content in these sequences.
+
+The guard applies only to anonymization. `dicom-validate` rejects `--fail-on-unmapped`. Library and binding validation ignore `fail_on_unmapped`, because a dummy value in a candidate does not show whether a descriptor-map miss or a profile requirement produced it.
+
+The descriptor map and the guard apply to a tag at every nesting level, not to a sequence path. Thus `--fail-on-unmapped 00080100` also stops the run for any other kept code sequence whose codes are not in a map. MG and DBT objects often contain such sequences, for example Purpose of Reference Code Sequence `(0040,A170)` in Source Image Sequence `(0008,2112)`, Derivation Code Sequence `(0008,9215)`, and Partial View Code Sequence `(0028,1352)`. The shipped map does not contain these codes.
+
+For an inference pipeline:
+
+1. Run Safe Harbor anonymization with the shipped map and without the guard on a representative synthetic or approved sample. Read `unmapped_dummy_replacements` in the reports.
+2. For each other code sequence that the sample contains, add a reviewed map with the standard codes of its context group.
+3. Then use `--fail-on-unmapped` for `00080100`, `00080102`, and `00080104`. Add a reviewed map and `--fail-on-unmapped` entries for the device attributes that the model uses.
+
 ## Inserted attributes
 
 Every output contains Patient Identity Removed `(0012,0062)`=`YES`; De-identification Method `(0012,0063)`; De-identification Method Code Sequence `(0012,0064)` with DCM `113100` and exactly one CID 7050 code per active implemented option; and Longitudinal Temporal Information Modified `(0028,0303)`=`MODIFIED`, `UNMODIFIED`, or `REMOVED`. Safe Harbor output also contains the keyed Clinical Trial Subject ID.
@@ -81,6 +143,19 @@ Candidate-only validation uses an explicit caller configuration rather than trus
 Source-aware validation reconstructs the exact expected output from the source, key, patient scope, profile, descriptor map, safe-private registry, and UID map, then compares every nested attribute path. Findings and errors contain only path, tag, rule category, and mismatch category. They never contain original values, key material, patient scope, or mapping contents. Cross-file consistency remains a caller-level batch check.
 
 The validator is a confidentiality-policy validator, not a complete SOP Class or IOD validator. A passing report does not establish that Type 1 and Type 2 requirements for a particular SOP Class are satisfied.
+
+## Verified mammography object types
+
+The `core/tests/mammography` suite generates synthetic Digital Mammography X-Ray Image Storage - For Presentation, Breast Tomosynthesis Image Storage with two frames and functional groups, and a synthesized 2D image that references the tomosynthesis instance. All three use JPEG 2000 Lossless encapsulated Pixel Data. The suite processes each object with the `dicom`, `dicom-extended`, and `safe-harbor-metadata` policies. It checks metadata only:
+
+- No placeholder identifier or source UID remains in File Meta Information or in any nested item.
+- Transfer Syntax UID, Image Pixel module attributes, the Basic Offset Table, and the Pixel Data fragments do not change.
+- Image Laterality, Laterality, View Position, Presentation Intent Type, Image Type, Frame Type, and Frame Laterality do not change.
+- In Safe Harbor mode, every nested DA, DT, and TM value is generalized to year level, and Patient Age `092Y` becomes `090Y`.
+- The Source Image Sequence, Dimension Organization UID, and File Meta SOP Instance UID stay consistent with the output instances.
+- Source-aware validation passes through the library and through `dicom-validate`.
+
+In Safe Harbor mode, the View Code Sequence code values are replaced with `ANONYMIZED` at this revision. Issue #20 tracks this behavior.
 
 ## Pixel and disclosure limits
 
@@ -115,5 +190,9 @@ Primary references:
 - [DICOM PS3.15 temporal options](https://dicom.nema.org/medical/dicom/current/output/chtml/part15/sect_e.3.6.html)
 - [DICOM PS3.15 Clean Descriptors](https://dicom.nema.org/medical/dicom/current/output/chtml/part15/sect_e.3.5.html)
 - [DICOM PS3.15 Retain Safe Private](https://dicom.nema.org/medical/dicom/current/output/chtml/part15/sect_e.3.10.html)
+- [CID 4013 Anatomic Region for Mammography](https://dicom.nema.org/medical/dicom/current/output/chtml/part16/sect_CID_4013.html)
+- [CID 4014 View for Mammography](https://dicom.nema.org/medical/dicom/current/output/chtml/part16/sect_CID_4014.html)
+- [CID 4015 View Modifier for Mammography](https://dicom.nema.org/medical/dicom/current/output/chtml/part16/sect_CID_4015.html)
+- [CID 4031 Common Anatomic Region](https://dicom.nema.org/medical/dicom/current/output/chtml/part16/sect_CID_4031.html)
 - [CID 7050 De-identification Method](https://dicom.nema.org/medical/dicom/current/output/chtml/part16/sect_CID_7050.html)
 - [HHS guidance on de-identification](https://www.hhs.gov/hipaa/for-professionals/special-topics/de-identification/index.html)
