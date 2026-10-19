@@ -7,7 +7,10 @@ use std::process::ExitCode;
 
 use clap::{ArgAction, Parser};
 use dicom_anon::cli_common::{load_key, ColorMode, ProfileArgs, Styles};
-use dicom_anon::{anonymize_file, anonymize_reader, Anonymizer, Options};
+use dicom_anon::{
+    anonymize_file, anonymize_reader, read_dicom, write_dicom, AnonymizationReport, Anonymizer,
+    DefaultDicomObject, Options,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -37,9 +40,18 @@ struct Args {
     /// Stable scope for inputs with no usable Patient ID or Patient Name.
     #[arg(long, value_name = "SCOPE")]
     patient_scope: Option<String>,
-    /// Numeric UID root for deterministic replacement UIDs.
+    /// Numeric UID root for keyed or generated replacement UIDs.
     #[arg(long, default_value = "2.25")]
     uid_root: String,
+    /// Print each source UID that the profile replaces, with its attribute path, as JSON and write no DICOM output.
+    #[arg(
+        long,
+        conflicts_with_all = ["output", "in_place", "generate_uid_map", "verbose"]
+    )]
+    list_required_uids: bool,
+    /// Assign missing Safe Harbor UID replacements at random and write the complete UID map to PATH before the DICOM output.
+    #[arg(long, value_name = "PATH", conflicts_with = "in_place")]
+    generate_uid_map: Option<PathBuf>,
     /// Permit reprocessing input marked Patient Identity Removed=YES.
     #[arg(long)]
     allow_reanonymize: bool,
@@ -60,7 +72,8 @@ struct Args {
 fn main() -> ExitCode {
     let args = Args::parse();
     match run(&args) {
-        Ok(report) => {
+        Ok(None) => ExitCode::SUCCESS,
+        Ok(Some(report)) => {
             if args.verbose && !args.quiet {
                 match serde_json::to_string_pretty(&report) {
                     Ok(json) => eprintln!("{json}"),
@@ -80,7 +93,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(args: &Args) -> Result<dicom_anon::AnonymizationReport, String> {
+fn run(args: &Args) -> Result<Option<AnonymizationReport>, String> {
     let secret = load_key(args.key_file.clone(), &args.key_env)?;
     let mut options = Options::new(secret);
     options.profile = args.profile.load()?;
@@ -89,17 +102,35 @@ fn run(args: &Args) -> Result<dicom_anon::AnonymizationReport, String> {
     options.reject_already_deidentified = !args.allow_reanonymize;
     let anonymizer = Anonymizer::new(options).map_err(|error| error.to_string())?;
 
+    if args.list_required_uids {
+        let source = read_source(&args.input)?;
+        let required = anonymizer
+            .required_uids(&source)
+            .map_err(|error| error.to_string())?;
+        let json = serde_json::to_string_pretty(&serde_json::json!({ "required_uids": required }))
+            .map_err(|error| format!("cannot serialize required UIDs: {error}"))?;
+        writeln!(io::stdout().lock(), "{json}")
+            .map_err(|error| format!("cannot write stdout: {error}"))?;
+        return Ok(None);
+    }
+    if let Some(map_path) = &args.generate_uid_map {
+        return generate_uid_map(args, &anonymizer, map_path).map(Some);
+    }
+    anonymize(args, &anonymizer).map(Some)
+}
+
+fn anonymize(args: &Args, anonymizer: &Anonymizer) -> Result<AnonymizationReport, String> {
     if args.in_place {
         if args.input == "-" {
             return Err("--in-place requires a file input".to_owned());
         }
-        return anonymize_file(&anonymizer, &args.input, &args.input)
+        return anonymize_file(anonymizer, &args.input, &args.input)
             .map_err(|error| error.to_string());
     }
 
     let output = args.output.as_deref().unwrap_or("-");
     if args.input != "-" && output != "-" {
-        return anonymize_file(&anonymizer, &args.input, output).map_err(|error| error.to_string());
+        return anonymize_file(anonymizer, &args.input, output).map_err(|error| error.to_string());
     }
 
     let mut input: Box<dyn Read> = if args.input == "-" {
@@ -111,22 +142,119 @@ fn run(args: &Args) -> Result<dicom_anon::AnonymizationReport, String> {
         )
     };
     let (bytes, report) =
-        anonymize_reader(&anonymizer, &mut input).map_err(|error| error.to_string())?;
-    if output == "-" {
-        let mut stdout = io::stdout().lock();
-        stdout
-            .write_all(&bytes)
-            .map_err(|error| format!("cannot write stdout: {error}"))?;
-        stdout
-            .flush()
-            .map_err(|error| format!("cannot flush stdout: {error}"))?;
-    } else {
-        write_atomic(Path::new(output), &bytes)?;
-    }
+        anonymize_reader(anonymizer, &mut input).map_err(|error| error.to_string())?;
+    write_output(output, &bytes)?;
     Ok(report)
 }
 
-fn write_atomic(output: &Path, bytes: &[u8]) -> Result<(), String> {
+/// Write the complete map first so that no output exists without its map entries.
+fn generate_uid_map(
+    args: &Args,
+    anonymizer: &Anonymizer,
+    map_path: &Path,
+) -> Result<AnonymizationReport, String> {
+    let output = args.output.as_deref().unwrap_or("-");
+    let protected = [
+        (args.input != "-").then(|| PathBuf::from(&args.input)),
+        (output != "-").then(|| PathBuf::from(output)),
+        args.key_file.clone(),
+        args.profile.safe_private_allowlist.clone(),
+    ];
+    if protected
+        .iter()
+        .flatten()
+        .chain(&args.profile.descriptor_map)
+        .any(|path| same_path(map_path, path))
+    {
+        return Err(
+            "--generate-uid-map must not name the input, output, key, descriptor-map, or safe-private allowlist file"
+                .to_owned(),
+        );
+    }
+    let map_exists = std::fs::symlink_metadata(map_path).is_ok();
+    if map_exists
+        && !args
+            .profile
+            .uid_map
+            .as_deref()
+            .is_some_and(|loaded| same_path(map_path, loaded))
+    {
+        return Err(
+            "--generate-uid-map names an existing file; pass the same file as --uid-map to extend it"
+                .to_owned(),
+        );
+    }
+    let source = read_source(&args.input)?;
+    let (anonymized, report, map) = anonymizer
+        .anonymize_with_generated_uid_map(&source)
+        .map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    write_dicom(&anonymized, &mut bytes).map_err(|error| error.to_string())?;
+    let mut json = serde_json::to_vec_pretty(&map)
+        .map_err(|error| format!("cannot serialize UID map: {error}"))?;
+    json.push(b'\n');
+    // Replace the link target, not a symbolic link that names the loaded map.
+    let map_target = normalize(map_path);
+    // A new map must not replace a file that another process created meanwhile.
+    let persist = if map_exists {
+        Persist::Replace
+    } else {
+        Persist::CreateNew
+    };
+    write_atomic(&map_target, &json, persist)?;
+    sync_directory(map_target.parent().unwrap_or_else(|| Path::new(".")))?;
+    write_output(output, &bytes)?;
+    Ok(report)
+}
+
+fn read_source(input: &str) -> Result<DefaultDicomObject, String> {
+    let result = if input == "-" {
+        read_dicom(io::stdin().lock())
+    } else {
+        read_dicom(File::open(input).map_err(|error| format!("cannot open {input}: {error}"))?)
+    };
+    result.map_err(|error| error.to_string())
+}
+
+fn write_output(output: &str, bytes: &[u8]) -> Result<(), String> {
+    if output != "-" {
+        return write_atomic(Path::new(output), bytes, Persist::Replace);
+    }
+    let mut stdout = io::stdout().lock();
+    stdout
+        .write_all(bytes)
+        .map_err(|error| format!("cannot write stdout: {error}"))?;
+    stdout
+        .flush()
+        .map_err(|error| format!("cannot flush stdout: {error}"))
+}
+
+/// Compare paths after resolving symbolic links, including the parent of a new file.
+fn same_path(left: &Path, right: &Path) -> bool {
+    normalize(left) == normalize(right)
+}
+
+fn normalize(path: &Path) -> PathBuf {
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
+    match (absolute.parent(), absolute.file_name()) {
+        (Some(parent), Some(name)) => parent
+            .canonicalize()
+            .map_or_else(|_| absolute.clone(), |parent| parent.join(name)),
+        _ => absolute,
+    }
+}
+
+/// How an atomic write treats an existing destination.
+#[derive(Clone, Copy)]
+enum Persist {
+    Replace,
+    CreateNew,
+}
+
+fn write_atomic(output: &Path, bytes: &[u8], persist: Persist) -> Result<(), String> {
     let parent = output.parent().unwrap_or_else(|| Path::new("."));
     let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| {
         format!(
@@ -141,8 +269,48 @@ fn write_atomic(output: &Path, bytes: &[u8]) -> Result<(), String> {
         .as_file()
         .sync_all()
         .map_err(|error| format!("cannot sync temporary output: {error}"))?;
-    temporary
-        .persist(output)
-        .map_err(|error| format!("cannot replace {}: {}", output.display(), error.error))?;
+    match persist {
+        Persist::Replace => temporary.persist(output).map(drop),
+        Persist::CreateNew => temporary.persist_noclobber(output).map(drop),
+    }
+    .map_err(|error| format!("cannot write {}: {}", output.display(), error.error))?;
     Ok(())
+}
+
+/// Persist the map rename so that a crash cannot keep a later output without its map.
+///
+/// The command fails before it writes the DICOM output when the file system
+/// cannot sync the directory.
+#[cfg(unix)]
+fn sync_directory(directory: &Path) -> Result<(), String> {
+    let directory = if directory.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        directory
+    };
+    File::open(directory)
+        .and_then(|handle| handle.sync_all())
+        .map_err(|error| format!("cannot sync {}: {error}", directory.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_directory: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_file_writes_do_not_replace_a_file_created_after_the_check() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("map.json");
+        std::fs::write(&path, b"created concurrently").unwrap();
+        assert!(write_atomic(&path, b"{}", Persist::CreateNew).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"created concurrently");
+
+        write_atomic(&path, b"{}", Persist::Replace).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"{}");
+    }
 }

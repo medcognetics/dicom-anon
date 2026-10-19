@@ -26,11 +26,29 @@ const JPEG_2000_TRANSFER_SYNTAXES: [&str; 7] = [
     "1.2.840.10008.1.2.4.202",
     "1.2.840.10008.1.2.4.203",
 ];
-/// JPEG (ITU-T T.81) transfer syntaxes: baseline, extended, and lossless Process 14.
-const JPEG_TRANSFER_SYNTAXES: [&str; 4] = [
+/// JPEG (ITU-T T.81) transfer syntaxes: baseline, extended, and lossless Process 14 (`.50`,
+/// `.51`, `.57`, `.70`), and the retired `.52` to `.56` and `.58` to `.66`. The DICOM parser
+/// does not read the retired ones now; they are listed so that a parser that reads them cleans
+/// the non-hierarchical ones and fails closed on the hierarchical DHP, EXP, and differential
+/// frame headers.
+const JPEG_TRANSFER_SYNTAXES: [&str; 18] = [
     "1.2.840.10008.1.2.4.50",
     "1.2.840.10008.1.2.4.51",
+    "1.2.840.10008.1.2.4.52",
+    "1.2.840.10008.1.2.4.53",
+    "1.2.840.10008.1.2.4.54",
+    "1.2.840.10008.1.2.4.55",
+    "1.2.840.10008.1.2.4.56",
     "1.2.840.10008.1.2.4.57",
+    "1.2.840.10008.1.2.4.58",
+    "1.2.840.10008.1.2.4.59",
+    "1.2.840.10008.1.2.4.60",
+    "1.2.840.10008.1.2.4.61",
+    "1.2.840.10008.1.2.4.62",
+    "1.2.840.10008.1.2.4.63",
+    "1.2.840.10008.1.2.4.64",
+    "1.2.840.10008.1.2.4.65",
+    "1.2.840.10008.1.2.4.66",
     "1.2.840.10008.1.2.4.70",
 ];
 /// JPEG-LS (ITU-T T.87) lossless and near-lossless transfer syntaxes.
@@ -1080,6 +1098,16 @@ mod tests {
             Codestream::for_transfer_syntax("1.2.840.10008.1.2.4.90\0"),
             Some(Codestream::Jpeg2000)
         );
+        // Retired JPEG transfer syntaxes: non-hierarchical ones are cleaned, and hierarchical
+        // ones fail closed in the parser on DHP, EXP, or differential frame headers.
+        for minor in (52..=56).chain(58..=66) {
+            let uid = format!("1.2.840.10008.1.2.4.{minor}");
+            assert_eq!(
+                Codestream::for_transfer_syntax(&uid),
+                Some(Codestream::Jpeg),
+                "{uid}"
+            );
+        }
         for uid in [
             "1.2.840.10008.1.2.1",
             "1.2.840.10008.1.2.4.100",

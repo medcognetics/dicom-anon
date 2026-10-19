@@ -81,6 +81,23 @@ options.profile.uid_mappings.insert("1.2.3".to_owned(), "2.25.101".to_owned());
 # }
 ```
 
+In Safe Harbor mode, `Anonymizer::required_uids` returns a `RequiredUid { path, uid }` for each source UID occurrence that the profile replaces. It uses the same rule decisions as `anonymize`. `Anonymizer::anonymize_with_generated_uid_map` starts from `options.profile.uid_mappings`, assigns each missing replacement from the operating-system CSPRNG, and returns the output, the report, and the complete map. It returns `Error::UidMapGenerationRequiresSafeHarbor` for other policies and `Error::InvalidSourceUid { path }` for an empty or malformed source UID. A missing mapping returns `Error::MissingSafeHarborUidMapping { path }`, which contains no UID value. The listing and the map contain source UIDs; follow the custody rules in [Security model](security.md).
+
+```rust
+# use dicom_anon::{Anonymizer, DefaultDicomObject, Options, ProfileConfiguration, SecretKey};
+# fn run(source: &DefaultDicomObject) -> Result<(), Box<dyn std::error::Error>> {
+let mut options = Options::new(SecretKey::new([42_u8; 32])?);
+options.profile = ProfileConfiguration::safe_harbor();
+options.patient_scope = Some("SUBJECT-42".to_owned());
+let anonymizer = Anonymizer::new(options)?;
+for required in anonymizer.required_uids(source)? {
+    println!("{}", required.path);
+}
+let (output, report, uid_map) = anonymizer.anonymize_with_generated_uid_map(source)?;
+# Ok(())
+# }
+```
+
 Use `validate_object_with_options` for configured candidate-only validation. Use `validate_source_object` with the original, candidate, and matching anonymization `Options` for exact source comparison. Existing `validate_object` and `validate_file` remain default-configuration wrappers.
 
 ## Python
@@ -119,6 +136,7 @@ configuration_json = json.dumps({
     "uid_mappings": {},
     "require_no_burned_in_annotation": False,
     "sop_class_allowlist": [],
+    "fail_on_unmapped": [],
 })
 conformant, validation_json = dicom_anon_python.validate(
     output, configuration_json
@@ -128,7 +146,9 @@ exact, exact_json = dicom_anon_python.validate_with_source(
 )
 ```
 
-The configuration JSON above is the explicit form of the `dicom-extended` preset. Omitting `configuration_json` selects the same options. Use `"policy": "dicom"` with an empty `options` array for the option-free Basic Profile. Set `require_no_burned_in_annotation` to `true` to reject input unless Burned In Annotation is `NO`. Put SOP Class UIDs in `sop_class_allowlist` to reject other SOP Classes; an empty list permits all SOP Classes. Both fields are optional and default to off. The same fields apply to the Rust `ProfileConfiguration` and to the Node.js binding. The function signatures do not change.
+The configuration JSON above is the explicit form of the `dicom-extended` preset. `fail_on_unmapped` lists canonical eight-digit tags that must not get a dummy value because no `descriptor_mappings` entry matched; a match is an error during anonymization. Validation ignores the field. To use a shipped versioned descriptor map, copy its `mappings` member into `descriptor_mappings`. The report JSON includes the per-tag `dummy_replacements` and `unmapped_dummy_replacements` counts. Omitting `configuration_json` selects the same options. Use `"policy": "dicom"` with an empty `options` array for the option-free Basic Profile. Set `require_no_burned_in_annotation` to `true` to reject input unless Burned In Annotation is `NO`. Put SOP Class UIDs in `sop_class_allowlist` to reject other SOP Classes; an empty list permits all SOP Classes. Both fields are optional and default to off. The same fields apply to the Rust `ProfileConfiguration` and to the Node.js binding. The function signatures do not change.
+
+`required_uids(data, key, patient_scope, configuration_json)` returns a JSON array of `{path, uid}` objects. `anonymize_with_generated_uid_map(data, key, patient_scope, configuration_json)` returns `(output_bytes, report_json, uid_map_json)`. Pass the returned map as `uid_mappings` in the next configuration to keep one study consistent.
 
 `anonymize` accepts optional `patient_scope` and `configuration_json` arguments. `validate` accepts optional configuration JSON. `validate_with_source` is a separate function so candidate-only `validate` retains its original meaning. Errors become `ValueError`. The JSON fields match the Rust report models.
 
@@ -162,6 +182,8 @@ if (!validation.conformant) {
 
 const exact = validateWithSource(source, result.data, key);
 ```
+
+`requiredUids` returns a JSON array of `{path, uid}` objects. `anonymizeWithGeneratedUidMap` returns `{ data, reportJson, uidMapJson }`. Both accept the same arguments as `anonymize`.
 
 `anonymize` accepts optional `patientScope` and `configurationJson` arguments. `validate` accepts optional configuration JSON. `validateWithSource` accepts the source, candidate, key, optional patient scope, and optional configuration JSON. N-API errors use `InvalidArg` with the Rust error message.
 

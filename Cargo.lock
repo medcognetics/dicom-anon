@@ -928,6 +928,7 @@ dependencies = [
  "dicom-core",
  "dicom-dictionary-std",
  "dicom-object",
+ "getrandom 0.3.4",
  "jpeg-decoder",
  "jpeg-encoder",
  "pure_jpeg2k",

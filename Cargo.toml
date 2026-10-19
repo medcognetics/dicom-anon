@@ -24,6 +24,7 @@ dicom-parser = "=0.10.0"
 dicom-transfer-syntax-registry = { version = "=0.10.0", features = ["inventory-registry"] }
 image = { version = "=0.25.10", default-features = false, features = ["png"] }
 flate2 = "=1.1.8"
+getrandom = "=0.3.4"
 indicatif = "=0.18.4"
 jpeg-decoder = { version = "=0.3.2", default-features = false }
 jpeg-encoder = { version = "=0.7.0", default-features = false, features = ["std"] }
