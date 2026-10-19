@@ -142,3 +142,4 @@ coverage.xml
 
 # Native Node.js binding artifacts
 *.node
+*.cdx.json

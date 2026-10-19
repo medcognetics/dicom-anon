@@ -14,7 +14,7 @@ use crate::pixel::{self, Codestream, PixelGateViolation};
 use crate::profile::{
     profile_basic_action, profile_option_action, profile_rule_for, safe_private_tags,
     DeidentificationPolicy, DicomOption, ProfileAction, ProfileConfiguration, PROFILE_NAME,
-    PROFILE_VERSION,
+    PROFILE_VERSION, TOOL_VERSION,
 };
 use crate::pseudonym::is_patient_id;
 use crate::{read_dicom, Anonymizer, Error, Options, Result};
@@ -299,9 +299,27 @@ fn require_method_description(
     profile: &ProfileConfiguration,
     report: &mut ValidationReport,
 ) {
-    if !element_text(object, tags::DEIDENTIFICATION_METHOD)
+    let value = element_text(object, tags::DEIDENTIFICATION_METHOD);
+    if value
+        .as_deref()
+        .is_some_and(|value| method_description_matches(value, profile))
+    {
+        return;
+    }
+    if value
+        .as_deref()
+        .and_then(with_current_tool_version)
         .is_some_and(|value| method_description_matches(&value, profile))
     {
+        push_finding(
+            report,
+            Severity::Error,
+            "deidentification_method_version_mismatch",
+            Some(tags::DEIDENTIFICATION_METHOD),
+            "root",
+            "De-identification Method names another dicom-anon version; validate with the version that wrote the file",
+        );
+    } else {
         push_finding(
             report,
             Severity::Error,
@@ -311,6 +329,20 @@ fn require_method_description(
             "De-identification Method does not match the configured policy and options",
         );
     }
+}
+
+/// Replace the version token of the implementation value with this crate's version.
+fn with_current_tool_version(value: &str) -> Option<String> {
+    let (head, implementation) = value.rsplit_once('\\')?;
+    let (version, rest) = implementation
+        .strip_prefix("dicom-anon ")?
+        .split_once(' ')?;
+    // A version starts with a digit; this excludes the unversioned 0.1.0 Safe Harbor value.
+    if !version.starts_with(|character: char| character.is_ascii_digit()) || version == TOOL_VERSION
+    {
+        return None;
+    }
+    Some(format!("{head}\\dicom-anon {TOOL_VERSION} {rest}"))
 }
 
 fn method_description_matches(value: &str, profile: &ProfileConfiguration) -> bool {
@@ -325,14 +357,7 @@ fn method_description_matches(value: &str, profile: &ProfileConfiguration) -> bo
     {
         return false;
     }
-    let expected_prefix = match profile.policy {
-        DeidentificationPolicy::Dicom => "dicom-anon ",
-        DeidentificationPolicy::SafeHarborMetadata => "dicom-anon safe-harbor-metadata ",
-    };
-    parts
-        .next()
-        .and_then(|implementation| implementation.strip_prefix(expected_prefix))
-        == Some(PROFILE_VERSION)
+    parts.next() == Some(profile.deidentification_implementation().as_str())
         && parts.next().is_none()
 }
 
@@ -1236,6 +1261,54 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(!error.contains(SENSITIVE_INVALID_DATE));
+    }
+
+    #[test]
+    fn candidate_validation_requires_the_current_tool_version_in_method_text() {
+        let options = Options::new(SecretKey::new(KEY).unwrap());
+        let (mut candidate, _) = Anonymizer::new(options)
+            .unwrap()
+            .anonymize(&source())
+            .unwrap();
+        let method = element_text(&candidate, tags::DEIDENTIFICATION_METHOD).unwrap();
+        let current = format!("dicom-anon {TOOL_VERSION} {PROFILE_VERSION}");
+        assert!(method.ends_with(&format!("\\{current}")));
+        assert!(validate_object(&candidate)
+            .findings
+            .iter()
+            .all(|finding| finding.code != "deidentification_method_text_mismatch"));
+
+        for (implementation, code) in [
+            (
+                format!("dicom-anon {PROFILE_VERSION}"),
+                "deidentification_method_text_mismatch",
+            ),
+            (
+                format!("dicom-anon 0.0.0-other {PROFILE_VERSION}"),
+                "deidentification_method_version_mismatch",
+            ),
+            (
+                format!("dicom-anon 0.0.0-other safe-harbor-metadata {PROFILE_VERSION}"),
+                "deidentification_method_text_mismatch",
+            ),
+            (
+                format!("dicom-anon safe-harbor-metadata {PROFILE_VERSION}"),
+                "deidentification_method_text_mismatch",
+            ),
+        ] {
+            candidate.put_str(
+                tags::DEIDENTIFICATION_METHOD,
+                VR::LO,
+                method.replace(&current, &implementation),
+            );
+            let codes: Vec<_> = validate_object(&candidate)
+                .findings
+                .into_iter()
+                .map(|finding| finding.code)
+                .filter(|code| code.starts_with("deidentification_method_"))
+                .collect();
+            assert_eq!(codes, [code], "{implementation}");
+        }
     }
 
     #[test]

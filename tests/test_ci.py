@@ -90,6 +90,7 @@ def test_expected_workflows_replace_legacy_ci() -> None:
         "dependency-health.yml",
         "linux-ci.yml",
         "nightly.yml",
+        "release.yml",
     ]
     assert not (REPOSITORY_ROOT / ".circleci" / "config.yml").exists()
     assert not (REPOSITORY_ROOT / "codecov.yml").exists()
@@ -169,6 +170,60 @@ def test_scheduled_workflow_contracts() -> None:
     assert "timeout-minutes: 20" in dependency_health
     assert "timeout-minutes: 30" in dependency_health
     assert "GH_TOKEN: ${{ github.token }}" in audit_step
+
+
+def test_release_workflow_contract() -> None:
+    workflow = read_workflow("release.yml")
+    job_permissions = workflow.partition("    permissions:\n")[2].partition("    env:")[
+        0
+    ]
+    publish_step = workflow.partition("      - name: Create draft GitHub release\n")[2]
+
+    assert job_runners(workflow) == {"release": BERYL_RUNNER}
+    assert f"image: {CI_CONTAINER_IMAGE}" in workflow
+    assert "tags: ['v[0-9]+.[0-9]+.[0-9]+']" in workflow
+    assert "pull_request" not in workflow
+    assert job_permissions.split() == [
+        "contents:",
+        "write",
+        "actions:",
+        "read",
+        "checks:",
+        "read",
+    ]
+    # Release builds install pinned, verified tools and use no cache that another job
+    # on the persistent runner can write.
+    for shared_cache_action in (
+        "rust-cache",
+        "actions/setup-python@",
+        "actions/setup-node@",
+        "astral-sh/setup-uv@",
+        "dtolnay/rust-toolchain@",
+    ):
+        assert shared_cache_action not in workflow
+    assert 'tools="${RUNNER_TEMP}/release-tools"' in workflow
+    assert 'rm -rf "${tools}"' in workflow
+    for checksum in ("UV_SHA256", "NODE_SHA256", "RUSTUP_SHA256"):
+        assert re.search(
+            rf"^          {checksum}: [0-9a-f]{{64}}$", workflow, re.MULTILINE
+        )
+        assert f'verify "${{{checksum}}}"' in workflow
+    assert 'echo "UV_PYTHON_PREFERENCE=only-managed"' in workflow
+    assert "tool: cargo-audit@0.22.2,cargo-cyclonedx@0.5.9" in workflow
+    assert "run: make audit" in workflow
+    assert "release.py check-version --tag" in workflow
+    assert "release.py build --tag" in workflow
+    assert "sha256sum --check SHA256SUMS" in workflow
+    for precondition in (
+        "git/ref/tags/${TAG}",
+        "compare/master...${commit}",
+        "check_name=Linux%20%2F%20Required",
+        "actions/workflows/nightly.yml/runs?head_sha=${commit}&status=success",
+    ):
+        assert precondition in workflow
+    assert "if: github.event_name == 'push'" in publish_step
+    assert "--draft" in publish_step and "--verify-tag" in publish_step
+    assert "${{ github.ref_name }}" not in publish_step
 
 
 def test_deprecation_job_installs_native_build_dependencies() -> None:

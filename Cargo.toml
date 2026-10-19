@@ -3,12 +3,12 @@ members = ["core", "report", "parquet", "bindings/python", "bindings/node"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 authors = ["Scott Chase Waggener <chase.waggener@icloud.com>"]
-repository = "https://github.com/TidalPaladin/dicom-anon"
+repository = "https://github.com/medcognetics/dicom-anon"
 
 [workspace.dependencies]
 blake3 = "=1.8.2"

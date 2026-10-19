@@ -1,5 +1,5 @@
 .PHONY: check ci ci-minimum format lint python-quality test coverage docs node-dependencies \
-		binding-types test-python test-node test-ci audit deprecations release bench \
+		binding-types test-python test-node test-ci audit deprecations release release-assets bench \
 		report-integration report-integration-coverage report-cuda-integration
 
 CI_UV_RUN = uv run --project tools/ci --frozen
@@ -59,7 +59,7 @@ test-node: node-dependencies
 
 test-ci:
 	$(ACTIONLINT) -config-file .github/actionlint.yaml
-	PYTHONPATH=. $(CI_UV_RUN) pytest -q tests/test_ci.py tests/test_ci_reporting.py
+	PYTHONPATH=. $(CI_UV_RUN) pytest -q tests/test_ci.py tests/test_ci_reporting.py tests/test_release.py
 
 audit:
 	$(CI_UV_RUN) python tools/ci/security_audit.py
@@ -69,6 +69,11 @@ deprecations:
 
 release:
 	cargo build --locked --workspace --release
+
+# Requires `make audit` first, cargo-cyclonedx 0.5.9, and RELEASE_TAG, for example v0.2.0.
+release-assets:
+	@test -n "$(RELEASE_TAG)" || (echo "set RELEASE_TAG, for example RELEASE_TAG=v0.2.0" >&2; exit 2)
+	$(CI_UV_RUN) python tools/ci/release.py build --tag "$(RELEASE_TAG)"
 
 bench:
 	cargo bench --locked -p dicom-anon --bench anonymization -- --sample-size 100

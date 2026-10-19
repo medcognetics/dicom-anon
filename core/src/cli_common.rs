@@ -7,6 +7,14 @@ use clap::{Args, ValueEnum};
 
 use crate::{DicomOption, ProfileConfiguration, SafePrivateElement, SecretKey};
 
+/// `--version` text: crate version and the source commit recorded at build time.
+pub const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (commit ",
+    env!("DICOM_ANON_GIT_COMMIT"),
+    ")"
+);
+
 /// Named profile presets exposed by both bundled commands.
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 #[value(rename_all = "kebab-case")]

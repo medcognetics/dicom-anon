@@ -102,7 +102,9 @@ Use `validate_object_with_options` for configured candidate-only validation. Use
 
 ## Python
 
-Build and install the extension with maturin:
+Each [GitHub release](https://github.com/medcognetics/dicom-anon/releases) includes an abi3 wheel for CPython 3.10 or later on Linux x86_64. Verify it against `SHA256SUMS` and install it with `pip install dicom_anon-<version>-cp310-abi3-manylinux_<glibc>_x86_64.whl`.
+
+To build and install the extension from source with maturin:
 
 ```console
 uv sync --project tools/ci --frozen

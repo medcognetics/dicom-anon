@@ -18,6 +18,7 @@ This workspace implements deterministic, configurable DICOM metadata de-identifi
 - `core/src/uid_map.rs`: UID resolution with attribute paths, required-UID listing, and random Safe Harbor map generation
 - `core/src/temporal.rs`: DICOM DA, DT, and TM shifting with paired-date rollover
 - `core/src/io.rs`: stream and atomic file operations
+- `core/build.rs`: offline source-commit capture for `--version`
 - `core/src/bin/`: command implementations
 - `core/tests/cli.rs`: process-level CLI contract tests
 - `report/src/model.rs`: pinned ONNX model loading and constrained Viterbi decoding
@@ -37,6 +38,9 @@ This workspace implements deterministic, configurable DICOM metadata de-identifi
 - `bindings/node/`: N-API API and TypeScript declaration
 - `core/benches/anonymization.rs`: Criterion workloads
 - `docs/conformance.md`: supported profile and explicit limitations
+- `docs/known-anomalies.md`: per-release known anomaly list for SOUP evaluation
+- `CHANGELOG.md`: per-release changes; the release notes copy the tagged section
+- `tools/ci/release.py` and `.github/workflows/release.yml`: tag-triggered release assets and draft release
 
 ## Required invariants
 
@@ -55,6 +59,7 @@ This workspace implements deterministic, configurable DICOM metadata de-identifi
 - When Parquet pixel hashing is disabled, skip Pixel Data through the lazy parser without loading its value. When enabled, stream it through the baseline-compatible XXH3-64 calculation without retaining it.
 - Parse each Parquet input DICOM once. Schema discovery may reread the compact unlinked staging file, but must not reopen source DICOMs.
 - Reject named files without a `.dcm` or `.dicom` extension before opening them. Check extensionless files for `DICM` at byte offset 128.
+- Write the crate version in De-identification Method `(0012,0063)`. A change to any output byte for the same input and configuration requires at least a minor version change; record it in `CHANGELOG.md`. This rule excludes the crate version text in De-identification Method: compare outputs with the version text removed.
 - Keep anonymization deterministic. Do not add timestamps, random UIDs, random date offsets, or nondeterministic report ordering. The only exception is opt-in Safe Harbor UID map generation. It draws missing replacements from the operating-system CSPRNG and returns them only in the caller map.
 - Keep the patient-scoped time offset stable and apply TM midnight rollover to its known paired DA attribute.
 - Never include originals, key material, patient scope, UID-map contents, or identifying mismatch values in validation reports or logs. Missing-mapping errors name only the attribute path.
@@ -96,12 +101,13 @@ make audit
 make deprecations
 make check
 make release
+make release-assets RELEASE_TAG=vX.Y.Z
 make report-cuda-integration
 ```
 
 `make ci` is the canonical latest-toolchain gate. `make ci-minimum` checks Rust 1.88, Python 3.10, and Node.js 22 when those runtimes are selected by the caller or CI. `make audit` writes all evidence to `target/ci-reports/security/` and succeeds only when every scanner is `clean` or `warnings`. Keep unmaintained-only RustSec advisories and Low-confidence zizmor findings visible as non-blocking supplier-risk warnings. Vulnerabilities, other findings, malformed output, scanner errors, and incomplete checks must fail. `make deprecations` keeps findings informational and fails only when a check is incomplete.
 
-GitHub Actions uses the persistent single-slot `beryl` runner only for trusted repository events. Keep the same-repository pull-request guard, read-only permissions, non-persisted checkout credentials, full-SHA action pins, and the stable `Linux / Required` aggregate check. Run that check on `beryl` for trusted events and on `ubuntu-24.04` only for fork pull requests, so that the required status does not need GitHub-hosted runner minutes. Do not upload GitHub Actions artifacts; report diagnostics in the job log or step summary. Keep cross-platform builds, publishing, and full CPU/PDF/OCR report integration out of these workflows until their runner and artifact contracts are approved. The approved nightly CUDA job runs only after validation and release, requires the `cuda` runner label, and uses the pinned CUDA container and versioned `dicom-anon-report-cuda-assets` volume. GPU preflight, provider dependency or initialization, checksum, semantic parity, and CLI failures must fail the job.
+GitHub Actions uses the persistent single-slot `beryl` runner only for trusted repository events. Keep the same-repository pull-request guard, read-only permissions, non-persisted checkout credentials, full-SHA action pins, and the stable `Linux / Required` aggregate check. Run that check on `beryl` for trusted events and on `ubuntu-24.04` only for fork pull requests, so that the required status does not need GitHub-hosted runner minutes. Do not upload GitHub Actions artifacts; report diagnostics in the job log or step summary. The approved release workflow is the only publishing path. It runs on `beryl` for a version tag or a manual dry-run dispatch, installs its own pinned and checksum-verified Rust, Python, uv, and Node.js into a fresh job directory, does not use the runner tool cache or build caches, gives write permission only to its job, runs `make audit`, and creates a draft GitHub release only for an annotated tag on a `master` commit where `Linux / Required` and Nightly passed. Its release assets are Linux x86_64 `dicom-anonymize` and `dicom-validate` binaries, one abi3 wheel, CycloneDX SBOMs, audit evidence, and `SHA256SUMS`. Do not create or push tags or releases unless the user asks. Keep cross-platform builds, other publishing, and full CPU/PDF/OCR report integration out of the workflows until their runner and artifact contracts are approved. The approved nightly CUDA job runs only after validation and release, requires the `cuda` runner label, and uses the pinned CUDA container and versioned `dicom-anon-report-cuda-assets` volume. GPU preflight, provider dependency or initialization, checksum, semantic parity, and CLI failures must fail the job.
 
 Run Criterion before and after any performance change:
 

@@ -694,6 +694,7 @@ def main() -> int:
         REPORT_DIRECTORY / "manifest.json",
         {
             "checked_at": datetime.now(timezone.utc).isoformat(),
+            "commit": command_version(["git", "rev-parse", "HEAD"]),
             "advisory_sources": {
                 "cargo-audit": "RustSec advisory database fetched by cargo-audit",
                 "npm-audit": "npm registry advisory service",
