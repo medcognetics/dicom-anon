@@ -929,6 +929,7 @@ dependencies = [
  "dicom-dictionary-std",
  "dicom-object",
  "getrandom 0.3.4",
+ "pure_jpeg2k",
  "serde",
  "serde_json",
  "tempfile",
@@ -2397,6 +2398,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "pure_jpeg2k"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15c8509af84deaeba3f809b0e4d6da7c034ee6afb408be1a65518a46cfc20b70"
+dependencies = [
+ "thiserror 2.0.17",
 ]
 
 [[package]]

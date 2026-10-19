@@ -89,6 +89,32 @@ fn dicom_profile_options_require_a_dicom_input() {
     assert!(conflicting_options.stdout.is_empty());
     assert!(String::from_utf8_lossy(&conflicting_options.stderr)
         .contains("--enable-option requires at least one --dicom"));
+
+    for (arguments, option) in [
+        (
+            &["--require-no-burned-in-annotation"][..],
+            "--require-no-burned-in-annotation",
+        ),
+        (
+            &["--allow-sop-class", "1.2.840.10008.5.1.4.1.1.1.2"][..],
+            "--allow-sop-class",
+        ),
+    ] {
+        let gated = run_with_stdin(
+            Command::new(env!("CARGO_BIN_EXE_report-anon"))
+                .arg("anonymize")
+                .args(arguments)
+                .args(["--model-dir", "/not/read/before/usage-validation"]),
+            b"Patient report",
+        );
+        assert_eq!(gated.status.code(), Some(2), "{option}");
+        assert!(gated.stdout.is_empty(), "{option}");
+        assert!(
+            String::from_utf8_lossy(&gated.stderr)
+                .contains(&format!("{option} requires at least one --dicom")),
+            "{option}"
+        );
+    }
 }
 
 #[test]

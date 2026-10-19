@@ -94,3 +94,26 @@ assert.throws(
   () => binding.anonymize(syntheticDicom(), KEY, 'SUBJ-0001', SAFE_HARBOR),
   (error) => error.message.includes('(0008,0018)') && !error.message.includes(SENTINEL_UID),
 )
+
+const pixelGateConfiguration = (sopClass) =>
+  JSON.stringify({
+    policy: 'dicom',
+    options: [],
+    require_no_burned_in_annotation: true,
+    sop_class_allowlist: [sopClass],
+  })
+
+assert.throws(
+  () => binding.anonymize(INVALID_DICOM, KEY, 'SUBJ-0001', pixelGateConfiguration('not-a-uid')),
+  (error) => error instanceof Error && error.message.includes('SOP Class allowlist'),
+)
+assert.throws(
+  () =>
+    binding.anonymize(
+      INVALID_DICOM,
+      KEY,
+      'SUBJ-0001',
+      pixelGateConfiguration('1.2.840.10008.5.1.4.1.1.1.2'),
+    ),
+  (error) => error instanceof Error && !error.message.includes('SOP Class allowlist'),
+)

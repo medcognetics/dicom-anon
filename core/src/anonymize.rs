@@ -11,6 +11,7 @@ use dicom_object::{DefaultDicomObject, FileMetaTableBuilder};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 
+use crate::pixel;
 use crate::profile::{
     profile_basic_action, profile_option_action, profile_rule_for, safe_private_tags,
     DeidentificationPolicy, DicomOption, ProfileAction, ProfileConfiguration, PROFILE_VERSION,
@@ -93,6 +94,9 @@ pub struct AnonymizationReport {
     /// Subset of `dummy_replacements` where a clean action found no descriptor-map entry.
     #[serde(default)]
     pub unmapped_dummy_replacements: BTreeMap<String, u64>,
+    /// JPEG 2000 comment (COM) marker segments removed from Pixel Data.
+    #[serde(default)]
+    pub removed_jpeg2000_comment_segments: u64,
 }
 
 impl AnonymizationReport {
@@ -118,6 +122,7 @@ impl AnonymizationReport {
             generalized_temporal_attributes: 0,
             dummy_replacements: BTreeMap::new(),
             unmapped_dummy_replacements: BTreeMap::new(),
+            removed_jpeg2000_comment_segments: 0,
         }
     }
 }
@@ -199,6 +204,17 @@ impl Anonymizer {
         {
             return Err(Error::AlreadyDeidentified);
         }
+        pixel::check_gates(
+            source,
+            Some(source.meta().media_storage_sop_class_uid()),
+            &self.options.profile,
+        )?;
+        let transfer_syntax = source.meta().transfer_syntax().trim_end_matches('\0');
+        let jpeg2000 = if pixel::is_jpeg2000(transfer_syntax) {
+            Some(pixel::clean_jpeg2000(source)?)
+        } else {
+            None
+        };
 
         let patient_scope = self.patient_scope(source)?;
         let patient_pseudonym = self.options.secret.patient_id(&patient_scope);
@@ -226,9 +242,17 @@ impl Anonymizer {
         };
 
         let mut output = self.process_dataset(source, &context, &mut report)?;
+        if let Some(cleaning) = jpeg2000 {
+            report.removed_jpeg2000_comment_segments = cleaning.removed_segments;
+            if let Some(replacement) = cleaning.replacement {
+                if output.get(tags::PIXEL_DATA).is_some() {
+                    output.put(replacement);
+                }
+            }
+        }
         add_deidentification_markers(&mut output, &self.options.profile, &patient_pseudonym);
         let meta = FileMetaTableBuilder::new()
-            .transfer_syntax(source.meta().transfer_syntax().trim_end_matches('\0'))
+            .transfer_syntax(transfer_syntax)
             .implementation_class_uid(IMPLEMENTATION_CLASS_UID)
             .implementation_version_name(IMPLEMENTATION_VERSION_NAME);
         let output = output
@@ -1013,6 +1037,25 @@ mod tests {
             element_text(&one, tags::PATIENT_ID),
             element_text(&two, tags::PATIENT_ID)
         );
+    }
+
+    #[test]
+    fn report_from_an_earlier_release_deserializes_with_default_counters() {
+        let (_, report) = anonymizer()
+            .anonymize(&test_object("patient", "20200101", "1.2.3"))
+            .unwrap();
+        let mut json = serde_json::to_value(&report).unwrap();
+        let fields = json.as_object_mut().unwrap();
+        for added in [
+            "dummy_replacements",
+            "unmapped_dummy_replacements",
+            "removed_jpeg2000_comment_segments",
+        ] {
+            fields.remove(added).unwrap();
+        }
+        let parsed: AnonymizationReport = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.removed_jpeg2000_comment_segments, 0);
+        assert!(parsed.dummy_replacements.is_empty());
     }
 
     #[test]

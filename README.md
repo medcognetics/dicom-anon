@@ -6,7 +6,7 @@
 
 The default `dicom-extended` preset implements the metadata actions from the [DICOM PS3.15 2026c Basic Application Level Confidentiality Profile](https://dicom.nema.org/medical/dicom/current/output/chtml/part15/chapter_E.html) with Clean Descriptors, Retain Patient Characteristics, and Retain Longitudinal Temporal Information With Modified Dates. Patient identifiers and UIDs receive keyed deterministic replacements. Dates and times move by patient-specific whole-day and whole-hour offsets. Patient ages from `090Y` through `999Y` are categorized as `090Y`. Study and Series Description are retained only when an exact caller-supplied mapping approves a safe replacement; otherwise they receive a safe dummy. The `dicom` preset applies the Basic Profile without optional columns.
 
-This software does not inspect pixel data for burned-in text or recognizable faces. It does not claim the Clean Pixel Data or Clean Recognizable Visual Features options. Read [Conformance and scope](docs/conformance.md) and [Known anomalies](docs/known-anomalies.md) before using output outside a controlled environment. Released versions, their checksums, SBOMs, and audit results are on the [GitHub releases page](https://github.com/medcognetics/dicom-anon/releases); changes are in the [changelog](CHANGELOG.md).
+This software does not inspect pixel data for burned-in text or recognizable faces. Optional gates can reject input by Burned In Annotation and SOP Class, and JPEG 2000 comment segments are removed. It does not claim the Clean Pixel Data or Clean Recognizable Visual Features options. Read [Conformance and scope](docs/conformance.md) and [Known anomalies](docs/known-anomalies.md) before using output outside a controlled environment. Released versions, their checksums, SBOMs, and audit results are on the [GitHub releases page](https://github.com/medcognetics/dicom-anon/releases); changes are in the [changelog](CHANGELOG.md).
 
 ## Install and build
 
@@ -144,7 +144,7 @@ Exit status is part of the interface:
 | 1 | Not used | Metadata does not conform |
 | 2 | Usage, input, output, or runtime error | Usage, input, or runtime error |
 
-Validation checks profile markers, required removals, private attributes, replacement UID syntax, nested sequences, and identifying File Meta Information. A warning reports pixel data that was not assessed. Validation cannot prove that a dummy text value differs from an original value, nor can it establish that pixels are safe to disclose.
+Validation checks profile markers, required removals, private attributes, replacement UID syntax, nested sequences, and identifying File Meta Information. A warning reports pixel data that was not assessed. Active pixel-risk gates, JPEG 2000 comment segments, and unparseable JPEG 2000 codestreams give error findings. Validation cannot prove that a dummy text value differs from an original value, nor can it establish that pixels are safe to disclose.
 
 Candidate-only validation accepts the same profile flags as anonymization and reports one `source_not_compared` warning for transformations it cannot prove. Source-aware validation verifies the exact configured transformation without placing source values or secrets in findings:
 

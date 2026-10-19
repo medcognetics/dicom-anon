@@ -20,11 +20,13 @@ This is the first tagged release. Version 0.1.0 was not tagged or released.
 - This changelog and the [known anomaly list](docs/known-anomalies.md).
 - Safe Harbor UID support ([#19](https://github.com/medcognetics/dicom-anon/issues/19)): `--list-required-uids` and the matching library and binding calls list each source UID that needs a map entry, with its sequence path. `--generate-uid-map PATH` assigns missing replacements from the operating-system CSPRNG and returns them in the caller map. A missing mapping error gives the tag path and never the value.
 - Fail-closed descriptor option ([#20](https://github.com/medcognetics/dicom-anon/issues/20)): `--fail-on-unmapped TAG` stops when a descriptor-map miss would write a dummy value for that tag. Reports count dummy and unmapped dummy replacements by tag.
+- Pixel-risk gates ([#18](https://github.com/medcognetics/dicom-anon/issues/18)): `--require-no-burned-in-annotation` and `--allow-sop-class UID` reject risky input. The anonymizer removes JPEG 2000 comment (COM) segments and fails closed on codestreams it cannot parse. `dicom-validate` reports `jpeg2000_comment_present` and `jpeg2000_codestream_unparseable`.
 - Mammography, breast tomosynthesis, synthesized 2D, and JPEG 2000 conformance fixtures in CI ([#21](https://github.com/medcognetics/dicom-anon/issues/21)).
 
 ### Changed
 
 - De-identification Method `(0012,0063)` now includes the crate version. The last value is `dicom-anon <version> <edition>`, or `dicom-anon <version> safe-harbor-metadata <edition>` for the Safe Harbor policy. This changes output bytes. `dicom-validate` accepts only the value that its own version writes and reports another version as `deidentification_method_version_mismatch`. Validate an output with the same version that made it.
+- JPEG 2000 Pixel Data that contains COM segments changes bytes: the segments are removed and the decoded samples do not change.
 - The Cargo `repository` field and the README badge identify `medcognetics/dicom-anon`.
 
 [0.2.0]: https://github.com/medcognetics/dicom-anon/releases/tag/v0.2.0

@@ -5,6 +5,7 @@ mod anonymize;
 pub mod cli_common;
 mod error;
 mod io;
+mod pixel;
 mod profile;
 mod pseudonym;
 mod temporal;

@@ -404,7 +404,7 @@ def release_notes(
             f"- DICOM PS3.15 edition: `{edition}` (Table E.1-1).",
             f"- Known anomalies: [docs/known-anomalies.md]({source}/docs/known-anomalies.md).",
             f"- Conformance and scope limits: [docs/conformance.md]({source}/docs/conformance.md).",
-            "- Scope: DICOM metadata only. Pixel Data is not inspected. "
+            "- Scope: DICOM metadata. Pixel samples are not inspected for burned-in text. "
             "This release makes no HIPAA, GDPR, or regulatory compliance claim.",
             "",
             "## Changes",
