@@ -6,7 +6,7 @@
 //! marker segments. These segments can carry text outside the image samples.
 
 use std::borrow::Cow;
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 
 use dicom_core::value::{PixelFragmentSequence, Value};
 use dicom_core::{PrimitiveValue, Tag, VR};
@@ -278,20 +278,104 @@ fn strip_frames(
     Ok(StrippedFrames { removed, changed })
 }
 
-/// Encapsulated Pixel Data Value Total Length of rewritten fragments.
+/// Fragment byte total without, and with, the trailing zero bytes of the last fragment.
 ///
 /// PS3.3 C.7.6.6 counts every fragment, without the trailing padding of the last fragment.
-/// Each codestream ends with a marker, so trailing zero bytes are padding.
-fn encapsulated_total_length(fragments: &[Vec<u8>]) -> InMemElement {
+fn fragment_total_bounds(fragments: &[Vec<u8>]) -> (u64, u64) {
     let total = fragments.iter().map(Vec::len).sum::<usize>();
-    let last_padding = fragments
+    let last_zeros = fragments
         .last()
         .map_or(0, |last| last.len() - without_zero_padding(last));
+    ((total - last_zeros) as u64, total as u64)
+}
+
+/// Encapsulated Pixel Data Value Total Length of rewritten fragments.
+///
+/// Each codestream ends with a marker, so trailing zero bytes are padding.
+fn encapsulated_total_length(fragments: &[Vec<u8>]) -> InMemElement {
     InMemElement::new(
         tags::ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH,
         VR::UV,
-        PrimitiveValue::U64(vec![(total - last_padding) as u64].into()),
+        PrimitiveValue::U64(vec![fragment_total_bounds(fragments).0].into()),
     )
+}
+
+/// Valid Encapsulated Pixel Data Value Total Length values under PS3.3 C.7.6.6, or `None`
+/// when Pixel Data is absent or native.
+///
+/// For a codestream transfer syntax, every trailing zero byte of the last fragment is
+/// padding, because each codestream ends with a marker. For another encapsulated transfer
+/// syntax, a trailing zero byte can be data or the one alignment byte, so the value can
+/// exclude at most one zero byte.
+fn valid_total_lengths(
+    object: &InMemDicomObject,
+    transfer_syntax: &str,
+) -> Option<RangeInclusive<u64>> {
+    let Some(Value::PixelSequence(sequence)) =
+        object.get(tags::PIXEL_DATA).map(InMemElement::value)
+    else {
+        return None;
+    };
+    let (unpadded, total) = fragment_total_bounds(sequence.fragments());
+    Some(
+        if Codestream::for_transfer_syntax(transfer_syntax).is_some() {
+            unpadded..=unpadded
+        } else {
+            total.saturating_sub(u64::from(unpadded < total))..=total
+        },
+    )
+}
+
+/// Return whether Encapsulated Pixel Data Value Total Length (7FE0,0003) is present and is
+/// not one UV value in [`valid_total_lengths`].
+pub(crate) fn total_length_mismatch(object: &InMemDicomObject, transfer_syntax: &str) -> bool {
+    total_length_check(object, transfer_syntax).is_some()
+}
+
+/// `None` when (7FE0,0003) is absent or valid. Otherwise, the valid values, or `None` inside
+/// when Pixel Data is absent or native.
+fn total_length_check(
+    object: &InMemDicomObject,
+    transfer_syntax: &str,
+) -> Option<Option<RangeInclusive<u64>>> {
+    let element = object.get(tags::ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH)?;
+    let valid = valid_total_lengths(object, transfer_syntax);
+    let matches = element.vr() == VR::UV
+        && match (element.to_multi_int::<u64>().as_deref(), &valid) {
+            (Ok([value]), Some(valid)) => valid.contains(value),
+            _ => false,
+        };
+    (!matches).then_some(valid)
+}
+
+/// Change made by [`repair_total_length`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TotalLengthRepair {
+    Replaced,
+    Removed,
+}
+
+/// Replace a mismatched Encapsulated Pixel Data Value Total Length (7FE0,0003) with the
+/// one valid value. Remove the optional attribute when Pixel Data is absent or native, or
+/// when a final zero byte can be either data or padding.
+pub(crate) fn repair_total_length(
+    object: &mut InMemDicomObject,
+    transfer_syntax: &str,
+) -> Option<TotalLengthRepair> {
+    match total_length_check(object, transfer_syntax)? {
+        Some(valid) if valid.start() == valid.end() => {
+            object.put(InMemElement::new(
+                tags::ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH,
+                VR::UV,
+                PrimitiveValue::U64(vec![*valid.start()].into()),
+            ));
+            Some(TotalLengthRepair::Replaced)
+        }
+        _ => {
+            object.remove_element(tags::ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH);
+            Some(TotalLengthRepair::Removed)
+        }
+    }
 }
 
 /// Fail when segment removal would change fragment offsets or lengths that an Extended Offset
@@ -1399,6 +1483,92 @@ mod tests {
         assert!(strip_jpeg_segments(&dnl, true).is_ok());
         let dnl_first = jpeg(&segment(0xDC, &[0, 2]), &gray_ls, &[], &[T87_SCAN]);
         assert!(strip_jpeg_segments(&dnl_first, true).is_err());
+    }
+
+    #[test]
+    fn repair_total_length_replaces_or_removes_a_mismatched_value() {
+        const RLE: &str = "1.2.840.10008.1.2.5";
+        let total_length = |object: &InMemDicomObject| {
+            object
+                .get(tags::ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH)
+                .map(|element| element.to_int::<u64>().unwrap())
+        };
+        let with_value = |mut object: InMemDicomObject, value: u64| {
+            object.put(InMemElement::new(
+                tags::ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH,
+                VR::UV,
+                PrimitiveValue::U64(vec![value].into()),
+            ));
+            object
+        };
+        let zero_end = || vec![vec![1, 2, 3, 4], vec![5, 0, 0, 0]];
+        let nonzero_end = || vec![vec![1, 2, 3, 4], vec![5, 0, 0, 6]];
+        // A final zero byte without an end marker can be data, so an RLE value is removed.
+        for (transfer_syntax, fragments, source, expected) in [
+            ("1.2.840.10008.1.2.4.70", zero_end(), 8, Some(5)),
+            ("1.2.840.10008.1.2.4.70", zero_end(), 5, Some(5)),
+            (RLE, zero_end(), 5, None),
+            (RLE, zero_end(), 8, Some(8)),
+            (RLE, zero_end(), 7, Some(7)),
+            (RLE, nonzero_end(), 7, Some(8)),
+        ] {
+            let mut object = with_value(object(None, Vec::new(), fragments), source);
+            let repair = repair_total_length(&mut object, transfer_syntax);
+            assert_eq!(
+                repair,
+                match expected {
+                    None => Some(TotalLengthRepair::Removed),
+                    Some(value) if value == source => None,
+                    Some(_) => Some(TotalLengthRepair::Replaced),
+                },
+                "{transfer_syntax}: {source}"
+            );
+            assert_eq!(
+                total_length(&object),
+                expected,
+                "{transfer_syntax}: {source}"
+            );
+            assert!(!total_length_mismatch(&object, transfer_syntax));
+        }
+        // A matching number with the wrong VR is malformed and is rewritten as UV.
+        for wrong_vr in [
+            InMemElement::new(
+                tags::ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH,
+                VR::UL,
+                PrimitiveValue::from(5_u32),
+            ),
+            InMemElement::new(
+                tags::ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH,
+                VR::LO,
+                PrimitiveValue::from("5"),
+            ),
+        ] {
+            let mut object = object(None, Vec::new(), zero_end());
+            object.put(wrong_vr);
+            let transfer_syntax = "1.2.840.10008.1.2.4.70";
+            assert!(total_length_mismatch(&object, transfer_syntax));
+            assert_eq!(
+                repair_total_length(&mut object, transfer_syntax),
+                Some(TotalLengthRepair::Replaced)
+            );
+            let repaired = object
+                .get(tags::ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH)
+                .unwrap();
+            assert_eq!(repaired.vr(), VR::UV);
+            assert_eq!(repaired.to_int::<u64>().unwrap(), 5);
+        }
+        let mut native = with_value(InMemDicomObject::new_empty(), 2);
+        native.put(InMemElement::new(
+            tags::PIXEL_DATA,
+            VR::OB,
+            PrimitiveValue::from(vec![0_u8, 1]),
+        ));
+        assert_eq!(
+            repair_total_length(&mut native, "1.2.840.10008.1.2.1"),
+            Some(TotalLengthRepair::Removed)
+        );
+        assert_eq!(total_length(&native), None);
+        assert!(native.get(tags::PIXEL_DATA).is_some());
     }
 
     #[test]
