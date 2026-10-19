@@ -3,8 +3,8 @@
 use std::io::Cursor;
 
 use dicom_anon::{
-    anonymize_reader, read_dicom, validate_object_with_options, validate_source_object, Anonymizer,
-    Options, ProfileConfiguration, SecretKey, ValidationOptions,
+    anonymize_reader, read_dicom, validate_object_with_options, validate_source_object,
+    write_dicom, Anonymizer, Options, ProfileConfiguration, SecretKey, ValidationOptions,
 };
 use napi::bindgen_prelude::Buffer;
 use napi::{Error, Result, Status};
@@ -17,6 +17,17 @@ pub struct AnonymizeResult {
     pub data: Buffer,
     /// Serialized `AnonymizationReport`.
     pub report_json: String,
+}
+
+/// Result returned by `anonymizeWithGeneratedUidMap`.
+#[napi(object)]
+pub struct GeneratedUidMapResult {
+    /// Complete DICOM Part 10 output.
+    pub data: Buffer,
+    /// Serialized `AnonymizationReport`.
+    pub report_json: String,
+    /// Complete source-to-replacement UID map. Keep it under re-identification custody.
+    pub uid_map_json: String,
 }
 
 /// Result returned by `validate`.
@@ -36,18 +47,48 @@ pub fn anonymize(
     patient_scope: Option<String>,
     configuration_json: Option<String>,
 ) -> Result<AnonymizeResult> {
-    let secret = SecretKey::new(key.as_ref()).map_err(napi_error)?;
-    let mut options = Options::new(secret);
-    options.patient_scope = patient_scope;
-    if let Some(configuration_json) = configuration_json {
-        options.profile = parse_configuration(&configuration_json)?;
-    }
-    let anonymizer = Anonymizer::new(options).map_err(napi_error)?;
+    let anonymizer = anonymizer(&key, patient_scope, configuration_json)?;
     let (output, report) =
         anonymize_reader(&anonymizer, Cursor::new(data.as_ref())).map_err(napi_error)?;
     Ok(AnonymizeResult {
         data: output.into(),
         report_json: serde_json::to_string(&report).map_err(napi_error)?,
+    })
+}
+
+/// Return a JSON list of `{path, uid}` source UID occurrences that the profile replaces.
+#[napi]
+pub fn required_uids(
+    data: Buffer,
+    key: Buffer,
+    patient_scope: Option<String>,
+    configuration_json: Option<String>,
+) -> Result<String> {
+    let anonymizer = anonymizer(&key, patient_scope, configuration_json)?;
+    let object = read_dicom(Cursor::new(data.as_ref())).map_err(napi_error)?;
+    let required = anonymizer.required_uids(&object).map_err(napi_error)?;
+    serde_json::to_string(&required).map_err(napi_error)
+}
+
+/// De-identify DICOM Part 10 bytes and assign random Safe Harbor replacement UIDs.
+#[napi]
+pub fn anonymize_with_generated_uid_map(
+    data: Buffer,
+    key: Buffer,
+    patient_scope: Option<String>,
+    configuration_json: Option<String>,
+) -> Result<GeneratedUidMapResult> {
+    let anonymizer = anonymizer(&key, patient_scope, configuration_json)?;
+    let object = read_dicom(Cursor::new(data.as_ref())).map_err(napi_error)?;
+    let (output, report, uid_map) = anonymizer
+        .anonymize_with_generated_uid_map(&object)
+        .map_err(napi_error)?;
+    let mut bytes = Vec::new();
+    write_dicom(&output, &mut bytes).map_err(napi_error)?;
+    Ok(GeneratedUidMapResult {
+        data: bytes.into(),
+        report_json: serde_json::to_string(&report).map_err(napi_error)?,
+        uid_map_json: serde_json::to_string(&uid_map).map_err(napi_error)?,
     })
 }
 
@@ -89,6 +130,19 @@ pub fn validate_with_source(
         conformant: report.conformant,
         report_json: serde_json::to_string(&report).map_err(napi_error)?,
     })
+}
+
+fn anonymizer(
+    key: &Buffer,
+    patient_scope: Option<String>,
+    configuration_json: Option<String>,
+) -> Result<Anonymizer> {
+    let mut options = Options::new(SecretKey::new(key.as_ref()).map_err(napi_error)?);
+    options.patient_scope = patient_scope;
+    if let Some(configuration_json) = configuration_json {
+        options.profile = parse_configuration(&configuration_json)?;
+    }
+    Anonymizer::new(options).map_err(napi_error)
 }
 
 fn parse_configuration(value: &str) -> Result<ProfileConfiguration> {

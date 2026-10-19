@@ -78,8 +78,27 @@ pub enum Error {
     #[error("Safe Harbor metadata mode requires an explicit independently assigned patient scope")]
     SafeHarborPatientScopeRequired,
     /// Safe Harbor mode lacked an independently assigned UID replacement.
-    #[error("Safe Harbor UID mapping is missing a required source UID")]
-    MissingSafeHarborUidMapping,
+    ///
+    /// The path identifies the attribute. The error never contains the UID value.
+    #[error("Safe Harbor UID mapping has no entry for the source UID at {path}")]
+    MissingSafeHarborUidMapping {
+        /// Attribute path, for example `(0020,9221)[0]/(0020,9164)`.
+        path: String,
+    },
+    /// A source UID that needs a generated replacement is empty or malformed.
+    ///
+    /// The path identifies the attribute. The error never contains the UID value.
+    #[error("source UID at {path} is empty or is not a valid DICOM UID")]
+    InvalidSourceUid {
+        /// Attribute path, for example `(0020,000D)`.
+        path: String,
+    },
+    /// UID map generation was requested outside the Safe Harbor metadata policy.
+    #[error("UID map generation requires the safe-harbor-metadata policy")]
+    UidMapGenerationRequiresSafeHarbor,
+    /// The operating-system random source failed or gave no unique replacement.
+    #[error("cannot generate a random replacement UID: {0}")]
+    RandomUidGeneration(String),
     /// A configured UID replacement was invalid or collided with another mapping.
     #[error("invalid Safe Harbor UID mapping: {0}")]
     InvalidSafeHarborUidMapping(String),

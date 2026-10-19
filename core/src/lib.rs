@@ -8,6 +8,7 @@ mod io;
 mod profile;
 mod pseudonym;
 mod temporal;
+mod uid_map;
 mod validate;
 
 pub use anonymize::{AnonymizationReport, Anonymizer, Options};
@@ -19,6 +20,7 @@ pub use profile::{
     PROFILE_VERSION,
 };
 pub use pseudonym::SecretKey;
+pub use uid_map::RequiredUid;
 pub use validate::{
     validate_file, validate_file_with_options, validate_object, validate_object_with_options,
     validate_source_object, Severity, ValidationFinding, ValidationMode, ValidationOptions,
