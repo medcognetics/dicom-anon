@@ -135,6 +135,42 @@ impl AnonymizationReport {
     }
 }
 
+/// One de-identified instance from [`Anonymizer::anonymize_study`].
+#[derive(Debug, Clone)]
+pub struct StudyInstanceOutput {
+    /// De-identified object.
+    pub output: DefaultDicomObject,
+    /// Anonymization report for this instance.
+    pub report: AnonymizationReport,
+    /// Source-aware validation report for this instance. It is always conformant.
+    pub validation: crate::ValidationReport,
+}
+
+/// Result of [`Anonymizer::anonymize_study`].
+///
+/// `Debug` omits the UID map because it contains source UIDs.
+#[derive(Clone)]
+pub struct StudyOutput {
+    /// Outputs in the same order as the source instances.
+    pub instances: Vec<StudyInstanceOutput>,
+    /// Complete original-to-replacement UID map for the study. It is
+    /// re-identification material; never send it with the outputs.
+    pub uid_map: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for StudyOutput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StudyOutput")
+            .field("instances", &self.instances)
+            .field(
+                "uid_map",
+                &format_args!("<{} entries redacted>", self.uid_map.len()),
+            )
+            .finish()
+    }
+}
+
 /// Reusable deterministic de-identifier.
 #[derive(Clone, Debug)]
 pub struct Anonymizer {
@@ -199,6 +235,66 @@ impl Anonymizer {
         let resolver = UidResolver::generate(source, self.options.profile.uid_mappings.clone())?;
         let (output, report, uids) = self.anonymize_with(source, resolver)?;
         Ok((output, report, uids.into_map()))
+    }
+
+    /// De-identify every instance of one study under the Safe Harbor metadata policy.
+    ///
+    /// One UID map is threaded through the instances in order: it starts from
+    /// `options.profile.uid_mappings`, and each missing replacement is drawn from the
+    /// operating-system CSPRNG as in [`Self::anonymize_with_generated_uid_map`]. Every
+    /// output is then checked with source-aware validation against the complete map.
+    ///
+    /// The call fails as a whole. When any instance fails a gate, a transformation,
+    /// or validation, the error names only the instance index and attribute paths,
+    /// and no output is returned. The returned map is re-identification material;
+    /// keep it under the custody rules in the security documentation.
+    pub fn anonymize_study(&self, sources: &[DefaultDicomObject]) -> Result<StudyOutput> {
+        if self.options.profile.policy != DeidentificationPolicy::SafeHarborMetadata {
+            return Err(Error::UidMapGenerationRequiresSafeHarbor);
+        }
+        if sources.is_empty() {
+            return Err(Error::EmptyStudy);
+        }
+        let instance_error = |index: usize| {
+            move |error: Error| Error::StudyInstance {
+                index,
+                source: Box::new(error),
+            }
+        };
+
+        let mut uid_map = self.options.profile.uid_mappings.clone();
+        let mut outputs = Vec::with_capacity(sources.len());
+        for (index, source) in sources.iter().enumerate() {
+            let resolver = UidResolver::generate(source, uid_map).map_err(instance_error(index))?;
+            let (output, report, uids) = self
+                .anonymize_with(source, resolver)
+                .map_err(instance_error(index))?;
+            uid_map = uids.into_map();
+            outputs.push((output, report));
+        }
+
+        let mut validation_options = self.options.clone();
+        validation_options.profile.uid_mappings = uid_map.clone();
+        let mut instances = Vec::with_capacity(outputs.len());
+        for (index, (source, (output, report))) in sources.iter().zip(outputs).enumerate() {
+            let validation =
+                crate::validate_source_object(source, &output, validation_options.clone())
+                    .map_err(instance_error(index))?;
+            if !validation.conformant {
+                let errors = validation
+                    .findings
+                    .iter()
+                    .filter(|finding| finding.severity == crate::Severity::Error)
+                    .count();
+                return Err(Error::StudyValidation { index, errors });
+            }
+            instances.push(StudyInstanceOutput {
+                output,
+                report,
+                validation,
+            });
+        }
+        Ok(StudyOutput { instances, uid_map })
     }
 
     fn anonymize_with(

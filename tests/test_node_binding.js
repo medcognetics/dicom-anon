@@ -47,11 +47,11 @@ function element(group, number, vr, value) {
   return Buffer.concat([header, bytes])
 }
 
-function syntheticDicom() {
+function syntheticDicom(instanceUid = SOURCE_UIDS[0]) {
   const meta = Buffer.concat([
     element(0x0002, 0x0001, 'OB', Buffer.from([0, 1])),
     element(0x0002, 0x0002, 'UI', SECONDARY_CAPTURE),
-    element(0x0002, 0x0003, 'UI', SOURCE_UIDS[0]),
+    element(0x0002, 0x0003, 'UI', instanceUid),
     element(0x0002, 0x0010, 'UI', '1.2.840.10008.1.2.1'),
     element(0x0002, 0x0012, 'UI', '2.25.1'),
   ])
@@ -63,7 +63,7 @@ function syntheticDicom() {
     element(0x0002, 0x0000, 'UL', length),
     meta,
     element(0x0008, 0x0016, 'UI', SECONDARY_CAPTURE),
-    element(0x0008, 0x0018, 'UI', SOURCE_UIDS[0]),
+    element(0x0008, 0x0018, 'UI', instanceUid),
     element(0x0010, 0x0020, 'LO', 'SYNTHETIC'),
     element(0x0020, 0x000d, 'UI', SOURCE_UIDS[1]),
     element(0x0020, 0x000e, 'UI', SOURCE_UIDS[2]),
@@ -89,6 +89,29 @@ for (const uid of SOURCE_UIDS) {
   assert.equal(first.data.includes(uid), false)
   assert.equal(first.reportJson.includes(uid), false)
 }
+
+const SECOND_INSTANCE_UID = '2.25.314159265358979323846264338327950288'
+const study = binding.anonymizeStudy(
+  [syntheticDicom(), syntheticDicom(SECOND_INSTANCE_UID)],
+  KEY,
+  'SUBJ-0001',
+  SAFE_HARBOR,
+)
+const studyMap = JSON.parse(study.uidMapJson)
+assert.deepEqual(new Set(Object.keys(studyMap)), new Set([...SOURCE_UIDS, SECOND_INSTANCE_UID]))
+assert.equal(study.data.length, 2)
+for (const [index, output] of study.data.entries()) {
+  assert.equal(JSON.parse(study.validationJsons[index]).conformant, true)
+  assert.equal(output.includes(studyMap[SOURCE_UIDS[1]]), true)
+  for (const uid of [...SOURCE_UIDS, SECOND_INSTANCE_UID]) {
+    assert.equal(output.includes(uid), false)
+    assert.equal(study.reportJsons[index].includes(uid), false)
+  }
+}
+assert.throws(
+  () => binding.anonymizeStudy([syntheticDicom(), Buffer.from('not DICOM')], KEY, 'SUBJ-0001', SAFE_HARBOR),
+  (error) => error.message.includes('study instance 1') && !error.message.includes(SENTINEL_UID),
+)
 
 assert.throws(
   () => binding.anonymize(syntheticDicom(), KEY, 'SUBJ-0001', SAFE_HARBOR),

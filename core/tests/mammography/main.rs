@@ -652,3 +652,133 @@ fn command_line_source_aware_validation_passes() {
         }
     }
 }
+
+fn safe_harbor_without_uid_map() -> Options {
+    let mut options = Policy::SafeHarbor.options();
+    options.profile.uid_mappings.clear();
+    options
+}
+
+#[test]
+fn study_api_threads_one_generated_uid_map_through_all_instances() {
+    let fixtures = Fixtures::new();
+    let sources = [
+        &fixtures.mammogram,
+        &fixtures.tomosynthesis,
+        &fixtures.synthesized,
+    ]
+    .map(round_trip);
+    let study = Anonymizer::new(safe_harbor_without_uid_map())
+        .unwrap()
+        .anonymize_study(&sources)
+        .unwrap();
+    assert_eq!(study.instances.len(), 3);
+
+    // Instance-level and shared UIDs are mapped, and no source UID survives in any output.
+    for uid in [
+        fixtures::STUDY,
+        fixtures::SOP_MG,
+        fixtures::SOP_DBT,
+        fixtures::SOP_SYNTHESIZED,
+        fixtures::FRAME_OF_REFERENCE,
+    ] {
+        assert!(study.uid_map.contains_key(uid), "{uid} is not mapped");
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for replacement in study.uid_map.values() {
+        assert!(seen.insert(replacement), "duplicate replacement UID");
+        assert!(replacement.starts_with("2.25."), "{replacement}");
+    }
+    for instance in &study.instances {
+        assert!(instance.validation.conformant);
+        visit(&instance.output, 0, &mut |element, _| {
+            if let Ok(value) = element.to_str() {
+                assert!(!source_uid_in(&value), "source UID in {}", element.tag());
+            }
+        });
+    }
+
+    // The synthesized view still references the tomosynthesis output, and the study,
+    // patient token, and frame of reference agree across instances.
+    let [mammogram, dbt, synthesized] = [0, 1, 2].map(|index| &study.instances[index].output);
+    let source_image = item(synthesized, tags::SOURCE_IMAGE_SEQUENCE, 0);
+    assert_eq!(
+        text(source_image, tags::REFERENCED_SOP_INSTANCE_UID),
+        text(dbt, tags::SOP_INSTANCE_UID)
+    );
+    for tag in [tags::STUDY_INSTANCE_UID, tags::CLINICAL_TRIAL_SUBJECT_ID] {
+        let value = text(dbt, tag);
+        assert!(
+            value.as_deref().is_some_and(|value| !value.is_empty()),
+            "{tag}"
+        );
+        assert_eq!(text(mammogram, tag), value, "{tag}");
+        assert_eq!(text(synthesized, tag), value, "{tag}");
+    }
+    assert_eq!(
+        text(synthesized, tags::FRAME_OF_REFERENCE_UID),
+        text(dbt, tags::FRAME_OF_REFERENCE_UID)
+    );
+
+    // The debug form never prints the map.
+    let debug = format!("{study:?}");
+    for uid in SOURCE_UIDS {
+        assert!(!debug.contains(uid));
+    }
+}
+
+#[test]
+fn study_api_keeps_supplied_mappings() {
+    let fixtures = Fixtures::new();
+    let sources = [round_trip(&fixtures.mammogram)];
+    let mut options = safe_harbor_without_uid_map();
+    options
+        .profile
+        .uid_mappings
+        .insert(fixtures::SOP_MG.to_owned(), "2.25.42".to_owned());
+    let study = Anonymizer::new(options)
+        .unwrap()
+        .anonymize_study(&sources)
+        .unwrap();
+    assert_eq!(study.uid_map[fixtures::SOP_MG], "2.25.42");
+    assert_eq!(
+        text(&study.instances[0].output, tags::SOP_INSTANCE_UID).as_deref(),
+        Some("2.25.42")
+    );
+}
+
+#[test]
+fn study_api_fails_as_a_whole_and_names_only_the_instance() {
+    let fixtures = Fixtures::new();
+    let sources = [&fixtures.mammogram, &fixtures.tomosynthesis].map(round_trip);
+    let mut options = safe_harbor_without_uid_map();
+    options
+        .profile
+        .sop_class_allowlist
+        .insert(fixtures::MG_FOR_PRESENTATION.to_owned());
+    let error = Anonymizer::new(options)
+        .unwrap()
+        .anonymize_study(&sources)
+        .unwrap_err();
+    match &error {
+        dicom_anon::Error::StudyInstance { index, .. } => assert_eq!(*index, 1),
+        other => panic!("unexpected error: {other}"),
+    }
+    let message = error.to_string();
+    for uid in SOURCE_UIDS {
+        assert!(!message.contains(uid), "{message}");
+    }
+
+    assert!(matches!(
+        Anonymizer::new(safe_harbor_without_uid_map())
+            .unwrap()
+            .anonymize_study(&[]),
+        Err(dicom_anon::Error::EmptyStudy)
+    ));
+    assert!(matches!(
+        Anonymizer::new(Policy::DicomExtended.options())
+            .unwrap()
+            .anonymize_study(&sources),
+        Err(dicom_anon::Error::UidMapGenerationRequiresSafeHarbor)
+    ));
+}
