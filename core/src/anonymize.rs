@@ -496,6 +496,13 @@ impl Anonymizer {
                         .clean_sequence_or_clone(element, context, report)
                         .map(Some);
                 }
+                if matches!(element.vr(), VR::DA | VR::DT | VR::TM)
+                    && temporal_value_is_empty(element)
+                {
+                    // A zero-length Type 2 or Type 3 value has nothing to shift or
+                    // generalize, so it stays zero length.
+                    return Ok(Some(InMemElement::empty(tag, element.vr())));
+                }
                 if element.vr() == VR::DA {
                     let original = element.to_str().map_err(|_| Error::InvalidTemporal {
                         tag: format_tag(tag),
@@ -793,6 +800,9 @@ fn paired_day_adjustment(
     let Some(date_element) = source.get(date_tag) else {
         return Ok(None);
     };
+    if temporal_value_is_empty(time_element) || temporal_value_is_empty(date_element) {
+        return Ok(None);
+    }
     let time_value = time_element.to_str().map_err(|_| Error::InvalidTemporal {
         tag: format_tag(time_tag),
         vr: "TM",
@@ -809,6 +819,13 @@ fn paired_day_adjustment(
         });
     }
     Ok(Some((date_tag, day_adjustments)))
+}
+
+/// True for a zero-length temporal value, including one that holds only padding.
+fn temporal_value_is_empty(element: &InMemElement) -> bool {
+    element
+        .to_str()
+        .is_ok_and(|value| value.trim_matches([' ', '\0']).is_empty())
 }
 
 const fn paired_date_tag(time_tag: Tag) -> Option<Tag> {
@@ -1297,6 +1314,78 @@ mod tests {
             anonymizer().anonymize(&source),
             Err(Error::MismatchedTemporalPair { .. })
         ));
+    }
+
+    #[test]
+    fn zero_length_temporal_values_stay_empty_under_every_policy() {
+        let empty_tags = [
+            tags::SERIES_DATE,
+            tags::SERIES_TIME,
+            tags::ACQUISITION_DATE_TIME,
+            tags::STUDY_DATE,
+            tags::CONTENT_TIME,
+        ];
+        let mut source = test_object("PATIENT-1", "20200615", "1.2.3.1");
+        for tag in [tags::SERIES_DATE, tags::STUDY_DATE] {
+            source.put(InMemElement::empty(tag, VR::DA));
+        }
+        source.put(InMemElement::empty(tags::ACQUISITION_DATE_TIME, VR::DT));
+        source.put(InMemElement::empty(tags::SERIES_TIME, VR::TM));
+        // One side of a paired date and time is empty.
+        source.put_str(tags::STUDY_TIME, VR::TM, "121314");
+        source.put_str(tags::CONTENT_DATE, VR::DA, "20200615");
+        source.put(InMemElement::empty(tags::CONTENT_TIME, VR::TM));
+        // Padding only.
+        source.put_str(tags::ACQUISITION_DATE, VR::DA, "  ");
+
+        let mut safe_harbor = Options::new(SecretKey::new(KEY).unwrap());
+        safe_harbor.profile = ProfileConfiguration::safe_harbor();
+        safe_harbor.patient_scope = Some("independent-subject-001".to_owned());
+        safe_harbor.profile.uid_mappings = [
+            ("1.2.3.1", "2.25.101"),
+            ("1.2.3.1.1", "2.25.102"),
+            ("1.2.3.1.2", "2.25.103"),
+        ]
+        .into_iter()
+        .map(|(source, replacement)| (source.to_owned(), replacement.to_owned()))
+        .collect();
+        let mut dicom = Options::new(SecretKey::new(KEY).unwrap());
+        dicom.profile = ProfileConfiguration::dicom();
+        dicom
+            .profile
+            .options
+            .insert(DicomOption::RetainModifiedDates);
+
+        for options in [
+            Options::new(SecretKey::new(KEY).unwrap()),
+            dicom,
+            safe_harbor,
+        ] {
+            let policy = options.profile.policy;
+            let (output, _) = Anonymizer::new(options.clone())
+                .unwrap()
+                .anonymize(&source)
+                .unwrap();
+            for tag in empty_tags.into_iter().chain([tags::ACQUISITION_DATE]) {
+                assert_eq!(
+                    element_text(&output, tag).as_deref(),
+                    Some(""),
+                    "{policy:?} {}",
+                    format_tag(tag)
+                );
+            }
+            assert_ne!(element_text(&output, tags::STUDY_TIME).as_deref(), Some(""));
+            assert_ne!(
+                element_text(&output, tags::CONTENT_DATE).as_deref(),
+                Some("20200615")
+            );
+            let validation = crate::validate_source_object(&source, &output, options).unwrap();
+            assert!(
+                validation.conformant,
+                "{policy:?}: {:?}",
+                validation.findings
+            );
+        }
     }
 
     fn dataset_timestamp(object: &InMemDicomObject) -> NaiveDateTime {
