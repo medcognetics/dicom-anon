@@ -155,6 +155,14 @@ The `core/tests/mammography` suite generates synthetic Digital Mammography X-Ray
 - The Source Image Sequence, Dimension Organization UID, and File Meta SOP Instance UID stay consistent with the output instances.
 - Source-aware validation passes through the library and through `dicom-validate`.
 
+The suite also builds vendor-shaped variants of each object for Hologic, GE, Siemens, and Fujifilm, plus a Digital Mammography X-Ray Image Storage - For Processing object. Each variant carries the vendor's Manufacturer, Manufacturer's Model Name, Software Versions, and Acquisition Device Processing Description, and private blocks under the vendor's private creator at the root, in the per-frame and shared functional groups, and as a nested private sequence. The variants are synthetic: they follow the published conformance statements in shape, but they contain no vendor data. With the `safe-harbor-metadata` policy, the shipped breast descriptor map, the Burned In Annotation gate, and a SOP Class allowlist of the three image classes, the suite checks that:
+
+- source-aware validation passes;
+- no odd-group element remains at any depth;
+- Manufacturer and Manufacturer's Model Name are replaced;
+- the SOP Class, view and laterality attributes, the Basic Offset Table, and the Pixel Data fragments do not change;
+- removing the SOP Class from the allowlist, or setting Burned In Annotation to `YES` or removing it, makes the anonymizer fail with no output.
+
 In Safe Harbor mode, the View Code Sequence code values are replaced with `ANONYMIZED` at this revision. Issue #20 tracks this behavior.
 
 ## Pixel and disclosure limits
