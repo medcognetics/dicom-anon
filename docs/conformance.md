@@ -146,7 +146,7 @@ The validator is a confidentiality-policy validator, not a complete SOP Class or
 
 ## Verified mammography object types
 
-The `core/tests/mammography` suite generates synthetic Digital Mammography X-Ray Image Storage - For Presentation, Breast Tomosynthesis Image Storage with two frames and functional groups, and a synthesized 2D image that references the tomosynthesis instance. All three use JPEG 2000 Lossless encapsulated Pixel Data. The suite processes each object with the `dicom`, `dicom-extended`, and `safe-harbor-metadata` policies. It checks metadata only:
+The `core/tests/mammography` suite generates synthetic Digital Mammography X-Ray Image Storage - For Presentation, Breast Tomosynthesis Image Storage with two frames and functional groups, and a synthesized 2D image that references the tomosynthesis instance. All three use JPEG 2000 Lossless encapsulated Pixel Data. The suite processes each object with the `dicom`, `dicom-extended`, and `safe-harbor-metadata` policies, and with `safe-harbor-metadata` plus the shipped breast-imaging descriptor map. It checks metadata only:
 
 - No placeholder identifier or source UID remains in File Meta Information or in any nested item.
 - Transfer Syntax UID, Image Pixel module attributes, the Basic Offset Table, and the Pixel Data fragments do not change.
@@ -155,7 +155,7 @@ The `core/tests/mammography` suite generates synthetic Digital Mammography X-Ray
 - The Source Image Sequence, Dimension Organization UID, and File Meta SOP Instance UID stay consistent with the output instances.
 - Source-aware validation passes through the library and through `dicom-validate`.
 
-In Safe Harbor mode, the View Code Sequence code values are replaced with `ANONYMIZED` at this revision. Issue #20 tracks this behavior.
+Each fixture also goes through `safe-harbor-metadata` with the shipped breast-imaging descriptor map (`descriptor-maps/breast-imaging-ps3.16-2026d.json`). With that map, View Code Sequence is unchanged and source-aware validation passes, both through the library and through `dicom-validate --descriptor-map`. Without a descriptor map, Safe Harbor mode replaces the View Code Sequence code values with `ANONYMIZED`, as [Text attributes outside Table E.1-1](#text-attributes-outside-table-e1-1) describes. A mammography inference pipeline that needs the coded view must load the breast map.
 
 ## Pixel and disclosure limits
 
