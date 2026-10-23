@@ -14,8 +14,9 @@ FULL_SHA_PATTERN = re.compile(
     r"^\s*uses:\s*[^\s@]+@([0-9a-f]{40})\s*(?:#.*)?$", re.MULTILINE
 )
 ANY_ACTION_PATTERN = re.compile(r"^\s*uses:\s*[^\s@]+@([^\s#]+)", re.MULTILINE)
+# The repository is public. The org's self-hosted runner group does not accept public
+# repositories, and hosted runners isolate fork pull requests, so CI runs on hosted Linux.
 HOSTED_RUNNER = "ubuntu-24.04"
-CUDA_BERYL_RUNNER = "[self-hosted, linux, x64, beryl, cuda]"
 JOB_PATTERN = re.compile(r"^  (?P<job>[A-Za-z0-9_-]+):$")
 RUNS_ON_PATTERN = re.compile(r"^    runs-on:[ \t]*(?P<value>.*)$")
 BLOCK_SCALAR_PATTERN = re.compile(r"^[>|][-+]?(?:[ \t]+#.*)?$")
@@ -25,15 +26,6 @@ RUST_TOOLCHAIN_ACTION = "dtolnay/rust-toolchain"
 RUST_TOOLCHAIN_ACTION_SHA = "6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772"
 SETUP_GO_SHA = "4a3601121dd01d1626a1e23e37211e3254c1c06c"
 CI_CONTAINER_IMAGE = "ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90"
-CUDA_CONTAINER_IMAGE = (
-    "nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04@"
-    "sha256:2fcc4280646484290cc50dce5e65f388dd04352b07cbe89a635703bd1f9aedb6"
-)
-CUDA_ASSET_VOLUME = "dicom-anon-report-cuda-assets:/opt/dicom-anon-report-assets"
-CUDA_BUNDLE_DIRECTORY = (
-    "/opt/dicom-anon-report-assets/"
-    "privacy-filter-7ffa9a043d54d1be65afb281eddf0ffbe629385b-ort-1.27.1-cuda12"
-)
 CI_CONTAINER_PACKAGES = (
     "build-essential",
     "ca-certificates",
@@ -55,6 +47,13 @@ DEPRECATION_NATIVE_PACKAGES = (
     "pkg-config",
 )
 ZIZMOR_VERSION = "1.29.0"
+
+
+def workflow_paths() -> list[Path]:
+    """Every workflow file. GitHub Actions runs both `.yml` and `.yaml` files."""
+    return sorted(
+        [*WORKFLOW_DIRECTORY.glob("*.yml"), *WORKFLOW_DIRECTORY.glob("*.yaml")]
+    )
 
 
 def read_workflow(name: str) -> str:
@@ -81,10 +80,9 @@ def job_runners(workflow: str) -> dict[str, str]:
 
 
 def test_expected_workflows_replace_legacy_ci() -> None:
-    assert sorted(path.name for path in WORKFLOW_DIRECTORY.glob("*.yml")) == [
+    assert [path.name for path in workflow_paths()] == [
         "dependency-health.yml",
         "linux-ci.yml",
-        "nightly-cuda.yml",
         "nightly.yml",
         "release.yml",
     ]
@@ -116,14 +114,36 @@ def test_linux_ci_contract() -> None:
     assert "if: always()" in workflow
 
 
-def test_linux_ci_runs_every_job_on_hosted_runners() -> None:
+def test_linux_ci_runs_every_pull_request_on_hosted_runners() -> None:
     workflow = read_workflow("linux-ci.yml")
 
     assert job_runners(workflow) == {
         "supported-versions": HOSTED_RUNNER,
         "required": HOSTED_RUNNER,
     }
-    assert "self-hosted" not in workflow
+    # Fork pull requests run too: hosted runners are ephemeral, and the jobs have a
+    # read-only token and no secrets.
+    assert "head.repo.full_name" not in workflow
+    assert "secrets." not in workflow
+
+
+def test_every_job_runs_on_a_hosted_runner() -> None:
+    # A self-hosted runner on a public repository lets a fork pull request run its own
+    # workflow there (#45), so every job must use the hosted image.
+    for workflow_path in workflow_paths():
+        workflow = workflow_path.read_text(encoding="utf-8")
+        jobs = [
+            match["job"]
+            for line in workflow.partition("\njobs:\n")[2].splitlines()
+            if (match := JOB_PATTERN.match(line))
+        ]
+        runners = job_runners(workflow)
+        # A job without runs-on (for example, a reusable-workflow call) is not allowed.
+        assert jobs and sorted(runners) == sorted(jobs), (workflow_path.name, jobs)
+        assert set(runners.values()) == {HOSTED_RUNNER}, (workflow_path.name, runners)
+    assert "labels: []" in (REPOSITORY_ROOT / ".github" / "actionlint.yaml").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_ci_jobs_use_a_pinned_ci_container() -> None:
@@ -155,7 +175,7 @@ def test_scheduled_workflow_contracts() -> None:
     )[2].partition("\n      - name:")[0]
 
     assert "cron: '17 6 * * *'" in nightly
-    assert job_runners(nightly) == {"validate-release": HOSTED_RUNNER}
+    assert job_runners(nightly)["validate-release"] == HOSTED_RUNNER
     assert "make ci" in nightly and "make release" in nightly
     assert "timeout-minutes: 30" in nightly
     assert "cron: '37 6 * * 1'" in dependency_health
@@ -187,8 +207,8 @@ def test_release_workflow_contract() -> None:
         "checks:",
         "read",
     ]
-    # Release builds install pinned, verified tools and use no cache that another
-    # workflow run can write.
+    # Release builds install pinned, verified tools and use no cache that another job
+    # can write.
     for shared_cache_action in (
         "rust-cache",
         "actions/setup-python@",
@@ -264,40 +284,15 @@ def test_rust_toolchain_action_uses_master_pin() -> None:
     assert set(action_references) == {expected_reference}
 
 
-def test_nightly_cuda_contract() -> None:
-    nightly_cuda = read_workflow("nightly-cuda.yml")
-    cuda_job = nightly_cuda.partition("  cuda-report:\n")[2]
-    actionlint = (REPOSITORY_ROOT / ".github" / "actionlint.yaml").read_text(
-        encoding="utf-8"
-    )
+def test_cuda_validation_stays_out_of_hosted_ci() -> None:
+    # A self-hosted runner on a public repository lets fork pull requests run their own
+    # workflows there, so the GPU job left CI (#45). The make target stays for GPU hosts.
     makefile = (REPOSITORY_ROOT / "Makefile").read_text(encoding="utf-8")
 
-    assert cuda_job
-    assert "name: Nightly / CUDA report integration" in cuda_job
-    assert "needs:" not in cuda_job
-    assert job_runners(nightly_cuda) == {"cuda-report": CUDA_BERYL_RUNNER}
-    assert "pull_request" not in nightly_cuda
-    assert f"runs-on: {CUDA_BERYL_RUNNER}" in cuda_job
-    assert f"image: {CUDA_CONTAINER_IMAGE}" in cuda_job
-    assert "options: --gpus all" in cuda_job
-    assert f"- {CUDA_ASSET_VOLUME}" in cuda_job
-    assert 'NVIDIA_VISIBLE_DEVICES: "0"' in cuda_job
-    assert "NVIDIA_DRIVER_CAPABILITIES: compute,utility" in cuda_job
-    assert 'CUDA_VISIBLE_DEVICES: "0"' in cuda_job
-    assert f"DICOM_ANON_REPORT_MODEL_DIR: {CUDA_BUNDLE_DIRECTORY}" in cuda_job
-    assert "DICOM_ANON_REPORT_CUDA_ORT_LIBRARY:" in cuda_job
-    assert "nightly-linux-x64-cuda12-rust-1.97.1-debug" in cuda_job
-    assert "timeout-minutes: 45" in cuda_job
-    assert (
-        "nvidia-smi --query-gpu=name,driver_version,memory.total,compute_cap"
-        in cuda_job
-    )
-    assert "model install --backend cuda12 --without-pdfium" in cuda_job
-    assert 'if [[ ! -d "${DICOM_ANON_REPORT_MODEL_DIR}" ]]' in cuda_job
-    assert "make report-cuda-integration" in cuda_job
-    assert "upload-artifact" not in cuda_job
-    assert "- cuda" in actionlint
+    assert "cuda-report:" not in read_workflow("nightly.yml")
     assert "report-cuda-integration:" in makefile
+    assert "nvidia-smi --query-gpu=" in makefile
+    assert "libonnxruntime_providers_cuda.so" in makefile
     assert "DICOM_ANON_REPORT_MODEL_DIR" in makefile
     assert "DICOM_ANON_REPORT_CUDA_ORT_LIBRARY" in makefile
     assert "--no-default-features --test model_cuda" in makefile
@@ -338,18 +333,13 @@ def test_actionlint_uses_a_supported_pinned_installer() -> None:
         assert "tool: actionlint@1.7.12" not in workflow
 
 
-def test_ci_omits_cross_platform_jobs_and_scopes_cuda_to_nightly() -> None:
+def test_ci_omits_cross_platform_jobs() -> None:
     workflow_text = "\n".join(
-        path.read_text(encoding="utf-8") for path in WORKFLOW_DIRECTORY.glob("*.yml")
+        path.read_text(encoding="utf-8") for path in workflow_paths()
     ).lower()
 
     for unsupported_runner in ("windows-", "macos-", "arm64"):
         assert unsupported_runner not in workflow_text
-    assert "cuda" not in read_workflow("linux-ci.yml").lower()
-    assert "cuda" not in read_workflow("dependency-health.yml").lower()
-    assert "cuda" not in read_workflow("nightly.yml").lower()
-    assert "cuda" not in read_workflow("release.yml").lower()
-    assert "cuda" in read_workflow("nightly-cuda.yml").lower()
 
 
 def test_node_support_floor_is_consistent() -> None:
