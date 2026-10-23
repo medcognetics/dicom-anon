@@ -267,6 +267,9 @@ impl Anonymizer {
             Some(pixel::TotalLengthRepair::Removed) => report.removed_attributes += 1,
             None => {}
         }
+        if pixel::remove_single_sample_planar_configuration(&mut output) {
+            report.removed_attributes += 1;
+        }
         add_deidentification_markers(&mut output, &self.options.profile, &patient_pseudonym);
         let meta = FileMetaTableBuilder::new()
             .transfer_syntax(transfer_syntax)
