@@ -25,7 +25,7 @@ JOB_PATTERN = re.compile(r"^  (?P<job>[A-Za-z0-9_-]+):$")
 RUNS_ON_PATTERN = re.compile(r"^    runs-on:[ \t]*(?P<value>.*)$")
 BLOCK_SCALAR_PATTERN = re.compile(r"^[>|][-+]?(?:[ \t]+#.*)?$")
 NODE_ENGINE = ">=22"
-MINIMUM_SAFE_JS_YAML_VERSION = (4, 3, 1)
+MINIMUM_SAFE_JS_YAML_VERSION = (4, 3, 2)
 RUST_TOOLCHAIN_ACTION = "dtolnay/rust-toolchain"
 RUST_TOOLCHAIN_ACTION_SHA = "6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772"
 SETUP_GO_SHA = "4a3601121dd01d1626a1e23e37211e3254c1c06c"
@@ -60,6 +60,7 @@ DEPRECATION_NATIVE_PACKAGES = (
     "pkg-config",
 )
 ZIZMOR_VERSION = "1.29.0"
+MINIMUM_SAFE_PIP_VERSION = (26, 2)
 
 
 def read_workflow(name: str) -> str:
@@ -253,9 +254,9 @@ def test_zizmor_uses_the_non_vulnerable_pin() -> None:
     assert '"zizmor==1.27.0",' not in ci_manifest
 
 
-def test_rust_toolchain_action_uses_master_pin() -> None:
+def test_rust_toolchain_action_uses_v1_pin() -> None:
     expected_reference = (
-        f"uses: {RUST_TOOLCHAIN_ACTION}@{RUST_TOOLCHAIN_ACTION_SHA} # master"
+        f"uses: {RUST_TOOLCHAIN_ACTION}@{RUST_TOOLCHAIN_ACTION_SHA} # v1"
     )
     action_references = [
         line.strip()
@@ -266,6 +267,21 @@ def test_rust_toolchain_action_uses_master_pin() -> None:
 
     assert action_references
     assert set(action_references) == {expected_reference}
+
+
+def test_ci_lock_uses_patched_pip() -> None:
+    lock = (REPOSITORY_ROOT / "tools" / "ci" / "uv.lock").read_text(encoding="utf-8")
+    match = re.search(
+        r'^name = "pip"\nversion = "([0-9]+)\.([0-9]+)\.([0-9]+)"$',
+        lock,
+        re.MULTILINE,
+    )
+
+    assert match is not None
+    assert tuple(int(component) for component in match.groups()) >= (
+        *MINIMUM_SAFE_PIP_VERSION,
+        0,
+    )
 
 
 def test_nightly_cuda_contract() -> None:
