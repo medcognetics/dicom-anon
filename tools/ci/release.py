@@ -30,6 +30,9 @@ SECURITY_REPORTS = REPOSITORY_ROOT / "target" / "ci-reports" / "security"
 REPOSITORY_URL = "https://github.com/medcognetics/dicom-anon"
 RUST_TARGET = "x86_64-unknown-linux-gnu"
 BINARIES = ("dicom-anonymize", "dicom-validate")
+# The workspace release profile keeps symbols so that source builds of the bindings load
+# on macOS. The published Linux artifacts are stripped.
+STRIP_SYMBOLS = ("--config", 'profile.release.strip="symbols"')
 CHECKSUM_FILE = "SHA256SUMS"
 # Prerelease tags are not supported: PEP 440 and SemVer spell them differently.
 TAG_PATTERN = re.compile(
@@ -204,6 +207,7 @@ def build_binaries(output: Path, version: str, commit: str) -> list[str]:
             "build",
             "--locked",
             "--release",
+            *STRIP_SYMBOLS,
             "--target",
             RUST_TARGET,
             "-p",
@@ -230,6 +234,7 @@ def build_wheel(output: Path, version: str) -> str:
             "build",
             "--release",
             "--locked",
+            *STRIP_SYMBOLS,
             "--manifest-path",
             "bindings/python/Cargo.toml",
             "--target",

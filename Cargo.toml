@@ -54,4 +54,7 @@ zeroize = "=1.8.2"
 [profile.release]
 lto = "thin"
 codegen-units = 1
-strip = "symbols"
+# Source builds keep symbols: a stripped Python or Node extension fails to load on macOS
+# ("mis-aligned LINKEDIT string pool"). tools/ci/release.py strips the Linux release
+# artifacts with `--config profile.release.strip="symbols"`.
+strip = "none"
