@@ -443,6 +443,48 @@ fn jpeg2000_comments_are_removed_without_changing_decoded_samples() {
 }
 
 #[test]
+fn planar_configuration_is_removed_from_single_sample_images() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("planar.dcm");
+    let output = directory.path().join("planar-out.dcm");
+    let mut object = dicom_anon::read_dicom(plain_mammography(Some("NO")).as_slice()).unwrap();
+    object.put(InMemElement::new(
+        tags::PLANAR_CONFIGURATION,
+        VR::US,
+        PrimitiveValue::from(0_u16),
+    ));
+    let mut bytes = Vec::new();
+    object.write_all(&mut bytes).unwrap();
+    std::fs::write(&input, bytes).unwrap();
+
+    let result = anonymize(&input, &output, &[]);
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let written = dicom_anon::read_dicom(std::fs::File::open(&output).unwrap()).unwrap();
+    assert!(written.get(tags::PLANAR_CONFIGURATION).is_none());
+    assert_eq!(pixel_fragments(&input), pixel_fragments(&output));
+
+    let validated = Command::new(env!("CARGO_BIN_EXE_dicom-validate"))
+        .arg(&output)
+        .arg("--source")
+        .arg(&input)
+        .args(["--key-env", KEY_ENV, "--format", "json"])
+        .env(KEY_ENV, KEY)
+        .output()
+        .unwrap();
+    assert_eq!(
+        validated.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&validated.stdout)
+    );
+}
+
+#[test]
 fn jpeg2000_without_comments_is_copied_unchanged() {
     let directory = tempfile::tempdir().unwrap();
     let input = directory.path().join("clean.dcm");

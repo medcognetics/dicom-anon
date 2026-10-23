@@ -34,7 +34,7 @@ Clean Graphics removes governed curves, overlays, annotations, and graphics. Cle
 
 Retain Safe Private accepts entries from the frozen PS3.15 safe-private table, a caller allowlist, and valid Private Data Element Characteristics Sequence declarations whose status is `SAFE` or whose `MIXED` item lists the low-byte offset. Only the matching private creator and declared elements are retained. All other odd-group elements are removed recursively. Safe private sequences are parsed and their nested attributes are independently processed.
 
-Group `0004` attributes are removed because this tool does not create or update DICOMDIR files. Curve and overlay repeating groups use their repeating-group rules. Unknown DA, DT, and TM attributes receive the configured temporal safety action. File Meta Information is rebuilt rather than copied.
+Group `0004` attributes are removed because this tool does not create or update DICOMDIR files. Curve and overlay repeating groups use their repeating-group rules. Unknown DA, DT, and TM attributes receive the configured temporal safety action. File Meta Information is rebuilt rather than copied. Planar Configuration `(0028,0006)` is removed when Samples per Pixel `(0028,0002)` is 1, under every policy, because PS3.3 C.7.6.3.1.3 defines it only for more than one sample per pixel. The report counts it as a removed attribute.
 
 ## Temporal behavior
 
