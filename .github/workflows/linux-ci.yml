@@ -130,17 +130,105 @@ jobs:
       - name: Run ${{ matrix.name }} checks
         run: make ${{ matrix.make_target }}
 
+  report-cpu:
+    name: Linux / Report CPU integration
+    runs-on: ubuntu-24.04
+    container:
+      image: ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 45
+    env:
+      # The pinned CPU bundle (Q4 model, ONNX Runtime, PDFium). The installer verifies every
+      # download, and model loading verifies the model files again. The cached runtime
+      # libraries are not re-verified, so only master runs save the cache, and the key
+      # changes with any installer pin.
+      DICOM_ANON_REPORT_MODEL_DIR: /github/home/report-assets/privacy-filter-7ffa9a043d54d1be65afb281eddf0ffbe629385b-ort-1.27.1-cpu
+    steps:
+      - name: Install container prerequisites
+        run: |
+          if ! command -v cc >/dev/null ||
+            ! command -v clang >/dev/null ||
+            ! command -v curl >/dev/null ||
+            ! command -v git >/dev/null ||
+            ! command -v pkg-config >/dev/null ||
+            ! pkg-config --exists lept tesseract; then
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+              build-essential \
+              ca-certificates \
+              clang \
+              curl \
+              git \
+              libclang-dev \
+              libleptonica-dev \
+              libtesseract-dev \
+              pkg-config \
+              tesseract-ocr \
+              tesseract-ocr-eng
+          fi
+          pkg-config --exists lept tesseract
+          tesseract --list-langs | grep --fixed-strings --line-regexp eng
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: "1.97.1"
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: linux-x64-report-cpu-rust-1.97.1-debug
+          cache-on-failure: false
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - name: Restore pinned CPU report assets
+        id: report-assets
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.DICOM_ANON_REPORT_MODEL_DIR }}
+          key: report-cpu-assets-privacy-filter-7ffa9a043d54d1be65afb281eddf0ffbe629385b-ort-1.27.1-pdfium-7881-${{ hashFiles('report/src/install.rs') }}
+      - name: Install pinned CPU report assets
+        if: steps.report-assets.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$(dirname "${DICOM_ANON_REPORT_MODEL_DIR}")"
+          cargo run --locked -p dicom-anon-report --bin report-anon -- \
+            model install --backend cpu \
+            --target "${DICOM_ANON_REPORT_MODEL_DIR}" --progress never --quiet
+      - name: Save pinned CPU report assets
+        if: github.event_name != 'pull_request' && steps.report-assets.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.DICOM_ANON_REPORT_MODEL_DIR }}
+          key: report-cpu-assets-privacy-filter-7ffa9a043d54d1be65afb281eddf0ffbe629385b-ort-1.27.1-pdfium-7881-${{ hashFiles('report/src/install.rs') }}
+      - name: Locate the bundled runtime libraries
+        run: |
+          ort="$(find "${DICOM_ANON_REPORT_MODEL_DIR}/runtime/cpu" -name 'libonnxruntime.so.1.27.1' -print -quit)"
+          pdfium="$(find "${DICOM_ANON_REPORT_MODEL_DIR}/runtime/pdfium" -name 'libpdfium.so' -print -quit)"
+          test -f "${ort}" && test -f "${pdfium}"
+          echo "DICOM_ANON_REPORT_ORT_LIBRARY=${ort}" >> "${GITHUB_ENV}"
+          echo "DICOM_ANON_REPORT_PDFIUM_LIBRARY=${pdfium}" >> "${GITHUB_ENV}"
+      - name: Run CPU model, CLI, and PDF integration
+        run: make report-integration
+
   required:
     name: Linux / Required
     if: always()
-    needs: supported-versions
+    needs: [supported-versions, report-cpu]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require all supported versions
         env:
           SUPPORTED_VERSIONS_RESULT: ${{ needs.supported-versions.result }}
+          REPORT_CPU_RESULT: ${{ needs.report-cpu.result }}
         run: |
+          if [[ "${REPORT_CPU_RESULT}" != "success" ]]; then
+            echo "The CPU report integration must pass: ${REPORT_CPU_RESULT}."
+            exit 1
+          fi
           if [[ "${SUPPORTED_VERSIONS_RESULT}" != "success" ]]; then
             echo "Latest and minimum Linux checks must pass."
             exit 1

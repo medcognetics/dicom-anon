@@ -110,7 +110,7 @@ def test_linux_ci_contract() -> None:
     assert "timeout-minutes: 30" in workflow
     assert "timeout-minutes: 5" in workflow
     assert "make ${{ matrix.make_target }}" in workflow
-    assert "needs: supported-versions" in workflow
+    assert "needs: [supported-versions, report-cpu]" in workflow
     assert "if: always()" in workflow
 
 
@@ -119,6 +119,7 @@ def test_linux_ci_runs_every_pull_request_on_hosted_runners() -> None:
 
     assert job_runners(workflow) == {
         "supported-versions": HOSTED_RUNNER,
+        "report-cpu": HOSTED_RUNNER,
         "required": HOSTED_RUNNER,
     }
     # Fork pull requests run too: hosted runners are ephemeral, and the jobs have a
@@ -370,3 +371,20 @@ def test_node_lock_uses_patched_js_yaml() -> None:
     )
 
     assert js_yaml_version >= MINIMUM_SAFE_JS_YAML_VERSION
+
+
+def test_linux_ci_runs_cpu_report_integration_with_pinned_assets() -> None:
+    workflow = read_workflow("linux-ci.yml")
+    job = workflow.partition("  report-cpu:\n")[2].partition("\n  required:\n")[0]
+
+    assert "name: Linux / Report CPU integration" in job
+    assert "run: make report-integration" in job
+    assert "model install --backend cpu" in job
+    assert (
+        "privacy-filter-7ffa9a043d54d1be65afb281eddf0ffbe629385b-ort-1.27.1-cpu" in job
+    )
+    # Pull requests restore the asset cache but never write it.
+    assert "actions/cache/restore@" in job and "actions/cache/save@" in job
+    assert "if: github.event_name != 'pull_request' &&" in job
+    # The Required check also waits for this job.
+    assert "REPORT_CPU_RESULT: ${{ needs.report-cpu.result }}" in workflow
