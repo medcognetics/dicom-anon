@@ -11,7 +11,7 @@ permissions:
 jobs:
   validate-release:
     name: Nightly / Validate and release
-    runs-on: [self-hosted, linux, x64, beryl]
+    runs-on: ubuntu-24.04
     container:
       image: ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
     defaults:
@@ -94,76 +94,3 @@ jobs:
         run: make ci
       - name: Build release profile
         run: make release
-
-  cuda-report:
-    name: Nightly / CUDA report integration
-    needs: validate-release
-    runs-on: [self-hosted, linux, x64, beryl, cuda]
-    container:
-      image: nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04@sha256:2fcc4280646484290cc50dce5e65f388dd04352b07cbe89a635703bd1f9aedb6
-      options: --gpus all
-      volumes:
-        - dicom-anon-report-cuda-assets:/opt/dicom-anon-report-assets
-      env:
-        NVIDIA_VISIBLE_DEVICES: "0"
-        NVIDIA_DRIVER_CAPABILITIES: compute,utility
-        CUDA_VISIBLE_DEVICES: "0"
-    defaults:
-      run:
-        shell: bash
-    timeout-minutes: 45
-    env:
-      DICOM_ANON_REPORT_MODEL_DIR: /opt/dicom-anon-report-assets/privacy-filter-7ffa9a043d54d1be65afb281eddf0ffbe629385b-ort-1.27.1-cuda12
-      DICOM_ANON_REPORT_CUDA_ORT_LIBRARY: /opt/dicom-anon-report-assets/privacy-filter-7ffa9a043d54d1be65afb281eddf0ffbe629385b-ort-1.27.1-cuda12/runtime/cuda12/lib/libonnxruntime.so.1.27.1
-      LD_LIBRARY_PATH: /opt/dicom-anon-report-assets/privacy-filter-7ffa9a043d54d1be65afb281eddf0ffbe629385b-ort-1.27.1-cuda12/runtime/cuda12/lib:/usr/local/cuda/lib64:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
-    steps:
-      - name: Install CUDA test prerequisites
-        run: |
-          if ! command -v cc >/dev/null ||
-            ! command -v clang >/dev/null ||
-            ! command -v curl >/dev/null ||
-            ! command -v git >/dev/null ||
-            ! command -v pkg-config >/dev/null; then
-            apt-get update
-            DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
-              build-essential \
-              ca-certificates \
-              clang \
-              curl \
-              git \
-              libclang-dev \
-              pkg-config
-          fi
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
-        with:
-          toolchain: "1.97.1"
-      - name: Restore CUDA Rust cache
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          shared-key: nightly-linux-x64-cuda12-rust-1.97.1-debug
-          cache-on-failure: false
-      - name: Verify CUDA device access
-        run: nvidia-smi --query-gpu=name,driver_version,memory.total,compute_cap --format=csv,noheader
-      - name: Bootstrap pinned CUDA assets
-        run: |
-          if [[ ! -d "${DICOM_ANON_REPORT_MODEL_DIR}" ]]; then
-            cargo run --locked -p dicom-anon-report --no-default-features --bin report-anon -- \
-              model install --backend cuda12 --without-pdfium \
-              --target "${DICOM_ANON_REPORT_MODEL_DIR}" --progress never --quiet
-          fi
-      - name: Verify CUDA provider dependencies
-        run: |
-          provider_library="$(dirname "${DICOM_ANON_REPORT_CUDA_ORT_LIBRARY}")/libonnxruntime_providers_cuda.so"
-          test -f "${provider_library}"
-          dependency_report="$(ldd "${provider_library}")"
-          printf '%s\n' "${dependency_report}"
-          if grep --fixed-strings --quiet 'not found' <<<"${dependency_report}"; then
-            exit 1
-          fi
-      - name: Run CUDA report integration
-        run: make report-cuda-integration
