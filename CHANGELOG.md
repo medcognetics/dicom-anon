@@ -31,5 +31,6 @@ This is the first tagged release. Version 0.1.0 was not tagged or released.
 - JPEG 2000, JPEG, and JPEG-LS Pixel Data that contains comment or application segments changes bytes: the segments are removed, and scan data and decoded samples do not change.
 - The anonymizer uses less peak memory when it rewrites encapsulated Pixel Data ([#31](https://github.com/medcognetics/dicom-anon/pull/31)).
 - The Cargo `repository` field and the README badge identify `medcognetics/dicom-anon`.
+- The workspace release profile no longer strips symbols, so a source build of the Python or Node.js binding loads on macOS ([#41](https://github.com/medcognetics/dicom-anon/issues/41)). The release workflow still strips the published Linux binaries and wheel.
 
 [0.2.0]: https://github.com/medcognetics/dicom-anon/releases/tag/v0.2.0
