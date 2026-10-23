@@ -383,8 +383,8 @@ def test_linux_ci_runs_cpu_report_integration_with_pinned_assets() -> None:
     assert (
         "privacy-filter-7ffa9a043d54d1be65afb281eddf0ffbe629385b-ort-1.27.1-cpu" in job
     )
-    # Pull requests restore the asset cache but never write it.
+    # Only master runs write the asset cache; everything else only restores it.
     assert "actions/cache/restore@" in job and "actions/cache/save@" in job
-    assert "if: github.event_name != 'pull_request' &&" in job
+    assert "if: github.ref == 'refs/heads/master' &&" in job
     # The Required check also waits for this job.
     assert "REPORT_CPU_RESULT: ${{ needs.report-cpu.result }}" in workflow
