@@ -380,9 +380,32 @@ def test_linux_ci_runs_cpu_report_integration_with_pinned_assets() -> None:
     assert "name: Linux / Report CPU integration" in job
     assert "run: make report-integration" in job
     assert "model install --backend cpu" in job
-    assert (
-        "privacy-filter-7ffa9a043d54d1be65afb281eddf0ffbe629385b-ort-1.27.1-cpu" in job
+    # The bundle path, cache key, and library name follow the installer pins.
+    installer = (REPOSITORY_ROOT / "report" / "src" / "install.rs").read_text(
+        encoding="utf-8"
     )
+    pins = {
+        name: re.search(rf'pub const {name}: &str = "([^"]+)";', installer)[1]  # type: ignore[index]
+        for name in (
+            "PRIVACY_FILTER_REVISION",
+            "ONNX_RUNTIME_VERSION",
+            "PDFIUM_REVISION",
+        )
+    }
+    revision, ort, pdfium = (
+        pins["PRIVACY_FILTER_REVISION"],
+        pins["ONNX_RUNTIME_VERSION"],
+        pins["PDFIUM_REVISION"],
+    )
+    assert f"privacy-filter-{revision}-ort-{ort}-cpu" in job
+    assert (
+        f"key: report-cpu-assets-privacy-filter-{revision}-ort-{ort}-pdfium-{pdfium}-"
+        "${{ hashFiles('report/src/install.rs') }}" in job
+    )
+    assert f"libonnxruntime.so.{ort}" in job
+    assert "key: ${{ steps.report-assets.outputs.cache-primary-key }}" in job
+    # The bundle is saved only after the integration tests pass.
+    assert job.index("run: make report-integration") < job.index("actions/cache/save@")
     # Only master runs write the asset cache; everything else only restores it.
     assert "actions/cache/restore@" in job and "actions/cache/save@" in job
     assert "if: github.ref == 'refs/heads/master' &&" in job

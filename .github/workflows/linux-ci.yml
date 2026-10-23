@@ -138,7 +138,7 @@ jobs:
     defaults:
       run:
         shell: bash
-    timeout-minutes: 45
+    timeout-minutes: 20
     env:
       # The pinned CPU bundle (Q4 model, ONNX Runtime, PDFium). The installer verifies every
       # download, and model loading verifies the model files again. The cached runtime
@@ -193,25 +193,26 @@ jobs:
       - name: Install pinned CPU report assets
         if: steps.report-assets.outputs.cache-hit != 'true'
         run: |
-          mkdir -p "$(dirname "${DICOM_ANON_REPORT_MODEL_DIR}")"
           cargo run --locked -p dicom-anon-report --bin report-anon -- \
             model install --backend cpu \
             --target "${DICOM_ANON_REPORT_MODEL_DIR}" --progress never --quiet
+      - name: Locate the bundled runtime libraries
+        run: |
+          ort="$(find "${DICOM_ANON_REPORT_MODEL_DIR}/runtime/cpu" -name 'libonnxruntime.so.1.27.1' -print -quit)"
+          pdfium="$(find "${DICOM_ANON_REPORT_MODEL_DIR}/runtime/pdfium" -name 'libpdfium.so' -print -quit)"
+          [[ -f "${ort}" ]] || { echo "ONNX Runtime library not found in the bundle" >&2; exit 1; }
+          [[ -f "${pdfium}" ]] || { echo "PDFium library not found in the bundle" >&2; exit 1; }
+          echo "DICOM_ANON_REPORT_ORT_LIBRARY=${ort}" >> "${GITHUB_ENV}"
+          echo "DICOM_ANON_REPORT_PDFIUM_LIBRARY=${pdfium}" >> "${GITHUB_ENV}"
+      - name: Run CPU model, CLI, and PDF integration
+        run: make report-integration
+      # Save only a bundle that passed the tests, and only from master.
       - name: Save pinned CPU report assets
         if: github.ref == 'refs/heads/master' && steps.report-assets.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.DICOM_ANON_REPORT_MODEL_DIR }}
-          key: report-cpu-assets-privacy-filter-7ffa9a043d54d1be65afb281eddf0ffbe629385b-ort-1.27.1-pdfium-7881-${{ hashFiles('report/src/install.rs') }}
-      - name: Locate the bundled runtime libraries
-        run: |
-          ort="$(find "${DICOM_ANON_REPORT_MODEL_DIR}/runtime/cpu" -name 'libonnxruntime.so.1.27.1' -print -quit)"
-          pdfium="$(find "${DICOM_ANON_REPORT_MODEL_DIR}/runtime/pdfium" -name 'libpdfium.so' -print -quit)"
-          test -f "${ort}" && test -f "${pdfium}"
-          echo "DICOM_ANON_REPORT_ORT_LIBRARY=${ort}" >> "${GITHUB_ENV}"
-          echo "DICOM_ANON_REPORT_PDFIUM_LIBRARY=${pdfium}" >> "${GITHUB_ENV}"
-      - name: Run CPU model, CLI, and PDF integration
-        run: make report-integration
+          key: ${{ steps.report-assets.outputs.cache-primary-key }}
 
   required:
     name: Linux / Required
@@ -220,7 +221,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Require all supported versions
+      - name: Require every Linux check
         env:
           SUPPORTED_VERSIONS_RESULT: ${{ needs.supported-versions.result }}
           REPORT_CPU_RESULT: ${{ needs.report-cpu.result }}
