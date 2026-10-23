@@ -115,8 +115,10 @@ fn put_vendor_attributes(object: &mut InMemDicomObject, vendor: &Vendor) {
         format!("{PLACEHOLDER} processing"),
     );
     object.put_str(tags::BURNED_IN_ANNOTATION, VR::CS, "NO");
+    // Slot 0x10 holds the base fixture's private block; add the vendor blocks after it,
+    // so that one odd group can carry two creators as real objects do.
     for (index, (group, creator)) in vendor.root_blocks.iter().enumerate() {
-        private_block(object, *group, creator, 0x0010 + index as u16);
+        private_block(object, *group, creator, 0x0011 + index as u16);
     }
     let (group, creator) = vendor.functional_group_block;
     for sequence in [
@@ -250,6 +252,30 @@ fn vendor_variants_hold_private_blocks_at_every_level() {
                 private_depths.contains(&2),
                 "{label}: no private block in a functional group sequence"
             );
+            // The base fixture already has private blocks in the functional groups,
+            // so check for the vendor's own creator in every item.
+            let vendor = VENDORS
+                .iter()
+                .find(|vendor| label.starts_with(&format!("{}/", vendor.name)))
+                .unwrap_or_else(|| panic!("{label}: unknown vendor"));
+            let (group, creator) = vendor.functional_group_block;
+            for sequence in [
+                tags::SHARED_FUNCTIONAL_GROUPS_SEQUENCE,
+                tags::PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE,
+            ] {
+                let items = source
+                    .get(sequence)
+                    .and_then(|element| element.items())
+                    .unwrap_or_else(|| panic!("{label}: no {sequence}"));
+                assert!(!items.is_empty(), "{label}: empty {sequence}");
+                for item in items {
+                    assert_eq!(
+                        text(item, Tag(group, 0x0020)).as_deref(),
+                        Some(creator),
+                        "{label}: {sequence} item lacks the vendor block"
+                    );
+                }
+            }
         }
         assert_eq!(
             text(&source, tags::BURNED_IN_ANNOTATION).as_deref(),
@@ -335,12 +361,16 @@ fn vendor_variants_fail_closed_on_gates() {
             .unwrap()
             .anonymize(&source)
             .expect_err(&label);
+        assert!(
+            matches!(error, dicom_anon::Error::SopClassNotAllowed),
+            "{label}: {error}"
+        );
         assert!(!error.to_string().contains(PLACEHOLDER), "{label}: {error}");
     }
 
     // A declared burned-in annotation, or none at all, is rejected.
     let anonymizer = Anonymizer::new(pipeline_options()).unwrap();
-    for (label, sop_class, source) in variants().into_iter().take(4) {
+    for (label, sop_class, source) in variants() {
         for value in [Some("YES"), None] {
             let mut object = source.clone().into_inner();
             match value {
@@ -353,9 +383,10 @@ fn vendor_variants_fail_closed_on_gates() {
             }
             let sop_instance = text(&object, tags::SOP_INSTANCE_UID).unwrap();
             let object = fixtures::finish(object, sop_class, &sop_instance);
+            let error = anonymizer.anonymize(&object).map(|_| ()).unwrap_err();
             assert!(
-                anonymizer.anonymize(&object).is_err(),
-                "{label}: Burned In Annotation {value:?} was accepted"
+                matches!(error, dicom_anon::Error::BurnedInAnnotationNotNo),
+                "{label}: Burned In Annotation {value:?}: {error}"
             );
         }
     }
