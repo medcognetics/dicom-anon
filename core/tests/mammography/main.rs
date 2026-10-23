@@ -652,3 +652,52 @@ fn command_line_source_aware_validation_passes() {
         }
     }
 }
+
+#[test]
+fn zero_length_temporal_values_stay_empty_at_every_depth() {
+    let frame_date_time = (
+        tags::PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE,
+        1,
+        tags::FRAME_CONTENT_SEQUENCE,
+        0,
+        tags::FRAME_ACQUISITION_DATE_TIME,
+    );
+    let mut source = round_trip(&fixtures::tomosynthesis());
+    for tag in [tags::SERIES_DATE, tags::ACQUISITION_TIME] {
+        let vr = source.get(tag).unwrap().vr();
+        source.put(InMemElement::empty(tag, vr));
+    }
+    source
+        .update_value_at(frame_date_time, |value| {
+            *value = Value::Primitive(dicom_core::PrimitiveValue::Empty);
+        })
+        .unwrap();
+    let source = round_trip(&source);
+
+    for policy in POLICIES {
+        let output = anonymize(policy, &source);
+        // Without a retain-dates option, the profile replaces these values with
+        // dummies or removes them, so only the absence of an error is checked.
+        if policy != Policy::Dicom {
+            let frame = item(
+                item(&output, tags::PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE, 1),
+                tags::FRAME_CONTENT_SEQUENCE,
+                0,
+            );
+            for (object, tag) in [
+                (&*output, tags::SERIES_DATE),
+                (&*output, tags::ACQUISITION_TIME),
+                (frame, tags::FRAME_ACQUISITION_DATE_TIME),
+            ] {
+                assert_eq!(text(object, tag).as_deref(), Some(""), "{}", policy.name());
+            }
+        }
+        let report = validate_source_object(&source, &output, policy.options()).unwrap();
+        assert!(
+            report.conformant,
+            "{}: {:?}",
+            policy.name(),
+            report.findings
+        );
+    }
+}
