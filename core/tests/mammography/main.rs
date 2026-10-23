@@ -4,6 +4,7 @@
 //! `safe-harbor-metadata` policies. The checks cover metadata only; Pixel Data stays unassessed.
 
 mod fixtures;
+mod vendors;
 
 use std::collections::BTreeMap;
 use std::process::Command;
