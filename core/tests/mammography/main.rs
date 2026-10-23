@@ -652,3 +652,44 @@ fn command_line_source_aware_validation_passes() {
         }
     }
 }
+
+/// Planar Configuration is removed from the single-sample mammography objects under every
+/// policy, and source-aware validation of the result passes.
+#[test]
+fn planar_configuration_is_removed_from_single_sample_images_under_every_policy() {
+    let fixtures = Fixtures::new();
+    for (name, fixture) in fixtures.named() {
+        let mut source = round_trip(fixture);
+        assert_eq!(
+            source
+                .get(tags::SAMPLES_PER_PIXEL)
+                .unwrap()
+                .to_int::<u16>()
+                .unwrap(),
+            1,
+            "{name}"
+        );
+        source.put(InMemElement::new(
+            tags::PLANAR_CONFIGURATION,
+            VR::US,
+            dicom_core::PrimitiveValue::from(0_u16),
+        ));
+        for policy in POLICIES {
+            let context = format!("{name} / {}", policy.name());
+            let (output, _) = Anonymizer::new(policy.options())
+                .unwrap()
+                .anonymize(&source)
+                .unwrap();
+            assert!(
+                output.get(tags::PLANAR_CONFIGURATION).is_none(),
+                "{context}"
+            );
+            let validation = validate_source_object(&source, &output, policy.options()).unwrap();
+            assert!(
+                validation.conformant,
+                "{context}: {:?}",
+                validation.findings
+            );
+        }
+    }
+}

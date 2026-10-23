@@ -31,6 +31,6 @@ This is the first tagged release. Version 0.1.0 was not tagged or released.
 - JPEG 2000, JPEG, and JPEG-LS Pixel Data that contains comment or application segments changes bytes: the segments are removed, and scan data and decoded samples do not change.
 - The anonymizer uses less peak memory when it rewrites encapsulated Pixel Data ([#31](https://github.com/medcognetics/dicom-anon/pull/31)).
 - The Cargo `repository` field and the README badge identify `medcognetics/dicom-anon`.
-- Planar Configuration `(0028,0006)` is removed from images with one sample per pixel under every policy ([#40](https://github.com/medcognetics/dicom-anon/issues/40)). This changes output bytes for such inputs.
+- Planar Configuration `(0028,0006)` is removed from images with one sample per pixel under every policy ([#40](https://github.com/medcognetics/dicom-anon/issues/40)). This changes output bytes for such inputs. Source-aware validation of an output that an earlier build made from such an input reports a mismatch for `(0028,0006)`.
 
 [0.2.0]: https://github.com/medcognetics/dicom-anon/releases/tag/v0.2.0
