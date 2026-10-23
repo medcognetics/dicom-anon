@@ -244,6 +244,9 @@ impl Anonymizer {
     /// operating-system CSPRNG as in [`Self::anonymize_with_generated_uid_map`]. Every
     /// output is then checked with source-aware validation against the complete map.
     ///
+    /// Every instance must have the Study Instance UID, Patient ID, and Issuer of
+    /// Patient ID of instance 0.
+    ///
     /// The call fails as a whole. When any instance fails a gate, a transformation,
     /// or validation, the error names only the instance index and attribute paths,
     /// and no output is returned. The returned map is re-identification material;
@@ -255,10 +258,37 @@ impl Anonymizer {
         if sources.is_empty() {
             return Err(Error::EmptyStudy);
         }
+        // One patient scope and UID map must never link instances of different studies
+        // or patients. The error names only the index, never the differing values.
+        let identity = |object: &DefaultDicomObject| {
+            [
+                tags::STUDY_INSTANCE_UID,
+                tags::PATIENT_ID,
+                tags::ISSUER_OF_PATIENT_ID,
+            ]
+            // An absent and a zero-length value are the same unspecified value.
+            .map(|tag| element_text(object, tag).filter(|value| !value.is_empty()))
+        };
+        if let Some(index) = sources
+            .iter()
+            .position(|source| identity(source)[0].is_none())
+        {
+            return Err(Error::StudyInstanceUidMissing { index });
+        }
+        let first = identity(&sources[0]);
+        if let Some(index) = sources.iter().position(|source| identity(source) != first) {
+            return Err(Error::StudyMismatch { index });
+        }
         let instance_error = |index: usize| {
             move |error: Error| Error::StudyInstance {
                 index,
-                source: Box::new(error),
+                // Parser and encoder messages can echo source values, such as an
+                // unrecognized transfer syntax, so keep only the error kind.
+                source: Box::new(match error {
+                    Error::Read(_) => Error::Read("the instance could not be parsed".to_owned()),
+                    Error::Write(_) => Error::Write("the instance could not be encoded".to_owned()),
+                    other => other,
+                }),
             }
         };
 

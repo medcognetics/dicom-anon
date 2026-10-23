@@ -143,6 +143,20 @@ def test_python_binding_study_error_names_instance_only() -> None:
     assert SENTINEL_UID not in str(error.value)
 
 
+def test_python_binding_study_parse_error_hides_source_values() -> None:
+    # The parser echoes an unknown Transfer Syntax UID; the study call must not.
+    tampered = _synthetic_dicom().replace(
+        b"1.2.840.10008.1.2.1\0", b"MRN-SECRET-12345678\0"
+    )
+    with pytest.raises(ValueError) as error:
+        dicom_anon_python.anonymize_study(
+            [_synthetic_dicom(), tampered], KEY, "SUBJ-0001", SAFE_HARBOR
+        )
+
+    assert "study instance 1" in str(error.value)
+    assert "MRN-SECRET" not in str(error.value)
+
+
 def test_python_binding_missing_uid_error_names_path_only() -> None:
     with pytest.raises(ValueError) as error:
         dicom_anon_python.anonymize(_synthetic_dicom(), KEY, "SUBJ-0001", SAFE_HARBOR)

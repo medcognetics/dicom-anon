@@ -86,7 +86,12 @@ fn anonymize_study(
         .enumerate()
         .map(|(index, data)| {
             read_dicom(Cursor::new(data))
-                .map_err(|error| value_error(format!("study instance {index}: {error}")))
+                // The parser error can echo source values, such as an unknown transfer syntax.
+                .map_err(|_| {
+                    value_error(format!(
+                        "study instance {index}: not a readable DICOM Part 10 object"
+                    ))
+                })
         })
         .collect::<PyResult<Vec<_>>>()?;
     let study = anonymizer.anonymize_study(&sources).map_err(value_error)?;

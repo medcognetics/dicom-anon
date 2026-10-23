@@ -113,6 +113,16 @@ assert.throws(
   (error) => error.message.includes('study instance 1') && !error.message.includes(SENTINEL_UID),
 )
 
+// The parser echoes an unknown Transfer Syntax UID; the study call must not.
+const tampered = Buffer.from(
+  syntheticDicom().toString('latin1').replace('1.2.840.10008.1.2.1\0', 'MRN-SECRET-12345678\0'),
+  'latin1',
+)
+assert.throws(
+  () => binding.anonymizeStudy([syntheticDicom(), tampered], KEY, 'SUBJ-0001', SAFE_HARBOR),
+  (error) => error.message.includes('study instance 1') && !error.message.includes('MRN-SECRET'),
+)
+
 assert.throws(
   () => binding.anonymize(syntheticDicom(), KEY, 'SUBJ-0001', SAFE_HARBOR),
   (error) => error.message.includes('(0008,0018)') && !error.message.includes(SENTINEL_UID),

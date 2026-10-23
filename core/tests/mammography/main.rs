@@ -782,3 +782,85 @@ fn study_api_fails_as_a_whole_and_names_only_the_instance() {
         Err(dicom_anon::Error::UidMapGenerationRequiresSafeHarbor)
     ));
 }
+
+#[test]
+fn study_api_rejects_instances_of_another_study_or_patient() {
+    let fixtures = Fixtures::new();
+    let anonymizer = Anonymizer::new(safe_harbor_without_uid_map()).unwrap();
+    for (tag, value) in [
+        (tags::STUDY_INSTANCE_UID, "1.2.826.0.1.3680043.10.1.999"),
+        (tags::PATIENT_ID, "OTHER-PATIENT-ID"),
+        (tags::ISSUER_OF_PATIENT_ID, "OTHER-ISSUER"),
+    ] {
+        let mut other = round_trip(&fixtures.tomosynthesis);
+        other.put(InMemElement::new(tag, VR::LO, Value::from(value)));
+        let sources = [round_trip(&fixtures.mammogram), other];
+        let error = anonymizer.anonymize_study(&sources).unwrap_err();
+        assert!(
+            matches!(error, dicom_anon::Error::StudyMismatch { index: 1 }),
+            "{tag}: {error}"
+        );
+        assert!(!error.to_string().contains(value), "{tag}: {error}");
+    }
+}
+
+#[test]
+fn study_api_treats_absent_and_empty_identity_values_alike() {
+    let fixtures = Fixtures::new();
+    let mut with_empty_issuer = round_trip(&fixtures.tomosynthesis);
+    with_empty_issuer.put(InMemElement::new(
+        tags::ISSUER_OF_PATIENT_ID,
+        VR::LO,
+        Value::from(""),
+    ));
+    let mut without_issuer = round_trip(&fixtures.mammogram);
+    without_issuer.remove_element(tags::ISSUER_OF_PATIENT_ID);
+    let study = Anonymizer::new(safe_harbor_without_uid_map())
+        .unwrap()
+        .anonymize_study(&[without_issuer, with_empty_issuer]);
+    assert!(study.is_ok(), "{:?}", study.err());
+}
+
+#[test]
+fn study_api_requires_a_study_instance_uid() {
+    let fixtures = Fixtures::new();
+    let sources = [&fixtures.mammogram, &fixtures.tomosynthesis].map(|fixture| {
+        let mut source = round_trip(fixture);
+        source.remove_element(tags::STUDY_INSTANCE_UID);
+        source
+    });
+    let error = Anonymizer::new(safe_harbor_without_uid_map())
+        .unwrap()
+        .anonymize_study(&sources)
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            dicom_anon::Error::StudyInstanceUidMissing { index: 0 }
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn study_api_errors_never_echo_the_transfer_syntax() {
+    const SECRET: &str = "MRN-SECRET-12345678";
+    let fixtures = Fixtures::new();
+    let source = round_trip(&fixtures.mammogram);
+    let sop_class = source.meta().media_storage_sop_class_uid().to_owned();
+    let sop_instance = source.meta().media_storage_sop_instance_uid().to_owned();
+    let tampered = source
+        .into_inner()
+        .with_meta(
+            dicom_object::FileMetaTableBuilder::new()
+                .transfer_syntax(SECRET)
+                .media_storage_sop_class_uid(sop_class)
+                .media_storage_sop_instance_uid(sop_instance),
+        )
+        .unwrap();
+    let error = Anonymizer::new(safe_harbor_without_uid_map())
+        .unwrap()
+        .anonymize_study(&[tampered])
+        .unwrap_err();
+    assert!(!error.to_string().contains(SECRET), "{error}");
+}

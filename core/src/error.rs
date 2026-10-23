@@ -99,6 +99,19 @@ pub enum Error {
     /// A study call received no instances.
     #[error("a study must contain at least one instance")]
     EmptyStudy,
+    /// A study instance has no Study Instance UID, so its study membership cannot be checked.
+    #[error("study instance {index} has no Study Instance UID")]
+    StudyInstanceUidMissing {
+        /// Zero-based position of the instance in the caller's list.
+        index: usize,
+    },
+    /// A study instance has a different Study Instance UID, Patient ID, or Issuer of
+    /// Patient ID than instance 0. One patient scope and UID map would merge subjects.
+    #[error("study instance {index} belongs to a different study or patient than instance 0")]
+    StudyMismatch {
+        /// Zero-based position of the instance in the caller's list.
+        index: usize,
+    },
     /// One instance of a study failed; no output is returned for any instance.
     #[error("study instance {index} failed: {source}")]
     StudyInstance {

@@ -120,7 +120,12 @@ pub fn anonymize_study(
         .enumerate()
         .map(|(index, data)| {
             read_dicom(Cursor::new(data.as_ref()))
-                .map_err(|error| napi_error(format!("study instance {index}: {error}")))
+                // The parser error can echo source values, such as an unknown transfer syntax.
+                .map_err(|_| {
+                    napi_error(format!(
+                        "study instance {index}: not a readable DICOM Part 10 object"
+                    ))
+                })
         })
         .collect::<Result<Vec<_>>>()?;
     let study = anonymizer.anonymize_study(&sources).map_err(napi_error)?;
