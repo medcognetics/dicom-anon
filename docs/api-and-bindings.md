@@ -98,6 +98,8 @@ let (output, report, uid_map) = anonymizer.anonymize_with_generated_uid_map(sour
 # }
 ```
 
+`Anonymizer::anonymize_study` de-identifies every instance of one study in Safe Harbor mode. It threads one UID map through the instances in order: the map starts from `options.profile.uid_mappings`, and each missing replacement is generated as above. It then runs source-aware validation on every output against the complete map. The result is a `StudyOutput`, which holds one `StudyInstanceOutput { output, report, validation }` per input, in input order, and the complete `uid_map`. The call fails as a whole. `Error::StudyInstance { index, source }` reports an instance that fails a gate or a transformation, and `Error::StudyValidation { index, errors }` reports an output that fails validation. An instance whose Study Instance UID, Patient ID, or Issuer of Patient ID differs from instance 0 returns `Error::StudyMismatch { index }`, because one patient scope and map would link different subjects. An absent and a zero-length value count as the same. An instance without a Study Instance UID returns `Error::StudyInstanceUidMissing { index }`. An empty list returns `Error::EmptyStudy`, and other policies return `Error::UidMapGenerationRequiresSafeHarbor`. Errors name only the instance index and attribute paths. `StudyOutput`'s `Debug` output omits the map.
+
 Use `validate_object_with_options` for configured candidate-only validation. Use `validate_source_object` with the original, candidate, and matching anonymization `Options` for exact source comparison. Existing `validate_object` and `validate_file` remain default-configuration wrappers.
 
 ## Python
@@ -150,6 +152,8 @@ exact, exact_json = dicom_anon_python.validate_with_source(
 
 The configuration JSON above is the explicit form of the `dicom-extended` preset. `fail_on_unmapped` lists canonical eight-digit tags that must not get a dummy value because no `descriptor_mappings` entry matched; a match is an error during anonymization. Validation ignores the field. To use a shipped versioned descriptor map, copy its `mappings` member into `descriptor_mappings`. The report JSON includes the per-tag `dummy_replacements` and `unmapped_dummy_replacements` counts. Omitting `configuration_json` selects the same options. Use `"policy": "dicom"` with an empty `options` array for the option-free Basic Profile. Set `require_no_burned_in_annotation` to `true` to reject input unless Burned In Annotation is `NO`. Put SOP Class UIDs in `sop_class_allowlist` to reject other SOP Classes; an empty list permits all SOP Classes. Both fields are optional and default to off. The same fields apply to the Rust `ProfileConfiguration` and to the Node.js binding. The function signatures do not change.
 
+`anonymize_study(instances, key, patient_scope, configuration_json)` takes a list of instance bytes and returns `(output_bytes_list, report_jsons, uid_map_json, validation_jsons)`, each list in input order. It requires the Safe Harbor policy and a patient scope. An instance that cannot be parsed fails with a `ValueError` that names only its index; the parser message is left out because it can echo source values.
+
 `required_uids(data, key, patient_scope, configuration_json)` returns a JSON array of `{path, uid}` objects. `anonymize_with_generated_uid_map(data, key, patient_scope, configuration_json)` returns `(output_bytes, report_json, uid_map_json)`. Pass the returned map as `uid_mappings` in the next configuration to keep one study consistent.
 
 `anonymize` accepts optional `patient_scope` and `configuration_json` arguments. `validate` accepts optional configuration JSON. `validate_with_source` is a separate function so candidate-only `validate` retains its original meaning. Errors become `ValueError`. The JSON fields match the Rust report models.
@@ -184,6 +188,8 @@ if (!validation.conformant) {
 
 const exact = validateWithSource(source, result.data, key);
 ```
+
+`anonymizeStudy(instances, key, patientScope, configurationJson)` returns `{ data, reportJsons, uidMapJson, validationJsons }`, with the same behavior as the Python `anonymize_study`.
 
 `requiredUids` returns a JSON array of `{path, uid}` objects. `anonymizeWithGeneratedUidMap` returns `{ data, reportJson, uidMapJson }`. Both accept the same arguments as `anonymize`.
 

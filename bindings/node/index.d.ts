@@ -11,6 +11,12 @@ export interface AnonymizeResult {
   reportJson: string
 }
 
+/**
+ * De-identify every instance of one study under Safe Harbor with one generated UID map.
+ * Fails as a whole when any instance fails; the error names only the instance index.
+ */
+export declare function anonymizeStudy(instances: Array<Buffer>, key: Buffer, patientScope: string, configurationJson?: string | undefined | null): StudyResult
+
 /** De-identify DICOM Part 10 bytes and assign random Safe Harbor replacement UIDs. */
 export declare function anonymizeWithGeneratedUidMap(data: Buffer, key: Buffer, patientScope?: string | undefined | null, configurationJson?: string | undefined | null): GeneratedUidMapResult
 
@@ -26,6 +32,18 @@ export interface GeneratedUidMapResult {
 
 /** Return a JSON list of `{path, uid}` source UID occurrences that the profile replaces. */
 export declare function requiredUids(data: Buffer, key: Buffer, patientScope?: string | undefined | null, configurationJson?: string | undefined | null): string
+
+/** Result returned by `anonymizeStudy`. */
+export interface StudyResult {
+  /** Complete DICOM Part 10 outputs, in input order. */
+  data: Array<Buffer>
+  /** Serialized `AnonymizationReport` for each output. */
+  reportJsons: Array<string>
+  /** Complete source-to-replacement UID map for the study. Keep it under re-identification custody. */
+  uidMapJson: string
+  /** Serialized source-aware `ValidationReport` for each output. */
+  validationJsons: Array<string>
+}
 
 /** Validate DICOM Part 10 bytes. */
 export declare function validate(data: Buffer, configurationJson?: string | undefined | null): ValidateResult

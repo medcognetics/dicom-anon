@@ -49,8 +49,8 @@ def _element(group: int, element: int, vr: bytes, value: bytes) -> bytes:
     return header + struct.pack("<H", len(value)) + value
 
 
-def _synthetic_dicom() -> bytes:
-    instance = SOURCE_UIDS[0].encode()
+def _synthetic_dicom(instance_uid: str = SENTINEL_UID) -> bytes:
+    instance = instance_uid.encode()
     meta = b"".join(
         [
             _element(0x0002, 0x0001, b"OB", b"\0\1"),
@@ -104,6 +104,57 @@ def test_python_binding_generates_random_complete_uid_maps() -> None:
     for uid in SOURCE_UIDS:
         assert uid.encode() not in output
         assert uid not in report
+
+
+SECOND_INSTANCE_UID = "2.25.314159265358979323846264338327950288"
+
+
+def test_python_binding_anonymizes_a_study_with_one_uid_map() -> None:
+    outputs, reports, uid_map_json, validations = dicom_anon_python.anonymize_study(
+        [_synthetic_dicom(), _synthetic_dicom(SECOND_INSTANCE_UID)],
+        KEY,
+        "SUBJ-0001",
+        SAFE_HARBOR,
+    )
+    uid_map = json.loads(uid_map_json)
+
+    assert len(outputs) == len(reports) == len(validations) == 2
+    assert set(uid_map) == {*SOURCE_UIDS, SECOND_INSTANCE_UID}
+    for output, report, validation in zip(outputs, reports, validations):
+        assert json.loads(validation)["conformant"]
+        # Both instances carry the same replacement study and series UIDs.
+        assert uid_map[SOURCE_UIDS[1]].encode() in output
+        assert uid_map[SOURCE_UIDS[2]].encode() in output
+        for uid in (*SOURCE_UIDS, SECOND_INSTANCE_UID):
+            assert uid.encode() not in output
+            assert uid not in report
+            assert uid not in validation
+    assert uid_map[SENTINEL_UID].encode() in outputs[0]
+    assert uid_map[SECOND_INSTANCE_UID].encode() in outputs[1]
+
+
+def test_python_binding_study_error_names_instance_only() -> None:
+    with pytest.raises(ValueError) as error:
+        dicom_anon_python.anonymize_study(
+            [_synthetic_dicom(), INVALID_DICOM], KEY, "SUBJ-0001", SAFE_HARBOR
+        )
+
+    assert "study instance 1" in str(error.value)
+    assert SENTINEL_UID not in str(error.value)
+
+
+def test_python_binding_study_parse_error_hides_source_values() -> None:
+    # The parser echoes an unknown Transfer Syntax UID; the study call must not.
+    tampered = _synthetic_dicom().replace(
+        b"1.2.840.10008.1.2.1\0", b"MRN-SECRET-12345678\0"
+    )
+    with pytest.raises(ValueError) as error:
+        dicom_anon_python.anonymize_study(
+            [_synthetic_dicom(), tampered], KEY, "SUBJ-0001", SAFE_HARBOR
+        )
+
+    assert "study instance 1" in str(error.value)
+    assert "MRN-SECRET" not in str(error.value)
 
 
 def test_python_binding_missing_uid_error_names_path_only() -> None:

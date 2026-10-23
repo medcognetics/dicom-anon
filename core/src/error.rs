@@ -96,6 +96,41 @@ pub enum Error {
     /// UID map generation was requested outside the Safe Harbor metadata policy.
     #[error("UID map generation requires the safe-harbor-metadata policy")]
     UidMapGenerationRequiresSafeHarbor,
+    /// A study call received no instances.
+    #[error("a study must contain at least one instance")]
+    EmptyStudy,
+    /// A study instance has no Study Instance UID, so its study membership cannot be checked.
+    #[error("study instance {index} has no Study Instance UID")]
+    StudyInstanceUidMissing {
+        /// Zero-based position of the instance in the caller's list.
+        index: usize,
+    },
+    /// A study instance has a different Study Instance UID, Patient ID, or Issuer of
+    /// Patient ID than instance 0. One patient scope and UID map would merge subjects.
+    #[error("study instance {index} belongs to a different study or patient than instance 0")]
+    StudyMismatch {
+        /// Zero-based position of the instance in the caller's list.
+        index: usize,
+    },
+    /// One instance of a study failed; no output is returned for any instance.
+    #[error("study instance {index} failed: {source}")]
+    StudyInstance {
+        /// Zero-based position of the instance in the caller's list.
+        index: usize,
+        /// The instance error. It names attribute paths, never source values.
+        #[source]
+        source: Box<Error>,
+    },
+    /// Source-aware validation of one study instance found an error.
+    #[error(
+        "study instance {index} failed source-aware validation with {errors} error finding(s)"
+    )]
+    StudyValidation {
+        /// Zero-based position of the instance in the caller's list.
+        index: usize,
+        /// Number of error-severity findings.
+        errors: usize,
+    },
     /// The operating-system random source failed or gave no unique replacement.
     #[error("cannot generate a random replacement UID: {0}")]
     RandomUidGeneration(String),

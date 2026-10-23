@@ -135,6 +135,42 @@ impl AnonymizationReport {
     }
 }
 
+/// One de-identified instance from [`Anonymizer::anonymize_study`].
+#[derive(Debug, Clone)]
+pub struct StudyInstanceOutput {
+    /// De-identified object.
+    pub output: DefaultDicomObject,
+    /// Anonymization report for this instance.
+    pub report: AnonymizationReport,
+    /// Source-aware validation report for this instance. It is always conformant.
+    pub validation: crate::ValidationReport,
+}
+
+/// Result of [`Anonymizer::anonymize_study`].
+///
+/// `Debug` omits the UID map because it contains source UIDs.
+#[derive(Clone)]
+pub struct StudyOutput {
+    /// Outputs in the same order as the source instances.
+    pub instances: Vec<StudyInstanceOutput>,
+    /// Complete original-to-replacement UID map for the study. It is
+    /// re-identification material; never send it with the outputs.
+    pub uid_map: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for StudyOutput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StudyOutput")
+            .field("instances", &self.instances)
+            .field(
+                "uid_map",
+                &format_args!("<{} entries redacted>", self.uid_map.len()),
+            )
+            .finish()
+    }
+}
+
 /// Reusable deterministic de-identifier.
 #[derive(Clone, Debug)]
 pub struct Anonymizer {
@@ -199,6 +235,96 @@ impl Anonymizer {
         let resolver = UidResolver::generate(source, self.options.profile.uid_mappings.clone())?;
         let (output, report, uids) = self.anonymize_with(source, resolver)?;
         Ok((output, report, uids.into_map()))
+    }
+
+    /// De-identify every instance of one study under the Safe Harbor metadata policy.
+    ///
+    /// One UID map is threaded through the instances in order: it starts from
+    /// `options.profile.uid_mappings`, and each missing replacement is drawn from the
+    /// operating-system CSPRNG as in [`Self::anonymize_with_generated_uid_map`]. Every
+    /// output is then checked with source-aware validation against the complete map.
+    ///
+    /// Every instance must have the Study Instance UID, Patient ID, and Issuer of
+    /// Patient ID of instance 0.
+    ///
+    /// The call fails as a whole. When any instance fails a gate, a transformation,
+    /// or validation, the error names only the instance index and attribute paths,
+    /// and no output is returned. The returned map is re-identification material;
+    /// keep it under the custody rules in the security documentation.
+    pub fn anonymize_study(&self, sources: &[DefaultDicomObject]) -> Result<StudyOutput> {
+        if self.options.profile.policy != DeidentificationPolicy::SafeHarborMetadata {
+            return Err(Error::UidMapGenerationRequiresSafeHarbor);
+        }
+        if sources.is_empty() {
+            return Err(Error::EmptyStudy);
+        }
+        // One patient scope and UID map must never link instances of different studies
+        // or patients. The error names only the index, never the differing values.
+        let identity = |object: &DefaultDicomObject| {
+            [
+                tags::STUDY_INSTANCE_UID,
+                tags::PATIENT_ID,
+                tags::ISSUER_OF_PATIENT_ID,
+            ]
+            // An absent and a zero-length value are the same unspecified value.
+            .map(|tag| element_text(object, tag).filter(|value| !value.is_empty()))
+        };
+        if let Some(index) = sources
+            .iter()
+            .position(|source| identity(source)[0].is_none())
+        {
+            return Err(Error::StudyInstanceUidMissing { index });
+        }
+        let first = identity(&sources[0]);
+        if let Some(index) = sources.iter().position(|source| identity(source) != first) {
+            return Err(Error::StudyMismatch { index });
+        }
+        let instance_error = |index: usize| {
+            move |error: Error| Error::StudyInstance {
+                index,
+                // Parser and encoder messages can echo source values, such as an
+                // unrecognized transfer syntax, so keep only the error kind.
+                source: Box::new(match error {
+                    Error::Read(_) => Error::Read("the instance could not be parsed".to_owned()),
+                    Error::Write(_) => Error::Write("the instance could not be encoded".to_owned()),
+                    other => other,
+                }),
+            }
+        };
+
+        let mut uid_map = self.options.profile.uid_mappings.clone();
+        let mut outputs = Vec::with_capacity(sources.len());
+        for (index, source) in sources.iter().enumerate() {
+            let resolver = UidResolver::generate(source, uid_map).map_err(instance_error(index))?;
+            let (output, report, uids) = self
+                .anonymize_with(source, resolver)
+                .map_err(instance_error(index))?;
+            uid_map = uids.into_map();
+            outputs.push((output, report));
+        }
+
+        let mut validation_options = self.options.clone();
+        validation_options.profile.uid_mappings = uid_map.clone();
+        let mut instances = Vec::with_capacity(outputs.len());
+        for (index, (source, (output, report))) in sources.iter().zip(outputs).enumerate() {
+            let validation =
+                crate::validate_source_object(source, &output, validation_options.clone())
+                    .map_err(instance_error(index))?;
+            if !validation.conformant {
+                let errors = validation
+                    .findings
+                    .iter()
+                    .filter(|finding| finding.severity == crate::Severity::Error)
+                    .count();
+                return Err(Error::StudyValidation { index, errors });
+            }
+            instances.push(StudyInstanceOutput {
+                output,
+                report,
+                validation,
+            });
+        }
+        Ok(StudyOutput { instances, uid_map })
     }
 
     fn anonymize_with(
