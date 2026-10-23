@@ -15,7 +15,7 @@ concurrency:
 jobs:
   release:
     name: Release / Linux x86_64
-    runs-on: [self-hosted, linux, x64, beryl]
+    runs-on: ubuntu-24.04
     container:
       image: ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
     defaults:
@@ -56,8 +56,8 @@ jobs:
           persist-credentials: false
       - name: Trust the checkout for build-time commit discovery
         run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
-      # The release job installs its own pinned tools into a fresh job directory and does
-      # not use the runner tool cache, which pull-request jobs on beryl can write.
+      # The release job installs its own pinned, checksum-verified tools into a fresh job
+      # directory and uses no tool or build cache that another workflow run can write.
       - name: Install pinned release tools
         env:
           UV_VERSION: "0.11.29"

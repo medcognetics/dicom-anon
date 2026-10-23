@@ -46,7 +46,7 @@ Add each user-visible change to the `Unreleased` section of [CHANGELOG.md](CHANG
 
 ## Release procedure
 
-The release workflow, `.github/workflows/release.yml`, runs on beryl for a `vMAJOR.MINOR.PATCH` tag. It does not run for pull requests. Prerelease tags are not supported, because Python and Cargo spell prerelease versions differently.
+The release workflow, `.github/workflows/release.yml`, runs on a GitHub-hosted runner for a `vMAJOR.MINOR.PATCH` tag. It does not run for pull requests. Prerelease tags are not supported, because Python and Cargo spell prerelease versions differently.
 
 1. In a pull request, set the version in `Cargo.toml`, `bindings/python/pyproject.toml`, `bindings/node/package.json`, and `bindings/node/package-lock.json`. Run `cargo update --workspace` and `make test-node`, which regenerates `bindings/node/index.js`.
 2. In the same pull request, replace `Unreleased` in the version heading of `CHANGELOG.md` with the release date, and review `docs/known-anomalies.md`.
@@ -56,7 +56,7 @@ The release workflow, `.github/workflows/release.yml`, runs on beryl for a `vMAJ
 6. The workflow requires an annotated tag on a `master` commit where `Linux / Required` and Nightly passed. It runs `make audit`, builds the assets from the tag, verifies `--version` and the checksums, and creates a draft GitHub release.
 7. Review the draft release and its assets, then publish it.
 
-The workflow installs its own pinned Rust, Python, uv, and Node.js into a fresh job directory. It verifies each download with a SHA-256 value pinned in the workflow, or, for Python, with the checksum built into uv. It does not read or write the runner tool cache or any build cache, so pull-request jobs on beryl cannot change the tools that build the released files. To build the same assets locally on Linux x86_64, install cargo-audit 0.22.2 and cargo-cyclonedx 0.5.9, then run `make audit` and `make release-assets RELEASE_TAG=v0.2.0`. The assets are written to `target/release-assets/`.
+The workflow installs its own pinned Rust, Python, uv, and Node.js into a fresh job directory. It verifies each download with a SHA-256 value pinned in the workflow, or, for Python, with the checksum built into uv. It does not read or write the runner tool cache or any build cache, so another workflow run cannot change the tools that build the released files. To build the same assets locally on Linux x86_64, install cargo-audit 0.22.2 and cargo-cyclonedx 0.5.9, then run `make audit` and `make release-assets RELEASE_TAG=v0.2.0`. The assets are written to `target/release-assets/`.
 
 ## Test expectations
 

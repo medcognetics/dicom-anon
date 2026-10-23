@@ -14,13 +14,8 @@ FULL_SHA_PATTERN = re.compile(
     r"^\s*uses:\s*[^\s@]+@([0-9a-f]{40})\s*(?:#.*)?$", re.MULTILINE
 )
 ANY_ACTION_PATTERN = re.compile(r"^\s*uses:\s*[^\s@]+@([^\s#]+)", re.MULTILINE)
-BERYL_RUNNER = "[self-hosted, linux, x64, beryl]"
+HOSTED_RUNNER = "ubuntu-24.04"
 CUDA_BERYL_RUNNER = "[self-hosted, linux, x64, beryl, cuda]"
-FORK_ROUTED_BERYL_RUNNER = (
-    "${{ fromJSON((github.event_name != 'pull_request' || "
-    "github.event.pull_request.head.repo.full_name == github.repository) && "
-    '\'["self-hosted","linux","x64","beryl"]\' || \'["ubuntu-24.04"]\') }}'
-)
 JOB_PATTERN = re.compile(r"^  (?P<job>[A-Za-z0-9_-]+):$")
 RUNS_ON_PATTERN = re.compile(r"^    runs-on:[ \t]*(?P<value>.*)$")
 BLOCK_SCALAR_PATTERN = re.compile(r"^[>|][-+]?(?:[ \t]+#.*)?$")
@@ -89,6 +84,7 @@ def test_expected_workflows_replace_legacy_ci() -> None:
     assert sorted(path.name for path in WORKFLOW_DIRECTORY.glob("*.yml")) == [
         "dependency-health.yml",
         "linux-ci.yml",
+        "nightly-cuda.yml",
         "nightly.yml",
         "release.yml",
     ]
@@ -111,10 +107,7 @@ def test_linux_ci_contract() -> None:
     assert 'rust: "1.88.0"' in workflow
     assert 'python: "3.10"' in workflow
     assert 'node: "22.23.1"' in workflow
-    assert "max-parallel: 1" in workflow
     assert "fail-fast: false" in workflow
-    assert f"runs-on: {BERYL_RUNNER}" in workflow
-    assert "head.repo.full_name == github.repository" in workflow
     assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in workflow
     assert "timeout-minutes: 30" in workflow
     assert "timeout-minutes: 5" in workflow
@@ -123,14 +116,17 @@ def test_linux_ci_contract() -> None:
     assert "if: always()" in workflow
 
 
-def test_linux_ci_uses_hosted_runners_only_for_fork_pull_requests() -> None:
-    assert job_runners(read_workflow("linux-ci.yml")) == {
-        "supported-versions": BERYL_RUNNER,
-        "required": FORK_ROUTED_BERYL_RUNNER,
+def test_linux_ci_runs_every_job_on_hosted_runners() -> None:
+    workflow = read_workflow("linux-ci.yml")
+
+    assert job_runners(workflow) == {
+        "supported-versions": HOSTED_RUNNER,
+        "required": HOSTED_RUNNER,
     }
+    assert "self-hosted" not in workflow
 
 
-def test_self_hosted_jobs_use_a_pinned_ci_container() -> None:
+def test_ci_jobs_use_a_pinned_ci_container() -> None:
     for workflow_name in ("linux-ci.yml", "nightly.yml"):
         workflow = read_workflow(workflow_name)
         prerequisite_step = workflow.partition(
@@ -159,7 +155,7 @@ def test_scheduled_workflow_contracts() -> None:
     )[2].partition("\n      - name:")[0]
 
     assert "cron: '17 6 * * *'" in nightly
-    assert f"runs-on: {BERYL_RUNNER}" in nightly
+    assert job_runners(nightly) == {"validate-release": HOSTED_RUNNER}
     assert "make ci" in nightly and "make release" in nightly
     assert "timeout-minutes: 30" in nightly
     assert "cron: '37 6 * * 1'" in dependency_health
@@ -179,7 +175,7 @@ def test_release_workflow_contract() -> None:
     ]
     publish_step = workflow.partition("      - name: Create draft GitHub release\n")[2]
 
-    assert job_runners(workflow) == {"release": BERYL_RUNNER}
+    assert job_runners(workflow) == {"release": HOSTED_RUNNER}
     assert f"image: {CI_CONTAINER_IMAGE}" in workflow
     assert "tags: ['v[0-9]+.[0-9]+.[0-9]+']" in workflow
     assert "pull_request" not in workflow
@@ -191,8 +187,8 @@ def test_release_workflow_contract() -> None:
         "checks:",
         "read",
     ]
-    # Release builds install pinned, verified tools and use no cache that another job
-    # on the persistent runner can write.
+    # Release builds install pinned, verified tools and use no cache that another
+    # workflow run can write.
     for shared_cache_action in (
         "rust-cache",
         "actions/setup-python@",
@@ -269,8 +265,8 @@ def test_rust_toolchain_action_uses_master_pin() -> None:
 
 
 def test_nightly_cuda_contract() -> None:
-    nightly = read_workflow("nightly.yml")
-    cuda_job = nightly.partition("  cuda-report:\n")[2]
+    nightly_cuda = read_workflow("nightly-cuda.yml")
+    cuda_job = nightly_cuda.partition("  cuda-report:\n")[2]
     actionlint = (REPOSITORY_ROOT / ".github" / "actionlint.yaml").read_text(
         encoding="utf-8"
     )
@@ -278,7 +274,9 @@ def test_nightly_cuda_contract() -> None:
 
     assert cuda_job
     assert "name: Nightly / CUDA report integration" in cuda_job
-    assert "needs: validate-release" in cuda_job
+    assert "needs:" not in cuda_job
+    assert job_runners(nightly_cuda) == {"cuda-report": CUDA_BERYL_RUNNER}
+    assert "pull_request" not in nightly_cuda
     assert f"runs-on: {CUDA_BERYL_RUNNER}" in cuda_job
     assert f"image: {CUDA_CONTAINER_IMAGE}" in cuda_job
     assert "options: --gpus all" in cuda_job
@@ -349,7 +347,9 @@ def test_ci_omits_cross_platform_jobs_and_scopes_cuda_to_nightly() -> None:
         assert unsupported_runner not in workflow_text
     assert "cuda" not in read_workflow("linux-ci.yml").lower()
     assert "cuda" not in read_workflow("dependency-health.yml").lower()
-    assert "cuda" in read_workflow("nightly.yml").lower()
+    assert "cuda" not in read_workflow("nightly.yml").lower()
+    assert "cuda" not in read_workflow("release.yml").lower()
+    assert "cuda" in read_workflow("nightly-cuda.yml").lower()
 
 
 def test_node_support_floor_is_consistent() -> None:
