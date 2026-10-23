@@ -91,7 +91,7 @@ The table below lists the attributes in mammography and breast tomosynthesis obj
 | Window Center & Width Explanation | `(0028,1055)` | LO | The names of the VOI windows are lost. The window values are kept. |
 | LUT Explanation | `(0028,3003)` | LO | The name of the VOI LUT is lost. The LUT data is kept. |
 
-Code Value, Coding Scheme Designator, and Code Meaning are changed in every code sequence that is kept, which includes View Code Sequence `(0054,0220)`, View Modifier Code Sequence `(0054,0222)`, and Anatomic Region Sequence `(0008,2218)`, also when they are nested in functional group sequences.
+Without an exact descriptor-map entry, Code Value, Coding Scheme Designator, and Code Meaning are changed in every code sequence that is kept, which includes View Code Sequence `(0054,0220)`, View Modifier Code Sequence `(0054,0222)`, and Anatomic Region Sequence `(0008,2218)`, also when they are nested in functional group sequences.
 
 #### Shipped breast-imaging descriptor map
 

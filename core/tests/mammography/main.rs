@@ -9,6 +9,7 @@ mod fixtures;
 use std::collections::BTreeMap;
 use std::process::Command;
 
+use dicom_anon::cli_common::{ProfileArgs, ProfilePreset};
 use dicom_anon::{
     read_dicom, validate_source_object, write_dicom, Anonymizer, DefaultDicomObject, Options,
     ProfileConfiguration, SecretKey,
@@ -41,6 +42,10 @@ const POLICIES: [Policy; 4] = [
     Policy::SafeHarborBreastMap,
 ];
 
+/// The code tags that docs/cli.md tells mammography pipelines to guard with
+/// `--fail-on-unmapped` when they load the breast map.
+const FAIL_ON_UNMAPPED_CODE_TAGS: [&str; 3] = ["00080100", "00080102", "00080104"];
+
 const SHIPPED_BREAST_MAP: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../descriptor-maps/breast-imaging-ps3.16-2026d.json"
@@ -59,8 +64,10 @@ impl Policy {
     /// A unique name for assertion messages and file names.
     const fn label(self) -> &'static str {
         match self {
+            Self::Dicom => "dicom",
+            Self::DicomExtended => "dicom-extended",
+            Self::SafeHarbor => "safe-harbor-metadata",
             Self::SafeHarborBreastMap => "safe-harbor-metadata+breast-map",
-            _ => self.name(),
         }
     }
 
@@ -79,6 +86,9 @@ impl Policy {
                 profile.uid_mappings = uid_map();
                 if self == Self::SafeHarborBreastMap {
                     profile.descriptor_mappings = breast_map();
+                    profile
+                        .fail_on_unmapped
+                        .extend(FAIL_ON_UNMAPPED_CODE_TAGS.map(String::from));
                 }
                 profile
             }
@@ -96,11 +106,23 @@ fn uid_map() -> BTreeMap<String, String> {
         .collect()
 }
 
-/// The `mappings` member of the shipped breast-imaging descriptor map.
+/// The shipped breast-imaging descriptor map, read through the same loader as
+/// `--descriptor-map`, so that the library and CLI cases use identical mappings.
 fn breast_map() -> BTreeMap<String, BTreeMap<String, String>> {
-    let document: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(SHIPPED_BREAST_MAP).unwrap()).unwrap();
-    serde_json::from_value(document["mappings"].clone()).unwrap()
+    ProfileArgs {
+        policy: ProfilePreset::SafeHarborMetadata,
+        enable_option: Vec::new(),
+        disable_option: Vec::new(),
+        descriptor_map: vec![SHIPPED_BREAST_MAP.into()],
+        fail_on_unmapped: Vec::new(),
+        safe_private_allowlist: None,
+        uid_map: None,
+        require_no_burned_in_annotation: false,
+        allow_sop_class: Vec::new(),
+    }
+    .load()
+    .unwrap()
+    .descriptor_mappings
 }
 
 /// Serialize and parse again, as a file or network transfer does.
@@ -384,11 +406,11 @@ fn view_laterality_presentation_intent_and_frame_type_are_unchanged() {
     }
 }
 
-/// Safe Harbor cleans every kept code sequence. Only an exact descriptor-map entry keeps a
-/// coded value, so View Code Sequence survives with the shipped breast map and becomes
-/// `ANONYMIZED` without one.
+/// The DICOM policies keep View Code Sequence. Safe Harbor cleans every kept code sequence,
+/// and only an exact descriptor-map entry keeps a coded value, so View Code Sequence
+/// survives with the shipped breast map and becomes `ANONYMIZED` without one.
 #[test]
-fn view_code_sequence_is_kept_only_with_the_breast_map_in_safe_harbor_mode() {
+fn view_code_sequence_is_kept_except_in_safe_harbor_without_the_breast_map() {
     for (name, policy, source, output) in cases() {
         let context = format!("{name} / {}", policy.label());
         let source_code = item(&source, tags::VIEW_CODE_SEQUENCE, 0);
@@ -651,13 +673,19 @@ fn command_line_source_aware_validation_passes() {
                     PATIENT_SCOPE,
                 ]);
             }
+            let mut fail_on_unmapped = Vec::new();
             if policy == Policy::SafeHarborBreastMap {
                 profile.extend(["--descriptor-map", SHIPPED_BREAST_MAP]);
+                // The fail-closed guard that docs/cli.md recommends with the map.
+                for tag in FAIL_ON_UNMAPPED_CODE_TAGS {
+                    fail_on_unmapped.extend(["--fail-on-unmapped", tag]);
+                }
             }
             let anonymized = Command::new(env!("CARGO_BIN_EXE_dicom-anonymize"))
                 .arg(&source_path)
                 .arg(&output_path)
                 .args(&profile)
+                .args(&fail_on_unmapped)
                 .args(["--key-env", KEY_ENV])
                 .env(KEY_ENV, KEY)
                 .output()
