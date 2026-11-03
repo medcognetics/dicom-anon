@@ -96,6 +96,14 @@ report-integration-coverage:
 	cargo llvm-cov --locked --no-clean -p dicom-anon-report --lib -- --ignored --test-threads=1
 	cargo llvm-cov report -p dicom-anon-report --fail-under-lines $(REPORT_INTEGRATION_MIN_LINE_COVERAGE)
 
+# The bundle ships only ONNX Runtime; the CUDA runtime, cuBLAS, and cuDNN come from the
+# host loader path. Check the GPU and the provider's dependencies before the tests.
 report-cuda-integration:
 	@test -d "$$DICOM_ANON_REPORT_MODEL_DIR" -a -f "$$DICOM_ANON_REPORT_CUDA_ORT_LIBRARY" || (echo "CUDA report integration asset paths are not configured" >&2; exit 2)
+	@nvidia-smi --query-gpu=name,driver_version,memory.total,compute_cap --format=csv,noheader || { echo "no usable NVIDIA GPU or driver" >&2; exit 2; }
+	@provider="$$(dirname "$$DICOM_ANON_REPORT_CUDA_ORT_LIBRARY")/libonnxruntime_providers_cuda.so"; \
+		test -f "$$provider" || { echo "$$provider is missing" >&2; exit 2; }; \
+		report="$$(ldd "$$provider")" || { echo "ldd failed for $$provider" >&2; exit 2; }; \
+		printf '%s\n' "$$report"; \
+		if printf '%s\n' "$$report" | grep --fixed-strings --quiet 'not found'; then echo "unresolved CUDA provider dependencies; set LD_LIBRARY_PATH" >&2; exit 2; fi
 	cargo test --locked -p dicom-anon-report --no-default-features --test model_cuda -- --ignored --test-threads=1
