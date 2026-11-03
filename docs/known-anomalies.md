@@ -6,7 +6,7 @@ The list applies to the version in the heading. It is not a risk assessment. The
 
 ## Version 0.2.0
 
-Reviewed: 2026-10-19, at `master` commit `d06f0fc` plus the release-tooling change for [#22](https://github.com/medcognetics/dicom-anon/issues/22).
+Reviewed: 2026-10-19, at `master` commit `d06f0fc` plus the release-tooling change for [#22](https://github.com/medcognetics/dicom-anon/issues/22). Updated 2026-10-23 for the move to GitHub-hosted CI ([#10](https://github.com/medcognetics/dicom-anon/issues/10), [#45](https://github.com/medcognetics/dicom-anon/issues/45)).
 
 Closed before this release: [#18](https://github.com/medcognetics/dicom-anon/issues/18) (pixel-risk gates and JPEG 2000 comment removal; JPEG and JPEG-LS segment removal followed in [#28](https://github.com/medcognetics/dicom-anon/pull/28)), [#19](https://github.com/medcognetics/dicom-anon/issues/19) (Safe Harbor UID listing and generation), [#20](https://github.com/medcognetics/dicom-anon/issues/20) (fail-closed descriptor dummies), and [#21](https://github.com/medcognetics/dicom-anon/issues/21) (mammography and JPEG 2000 fixtures). See the changelog.
 
@@ -14,7 +14,8 @@ Closed before this release: [#18](https://github.com/medcognetics/dicom-anon/iss
 
 | ID | Anomaly | Effect | Workaround or control |
 |---|---|---|---|
-| [#10](https://github.com/medcognetics/dicom-anon/issues/10) | The scheduled nightly job fails or does not complete on the `beryl` runner. Recent runs failed with "no space left on device" or were cancelled while the CUDA job waited for a runner. | The release precondition "nightly validation passes on the tagged commit" is not met automatically. This is a CI defect, not a product defect. | Repair runner capacity, then run the nightly workflow on the release commit before the tag. |
+| [#10](https://github.com/medcognetics/dicom-anon/issues/10) | The scheduled nightly job failed or did not complete on the self-hosted `beryl` runner, and once the repository became public, beryl no longer accepted its jobs. Nightly validation now runs on GitHub-hosted Linux. | Until a hosted Nightly run passes on the release commit, the release precondition "nightly validation passes on the tagged commit" is not met. This is a CI defect, not a product defect. | Run the nightly workflow on the release commit before the tag. |
+| [#45](https://github.com/medcognetics/dicom-anon/issues/45) | GitHub Actions no longer runs the CUDA report job (CPU and CUDA semantic parity, CUDA CLI), because the public repository uses only GitHub-hosted runners. | CUDA execution-provider behavior is not verified automatically. The removed job was also the only automated run of the pinned model on CPU, for the parity comparison. CI now runs only the self-contained report suite; asset-backed CPU model, PDF, and OCR integration stays the local `make report-integration-coverage` gate. | Before relying on `report-anon` model output, run `make report-integration-coverage`, and before relying on `--device cuda`, run `make report-cuda-integration` on a controlled GPU host. Keep the results. |
 | [#14](https://github.com/medcognetics/dicom-anon/issues/14) | The scheduled security audit fails. The 2026-10-12 run reported RUSTSEC-2026-0285 (`rustls` 0.23.42, a dependency of the `report-anon model install` downloader), npm, pip, and workflow findings. | The release workflow fails while any audit finding is blocking. | Resolve the findings (open pull request [#15](https://github.com/medcognetics/dicom-anon/pull/15) addresses part of them), then rerun the audit. |
 
 ### Supplier risks (unmaintained dependencies)
