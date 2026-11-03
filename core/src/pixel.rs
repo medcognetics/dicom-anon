@@ -378,6 +378,17 @@ pub(crate) fn repair_total_length(
     }
 }
 
+/// Remove Planar Configuration (0028,0006) when Samples per Pixel (0028,0002) is 1. PS3.3
+/// C.7.6.3.1.3 defines Planar Configuration only for more than one sample per pixel. Returns
+/// whether the attribute was removed.
+pub(crate) fn remove_single_sample_planar_configuration(object: &mut InMemDicomObject) -> bool {
+    let single_sample = object
+        .get(tags::SAMPLES_PER_PIXEL)
+        .and_then(|element| element.to_int::<u16>().ok())
+        == Some(1);
+    single_sample && object.remove_element(tags::PLANAR_CONFIGURATION)
+}
+
 /// Fail when segment removal would change fragment offsets or lengths that an Extended Offset
 /// Table or its lengths attribute lists, also when only one of the two is present.
 fn check_extended_offset_table(object: &InMemDicomObject, removed: RemovedSegments) -> Parse<()> {
@@ -1483,6 +1494,46 @@ mod tests {
         assert!(strip_jpeg_segments(&dnl, true).is_ok());
         let dnl_first = jpeg(&segment(0xDC, &[0, 2]), &gray_ls, &[], &[T87_SCAN]);
         assert!(strip_jpeg_segments(&dnl_first, true).is_err());
+    }
+
+    #[test]
+    fn planar_configuration_is_removed_only_for_one_sample_per_pixel() {
+        let with = |samples: Option<u16>| {
+            let mut object = InMemDicomObject::new_empty();
+            if let Some(samples) = samples {
+                object.put(InMemElement::new(
+                    tags::SAMPLES_PER_PIXEL,
+                    VR::US,
+                    PrimitiveValue::from(samples),
+                ));
+            }
+            object.put(InMemElement::new(
+                tags::PLANAR_CONFIGURATION,
+                VR::US,
+                PrimitiveValue::from(0_u16),
+            ));
+            object
+        };
+        for (samples, removed) in [(Some(1), true), (Some(3), false), (None, false)] {
+            let mut object = with(samples);
+            assert_eq!(
+                remove_single_sample_planar_configuration(&mut object),
+                removed,
+                "{samples:?}"
+            );
+            assert_eq!(
+                object.get(tags::PLANAR_CONFIGURATION).is_none(),
+                removed,
+                "{samples:?}"
+            );
+        }
+        let mut absent = InMemDicomObject::new_empty();
+        absent.put(InMemElement::new(
+            tags::SAMPLES_PER_PIXEL,
+            VR::US,
+            PrimitiveValue::from(1_u16),
+        ));
+        assert!(!remove_single_sample_planar_configuration(&mut absent));
     }
 
     #[test]
