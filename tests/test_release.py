@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import tomllib
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -228,3 +230,44 @@ def test_audit_evidence_must_pass_on_the_release_commit(tmp_path: Path) -> None:
         write_manifest(tmp_path, commit, statuses)
         with pytest.raises(ReleaseError, match="blocking or incomplete"):
             release.require_current_audit(commit, tmp_path)
+
+
+class _StopAfterBuild(Exception):
+    pass
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda output: release.build_binaries(output, "0.2.0", "0" * 40),
+        lambda output: release.build_wheel(output, "0.2.0"),
+    ],
+    ids=["binaries", "wheel"],
+)
+def test_release_builds_strip_symbols(
+    build: Callable[[Path], object], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The workspace profile keeps symbols for macOS source builds (#41); the
+    # published Linux artifacts must still be stripped.
+    commands: list[list[str]] = []
+
+    def record(command: list[str], **_: object) -> None:
+        commands.append(list(command))
+        raise _StopAfterBuild
+
+    monkeypatch.setattr(release, "run", record)
+    with pytest.raises(_StopAfterBuild):
+        build(tmp_path)
+
+    (command,) = commands
+    assert command[:2] in (["cargo", "build"], ["maturin", "build"])
+    assert "--config" in command
+    index = command.index("--config")
+    assert command[index : index + 2] == ["--config", 'profile.release.strip="symbols"']
+
+
+def test_workspace_release_profile_does_not_strip() -> None:
+    # On macOS 27, rustc strips with its bundled rust-objcopy, and dyld rejects the
+    # stripped extension modules for both "symbols" and "debuginfo" (#41).
+    manifest = tomllib.loads((release.REPOSITORY_ROOT / "Cargo.toml").read_text())
+    assert manifest["profile"]["release"]["strip"] == "none"
