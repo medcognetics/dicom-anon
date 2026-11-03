@@ -1,13 +1,15 @@
 //! Mammography, DBT, synthesized 2D, and JPEG 2000 conformance tests (issue #21).
 //!
 //! Each synthetic fixture goes through the `dicom`, `dicom-extended`, and
-//! `safe-harbor-metadata` policies. The checks cover metadata only; Pixel Data stays unassessed.
+//! `safe-harbor-metadata` policies, and through `safe-harbor-metadata` with the shipped
+//! breast-imaging descriptor map. The checks cover metadata only; Pixel Data stays unassessed.
 
 mod fixtures;
 
 use std::collections::BTreeMap;
 use std::process::Command;
 
+use dicom_anon::cli_common::{ProfileArgs, ProfilePreset};
 use dicom_anon::{
     read_dicom, validate_source_object, write_dicom, Anonymizer, DefaultDicomObject, Options,
     ProfileConfiguration, SecretKey,
@@ -29,17 +31,48 @@ enum Policy {
     Dicom,
     DicomExtended,
     SafeHarbor,
+    /// Safe Harbor with `descriptor-maps/breast-imaging-ps3.16-2026d.json`.
+    SafeHarborBreastMap,
 }
 
-const POLICIES: [Policy; 3] = [Policy::Dicom, Policy::DicomExtended, Policy::SafeHarbor];
+const POLICIES: [Policy; 4] = [
+    Policy::Dicom,
+    Policy::DicomExtended,
+    Policy::SafeHarbor,
+    Policy::SafeHarborBreastMap,
+];
+
+/// The code tags that docs/cli.md tells mammography pipelines to guard with
+/// `--fail-on-unmapped` when they load the breast map.
+const FAIL_ON_UNMAPPED_CODE_TAGS: [&str; 3] = ["00080100", "00080102", "00080104"];
+
+const SHIPPED_BREAST_MAP: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../descriptor-maps/breast-imaging-ps3.16-2026d.json"
+);
 
 impl Policy {
+    /// The `--policy` value.
     const fn name(self) -> &'static str {
         match self {
             Self::Dicom => "dicom",
             Self::DicomExtended => "dicom-extended",
-            Self::SafeHarbor => "safe-harbor-metadata",
+            Self::SafeHarbor | Self::SafeHarborBreastMap => "safe-harbor-metadata",
         }
+    }
+
+    /// A unique name for assertion messages and file names.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Dicom => "dicom",
+            Self::DicomExtended => "dicom-extended",
+            Self::SafeHarbor => "safe-harbor-metadata",
+            Self::SafeHarborBreastMap => "safe-harbor-metadata+breast-map",
+        }
+    }
+
+    const fn is_safe_harbor(self) -> bool {
+        matches!(self, Self::SafeHarbor | Self::SafeHarborBreastMap)
     }
 
     fn options(self) -> Options {
@@ -47,10 +80,16 @@ impl Policy {
         options.profile = match self {
             Self::Dicom => ProfileConfiguration::dicom(),
             Self::DicomExtended => ProfileConfiguration::dicom_extended(),
-            Self::SafeHarbor => {
+            Self::SafeHarbor | Self::SafeHarborBreastMap => {
                 options.patient_scope = Some(PATIENT_SCOPE.to_owned());
                 let mut profile = ProfileConfiguration::safe_harbor();
                 profile.uid_mappings = uid_map();
+                if self == Self::SafeHarborBreastMap {
+                    profile.descriptor_mappings = breast_map();
+                    profile
+                        .fail_on_unmapped
+                        .extend(FAIL_ON_UNMAPPED_CODE_TAGS.map(String::from));
+                }
                 profile
             }
         };
@@ -67,6 +106,25 @@ fn uid_map() -> BTreeMap<String, String> {
         .collect()
 }
 
+/// The shipped breast-imaging descriptor map, read through the same loader as
+/// `--descriptor-map`, so that the library and CLI cases use identical mappings.
+fn breast_map() -> BTreeMap<String, BTreeMap<String, String>> {
+    ProfileArgs {
+        policy: ProfilePreset::SafeHarborMetadata,
+        enable_option: Vec::new(),
+        disable_option: Vec::new(),
+        descriptor_map: vec![SHIPPED_BREAST_MAP.into()],
+        fail_on_unmapped: Vec::new(),
+        safe_private_allowlist: None,
+        uid_map: None,
+        require_no_burned_in_annotation: false,
+        allow_sop_class: Vec::new(),
+    }
+    .load()
+    .unwrap()
+    .descriptor_mappings
+}
+
 /// Serialize and parse again, as a file or network transfer does.
 fn round_trip(object: &DefaultDicomObject) -> DefaultDicomObject {
     let mut bytes = Vec::new();
@@ -78,7 +136,7 @@ fn anonymize(policy: Policy, source: &DefaultDicomObject) -> DefaultDicomObject 
     let (output, _) = Anonymizer::new(policy.options())
         .unwrap()
         .anonymize(source)
-        .unwrap_or_else(|error| panic!("{}: {error}", policy.name()));
+        .unwrap_or_else(|error| panic!("{}: {error}", policy.label()));
     round_trip(&output)
 }
 
@@ -241,7 +299,7 @@ fn fixtures_hold_placeholder_identifiers_at_every_level() {
 #[test]
 fn outputs_contain_no_placeholder_text_or_source_uid_at_any_depth() {
     for (name, policy, _, output) in cases() {
-        let context = format!("{name} / {}", policy.name());
+        let context = format!("{name} / {}", policy.label());
         for element in output.meta().to_element_iter() {
             let bytes = element.value().to_bytes().unwrap_or_default();
             assert!(
@@ -281,7 +339,7 @@ fn outputs_contain_no_placeholder_text_or_source_uid_at_any_depth() {
 #[test]
 fn transfer_syntax_and_pixel_module_are_bit_identical() {
     for (name, policy, source, output) in cases() {
-        let context = format!("{name} / {}", policy.name());
+        let context = format!("{name} / {}", policy.label());
         assert_eq!(
             source.meta().transfer_syntax(),
             output.meta().transfer_syntax(),
@@ -327,7 +385,7 @@ fn transfer_syntax_and_pixel_module_are_bit_identical() {
 #[test]
 fn view_laterality_presentation_intent_and_frame_type_are_unchanged() {
     for (name, policy, source, output) in cases() {
-        let context = format!("{name} / {}", policy.name());
+        let context = format!("{name} / {}", policy.label());
         for tag in fixtures::VIEW_TAGS {
             assert!(source.get(tag).is_some(), "{context}: fixture lacks {tag}");
             assert_eq!(source.get(tag), output.get(tag), "{context}: {tag}");
@@ -348,18 +406,17 @@ fn view_laterality_presentation_intent_and_frame_type_are_unchanged() {
     }
 }
 
-/// View Code Sequence handling depends on issue #20. These assertions record the behavior at
-/// this revision.
-// FOLLOW-UP(#20): when code sequences keep reviewed coded values, require an unchanged View
-// Code Sequence in Safe Harbor mode too.
+/// The DICOM policies keep View Code Sequence. Safe Harbor cleans every kept code sequence,
+/// and only an exact descriptor-map entry keeps a coded value, so View Code Sequence
+/// survives with the shipped breast map and becomes `ANONYMIZED` without one.
 #[test]
-fn view_code_sequence_records_current_behavior() {
+fn view_code_sequence_is_kept_except_in_safe_harbor_without_the_breast_map() {
     for (name, policy, source, output) in cases() {
-        let context = format!("{name} / {}", policy.name());
+        let context = format!("{name} / {}", policy.label());
         let source_code = item(&source, tags::VIEW_CODE_SEQUENCE, 0);
         let output_code = item(&output, tags::VIEW_CODE_SEQUENCE, 0);
         match policy {
-            Policy::Dicom | Policy::DicomExtended => {
+            Policy::Dicom | Policy::DicomExtended | Policy::SafeHarborBreastMap => {
                 assert_eq!(source_code, output_code, "{context}");
             }
             Policy::SafeHarbor => {
@@ -382,15 +439,15 @@ fn view_code_sequence_records_current_behavior() {
 #[test]
 fn safe_harbor_generalizes_temporal_values_at_every_depth_and_caps_age() {
     for (name, policy, source, output) in cases() {
-        let context = format!("{name} / {}", policy.name());
+        let context = format!("{name} / {}", policy.label());
         let age = text(&output, tags::PATIENT_AGE);
         match policy {
             Policy::Dicom => assert_eq!(age, None, "{context}"),
-            Policy::DicomExtended | Policy::SafeHarbor => {
+            Policy::DicomExtended | Policy::SafeHarbor | Policy::SafeHarborBreastMap => {
                 assert_eq!(age.as_deref(), Some("090Y"), "{context}");
             }
         }
-        if policy != Policy::SafeHarbor {
+        if !policy.is_safe_harbor() {
             continue;
         }
         let source_values = temporal_values(&source);
@@ -463,7 +520,7 @@ fn safe_harbor_generalizes_temporal_values_at_every_depth_and_caps_age() {
 fn references_and_file_meta_stay_consistent_across_objects() {
     let fixtures = Fixtures::new();
     for policy in POLICIES {
-        let context = policy.name();
+        let context = policy.label();
         let [mammogram, dbt, synthesized] = [
             &fixtures.mammogram,
             &fixtures.tomosynthesis,
@@ -500,7 +557,7 @@ fn references_and_file_meta_stay_consistent_across_objects() {
         }
 
         // Safe Harbor empties Patient ID and links the objects through the subject token.
-        let patient_tag = if policy == Policy::SafeHarbor {
+        let patient_tag = if policy.is_safe_harbor() {
             for object in [&mammogram, &dbt, &synthesized] {
                 assert_eq!(
                     text(object, tags::PATIENT_ID).as_deref(),
@@ -553,7 +610,7 @@ fn references_and_file_meta_stay_consistent_across_objects() {
             assert_eq!(meta.source_application_entity_title(), None, "{context}");
             assert_eq!(meta.private_information_creator_uid(), None, "{context}");
         }
-        if policy == Policy::SafeHarbor {
+        if policy.is_safe_harbor() {
             assert_eq!(dbt_sop, uid_map()[fixtures::SOP_DBT], "{context}");
         }
     }
@@ -574,7 +631,7 @@ fn output_is_deterministic() {
                 encode(anonymize(policy, &source)),
                 encode(anonymize(policy, &source)),
                 "{name} / {}",
-                policy.name()
+                policy.label()
             );
         }
     }
@@ -587,7 +644,7 @@ fn source_aware_validation_passes() {
         assert!(
             report.conformant,
             "{name} / {}: {:?}",
-            policy.name(),
+            policy.label(),
             report.findings
         );
     }
@@ -603,12 +660,12 @@ fn command_line_source_aware_validation_passes() {
         let source_path = directory.path().join(format!("{name}.dcm"));
         fixture.write_to_file(&source_path).unwrap();
         for policy in POLICIES {
-            let context = format!("{name} / {}", policy.name());
+            let context = format!("{name} / {}", policy.label());
             let output_path = directory
                 .path()
-                .join(format!("{name}-{}.dcm", policy.name()));
+                .join(format!("{name}-{}.dcm", policy.label()));
             let mut profile = vec!["--policy", policy.name()];
-            if policy == Policy::SafeHarbor {
+            if policy.is_safe_harbor() {
                 profile.extend([
                     "--uid-map",
                     uid_map_path.to_str().unwrap(),
@@ -616,10 +673,19 @@ fn command_line_source_aware_validation_passes() {
                     PATIENT_SCOPE,
                 ]);
             }
+            let mut fail_on_unmapped = Vec::new();
+            if policy == Policy::SafeHarborBreastMap {
+                profile.extend(["--descriptor-map", SHIPPED_BREAST_MAP]);
+                // The fail-closed guard that docs/cli.md recommends with the map.
+                for tag in FAIL_ON_UNMAPPED_CODE_TAGS {
+                    fail_on_unmapped.extend(["--fail-on-unmapped", tag]);
+                }
+            }
             let anonymized = Command::new(env!("CARGO_BIN_EXE_dicom-anonymize"))
                 .arg(&source_path)
                 .arg(&output_path)
                 .args(&profile)
+                .args(&fail_on_unmapped)
                 .args(["--key-env", KEY_ENV])
                 .env(KEY_ENV, KEY)
                 .output()

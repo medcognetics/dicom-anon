@@ -24,6 +24,7 @@ This is the first tagged release. Version 0.1.0 was not tagged or released.
 - JPEG and JPEG-LS segment removal ([#28](https://github.com/medcognetics/dicom-anon/pull/28)): the anonymizer removes COM and APPn segments from JPEG (`1.2.840.10008.1.2.4.50`, `.51`, `.57`, `.70`) and JPEG-LS (`.80`, `.81`) codestreams. It keeps one APP14 `Adobe` segment only where it changes decoded colors, and fails closed on codestreams it cannot parse or clean safely. `dicom-validate` reports `jpeg_comment_present`, `jpeg_application_segment_present`, and `jpeg_codestream_unparseable`.
 - `dicom-validate` reports `encapsulated_total_length_mismatch` when Encapsulated Pixel Data Value Total Length `(7FE0,0003)` does not match the fragments ([#31](https://github.com/medcognetics/dicom-anon/pull/31)).
 - Mammography, breast tomosynthesis, synthesized 2D, and JPEG 2000 conformance fixtures in CI ([#21](https://github.com/medcognetics/dicom-anon/issues/21)).
+- The mammography suite also runs `safe-harbor-metadata` with the shipped breast-imaging descriptor map and the fail-on-unmapped guard for the code tags, through the library and the CLI. With the map, View Code Sequence must be unchanged. Without a map, Safe Harbor mode still replaces it with `ANONYMIZED` ([#32](https://github.com/medcognetics/dicom-anon/issues/32)).
 
 ### Changed
 
