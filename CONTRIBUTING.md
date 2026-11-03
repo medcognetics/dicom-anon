@@ -46,17 +46,18 @@ Add each user-visible change to the `Unreleased` section of [CHANGELOG.md](CHANG
 
 ## Release procedure
 
-The release workflow, `.github/workflows/release.yml`, runs on beryl for a `vMAJOR.MINOR.PATCH` tag. It does not run for pull requests. Prerelease tags are not supported, because Python and Cargo spell prerelease versions differently.
+The release workflow, `.github/workflows/release.yml`, runs on a GitHub-hosted `ubuntu-24.04` runner for a `vMAJOR.MINOR.PATCH` tag. It does not run for pull requests. Prerelease tags are not supported, because Python and Cargo spell prerelease versions differently.
 
 1. In a pull request, set the version in `Cargo.toml`, `bindings/python/pyproject.toml`, `bindings/node/package.json`, and `bindings/node/package-lock.json`. Run `cargo update --workspace` and `make test-node`, which regenerates `bindings/node/index.js`.
 2. In the same pull request, replace `Unreleased` in the version heading of `CHANGELOG.md` with the release date, and review `docs/known-anomalies.md`.
-3. Merge the pull request after `Linux / Required` passes. Dispatch the Nightly workflow on `master` and confirm that it passes on the merge commit.
-4. Optionally, dispatch the Release workflow on `master`. A dispatch builds and checks every asset and writes the notes to the job summary, but it does not create a release.
-5. Create an annotated or signed tag on the merge commit and push it, for example `git tag --annotate v0.2.0 --message "dicom-anon 0.2.0"`.
-6. The workflow requires an annotated tag on a `master` commit where `Linux / Required` and Nightly passed. It runs `make audit`, builds the assets from the tag, verifies `--version` and the checksums, and creates a draft GitHub release.
-7. Review the draft release and its assets, then publish it.
+3. Merge the pull request after `Linux / Required` passes. Dispatch the Nightly workflow on `master` and confirm that it passes on the merge commit. GitHub turns off the schedule of a public repository after 60 days without activity, so always dispatch it for the release commit.
+4. CI does not run the asset-backed report gates ([#45](https://github.com/medcognetics/dicom-anon/issues/45)). On the merge commit, run `make report-integration-coverage`, and run `make report-cuda-integration` on a CUDA 12 host. Keep both results with the release records. The release workflow does not check them.
+5. Optionally, dispatch the Release workflow on `master`. A dispatch builds and checks every asset and writes the notes to the job summary, but it does not create a release.
+6. Create an annotated or signed tag on the merge commit and push it, for example `git tag --annotate v0.2.0 --message "dicom-anon 0.2.0"`.
+7. The workflow requires an annotated tag on a `master` commit where `Linux / Required` and Nightly passed. It runs `make audit`, builds the assets from the tag, verifies `--version` and the checksums, and creates a draft GitHub release.
+8. Review the draft release and its assets, then publish it.
 
-The workflow installs its own pinned Rust, Python, uv, and Node.js into a fresh job directory. It verifies each download with a SHA-256 value pinned in the workflow, or, for Python, with the checksum built into uv. It does not read or write the runner tool cache or any build cache, so pull-request jobs on beryl cannot change the tools that build the released files. To build the same assets locally on Linux x86_64, install cargo-audit 0.22.2 and cargo-cyclonedx 0.5.9, then run `make audit` and `make release-assets RELEASE_TAG=v0.2.0`. The assets are written to `target/release-assets/`.
+The workflow installs its own pinned Rust, Python, uv, and Node.js into a fresh job directory. It verifies each download with a SHA-256 value pinned in the workflow, or, for Python, with the checksum built into uv. It does not read or write the runner tool cache or any build cache, so no other job can change the tools that build the released files. To build the same assets locally on Linux x86_64, install cargo-audit 0.22.2 and cargo-cyclonedx 0.5.9, then run `make audit` and `make release-assets RELEASE_TAG=v0.2.0`. The assets are written to `target/release-assets/`.
 
 ## Test expectations
 
