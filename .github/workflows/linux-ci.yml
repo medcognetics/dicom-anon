@@ -18,10 +18,7 @@ concurrency:
 jobs:
   supported-versions:
     name: Linux / ${{ matrix.name }}
-    if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, linux, x64, beryl]
+    runs-on: ubuntu-24.04
     container:
       image: ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
     defaults:
@@ -30,7 +27,6 @@ jobs:
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix:
         include:
           - name: Latest
@@ -138,8 +134,7 @@ jobs:
     name: Linux / Required
     if: always()
     needs: supported-versions
-    runs-on: >-
-      ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","linux","x64","beryl"]' || '["ubuntu-24.04"]') }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require all supported versions
@@ -147,7 +142,6 @@ jobs:
           SUPPORTED_VERSIONS_RESULT: ${{ needs.supported-versions.result }}
         run: |
           if [[ "${SUPPORTED_VERSIONS_RESULT}" != "success" ]]; then
-            echo "Latest and minimum Linux checks must pass on a trusted repository branch."
-            echo "Self-hosted CI intentionally does not execute code from fork pull requests."
+            echo "Latest and minimum Linux checks must pass."
             exit 1
           fi
