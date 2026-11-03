@@ -32,4 +32,8 @@ This is the first tagged release. Version 0.1.0 was not tagged or released.
 - The anonymizer uses less peak memory when it rewrites encapsulated Pixel Data ([#31](https://github.com/medcognetics/dicom-anon/pull/31)).
 - The Cargo `repository` field and the README badge identify `medcognetics/dicom-anon`.
 
+### Fixed
+
+- A wholly zero-length DA, DT, or TM value no longer makes de-identification fail with `invalid DA value`. A zero-length value that the profile keeps or shifts stays zero length. A value that the profile replaces with a dummy (`D`) or removes (`X`) is still replaced or removed, as in the `dicom` preset. A paired date and time where one side is empty no longer fails ([#38](https://github.com/medcognetics/dicom-anon/issues/38)). Output for input that already succeeded does not change.
+
 [0.2.0]: https://github.com/medcognetics/dicom-anon/releases/tag/v0.2.0

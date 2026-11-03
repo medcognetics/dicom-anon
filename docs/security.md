@@ -45,7 +45,7 @@ The default rejects files already marked Patient Identity Removed=`YES`. This pr
 
 For pixel risk, enable `--require-no-burned-in-annotation` and `--allow-sop-class` for each permitted SOP Class when the release depends on those declarations. A failing input exits with status 2 and writes no output. JPEG 2000 comment segments and JPEG and JPEG-LS comment and application segments are always removed. A JPEG 2000, JPEG, or JPEG-LS codestream that cannot be rewritten safely fails. The removal copies the entropy-coded data byte for byte and does not change the decoded samples. These controls use declared attributes and codestream structure. They do not inspect the pixel samples. The [conformance statement](conformance.md#pixel-and-disclosure-limits) lists the risks that stay with the caller.
 
-Invalid DA, DT, and TM values fail the operation instead of being copied. Missing patient scope also fails. Atomic file output is created only after parsing and transformation succeed, so an input error does not truncate the destination.
+Invalid DA, DT, and TM values fail the operation instead of being copied. A wholly zero-length value is not invalid: it stays zero length where the profile keeps, shifts, or generalizes it. A dummy (`D`) action still writes a dummy value, and a remove (`X`) action still removes it. An empty component inside a multi-valued value that the profile shifts or generalizes still fails. Missing patient scope also fails. Atomic file output is created only after parsing and transformation succeed, so an input error does not truncate the destination.
 
 ## Release review
 
