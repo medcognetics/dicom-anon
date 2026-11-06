@@ -37,6 +37,9 @@ REFERENCE_CONTEXT_GROUPS = {
     "7203": lambda meaning: True,
 }
 HEADER = ["Coding Scheme Designator", "Code Value", "Code Meaning"]
+SNOMED_RT_COLUMN = "SNOMED-RT ID"
+# These groups have no SCT rows in the edition, so they have no SNOMED-RT column.
+GROUPS_WITHOUT_SNOMED_RT = {"7202", "7203"}
 CODE_VALUE = "00080100"
 CODING_SCHEME_DESIGNATOR = "00080102"
 CODE_MEANING = "00080104"
@@ -92,12 +95,14 @@ def context_group_rows(cid: str) -> list[tuple[str, str, str, str]]:
     )
     if header_index is None:
         raise SystemExit(f"CID {cid} has no recognized code table")
+    has_snomed_rt = parser.rows[header_index][3:4] == [SNOMED_RT_COLUMN]
+    if has_snomed_rt == (cid in GROUPS_WITHOUT_SNOMED_RT):
+        raise SystemExit(f"CID {cid} has an unexpected {SNOMED_RT_COLUMN} column state")
     rows = []
     for row in parser.rows[header_index + 1 :]:
         if len(row) < 3 or row[0] not in {"DCM", "SCT"}:
             break
-        snomed_rt = row[3] if parser.rows[header_index][3:4] == ["SNOMED-RT ID"] else ""
-        rows.append((row[0], row[1], row[2], snomed_rt))
+        rows.append((row[0], row[1], row[2], row[3] if has_snomed_rt else ""))
     if not rows:
         raise SystemExit(f"CID {cid} has no code rows")
     return rows
