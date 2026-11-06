@@ -112,7 +112,7 @@ Each entry maps a value to itself. The map contains the SCT Code Value, the SRT 
 | Purpose of Reference Code Sequence `(0040,A170)` in Source Image Sequence `(0008,2112)` | CID 7202 Source Image Purpose of Reference | All DCM codes |
 | Derivation Code Sequence `(0008,9215)` | CID 7203 Image Derivation | All DCM codes |
 
-Load both maps to keep these sequences. Each entry maps a value to itself. `tools/generate_breast_descriptor_map.py` regenerates both files and fails if the published standard is not the 2026d edition. Do not edit the files by hand.
+Load both maps to keep these sequences. The maps are not exhaustive: with `--fail-on-unmapped`, any other kept code sequence that holds a code outside the maps, such as a local Procedure Code, also stops the run. Each entry maps a value to itself. `tools/generate_breast_descriptor_map.py` regenerates both files and fails if the published standard is not the 2026d edition. Do not edit the files by hand.
 
 A descriptor-map entry applies to its tag at every nesting level. Thus a value in a shipped map is also kept when it occurs in a different code sequence. All values in the maps are standard terminology, not identifiers. A Code Meaning from an earlier edition of the standard, for example a different capitalization, does not match the maps. Add such values in a separate reviewed map. Device attributes such as Manufacturer are not in the shipped maps, because their values are site-specific. Review and add them in a separate map.
 

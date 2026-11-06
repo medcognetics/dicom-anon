@@ -100,8 +100,12 @@ def context_group_rows(cid: str) -> list[tuple[str, str, str, str]]:
         raise SystemExit(f"CID {cid} has an unexpected {SNOMED_RT_COLUMN} column state")
     rows = []
     for row in parser.rows[header_index + 1 :]:
-        if len(row) < 3 or row[0] not in {"DCM", "SCT"}:
+        # The page navigation row ends the table.
+        if row[:1] == ["Prev"]:
             break
+        # Any other row must be a code row, so that no code is dropped without an error.
+        if len(row) < (4 if has_snomed_rt else 3) or row[0] not in {"DCM", "SCT"}:
+            raise SystemExit(f"CID {cid} has an unexpected table row")
         rows.append((row[0], row[1], row[2], row[3] if has_snomed_rt else ""))
     if not rows:
         raise SystemExit(f"CID {cid} has no code rows")

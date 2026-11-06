@@ -389,7 +389,12 @@ fn shipped_maps(files: &[&str]) -> BTreeMap<String, BTreeMap<String, String>> {
         let mappings: BTreeMap<String, BTreeMap<String, String>> =
             serde_json::from_value(document["mappings"].clone()).unwrap();
         for (tag, values) in mappings {
-            merged.entry(tag).or_default().extend(values);
+            let entry = merged.entry(tag).or_default();
+            for (source, output) in values {
+                // The CLI rejects a conflict between maps, so a shipped pair must not have one.
+                let previous = entry.insert(source.clone(), output.clone());
+                assert!(previous.is_none_or(|value| value == output), "{source}");
+            }
         }
     }
     merged
@@ -544,7 +549,9 @@ fn an_unknown_code_still_stops_with_both_maps() {
     let result = Anonymizer::new(guarded_options(&[VIEW_MAP, REFERENCES_MAP]))
         .unwrap()
         .anonymize(&round_trip(&source));
-    assert!(result.is_err());
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("(0008,9215)[0]/(0008,0100)"), "{error}");
+    assert!(!error.contains("LOCAL-1"), "{error}");
 }
 
 #[test]
