@@ -13,8 +13,8 @@ use dicom_anon::{
     ProfileConfiguration, SecretKey,
 };
 use dicom_core::header::Header;
-use dicom_core::value::Value;
-use dicom_core::{Tag, VR};
+use dicom_core::value::{DataSetSequence, Value};
+use dicom_core::{DataElement, Tag, VR};
 use dicom_dictionary_std::tags;
 use dicom_object::mem::{InMemDicomObject, InMemElement};
 
@@ -377,6 +377,174 @@ fn view_code_sequence_records_current_behavior() {
             }
         }
     }
+}
+
+/// Load shipped descriptor maps from `descriptor-maps/` into one mapping.
+fn shipped_maps(files: &[&str]) -> BTreeMap<String, BTreeMap<String, String>> {
+    let mut merged: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    for file in files {
+        let path = format!("{}/../descriptor-maps/{file}", env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        let document: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let mappings: BTreeMap<String, BTreeMap<String, String>> =
+            serde_json::from_value(document["mappings"].clone()).unwrap();
+        for (tag, values) in mappings {
+            merged.entry(tag).or_default().extend(values);
+        }
+    }
+    merged
+}
+
+const VIEW_MAP: &str = "breast-imaging-ps3.16-2026d.json";
+const REFERENCES_MAP: &str = "breast-imaging-references-ps3.16-2026d.json";
+const CODE_TAGS: [&str; 3] = ["00080100", "00080102", "00080104"];
+
+/// Options that stop on any code without a map entry.
+fn guarded_options(files: &[&str]) -> Options {
+    let mut options = Policy::SafeHarbor.options();
+    options.profile.descriptor_mappings = shipped_maps(files);
+    options.profile.fail_on_unmapped = CODE_TAGS.iter().map(ToString::to_string).collect();
+    options
+}
+
+fn code_item(value: &str, scheme: &str, meaning: &str) -> InMemDicomObject {
+    let mut item = InMemDicomObject::new_empty();
+    item.put_str(tags::CODE_VALUE, VR::SH, value);
+    item.put_str(tags::CODING_SCHEME_DESIGNATOR, VR::SH, scheme);
+    item.put_str(tags::CODE_MEANING, VR::LO, meaning);
+    item
+}
+
+fn code_sequence(tag: Tag, items: Vec<InMemDicomObject>) -> InMemElement {
+    DataElement::new(tag, VR::SQ, DataSetSequence::from(items))
+}
+
+/// One code from each of the other MG and DBT code sequences, added to a fixture.
+fn with_reference_codes(source: &DefaultDicomObject) -> DefaultDicomObject {
+    let mut object = source.clone();
+    object.put(code_sequence(
+        tags::PARTIAL_VIEW_CODE_SEQUENCE,
+        vec![code_item("255549009", "SCT", "Anterior")],
+    ));
+    object.put(code_sequence(
+        tags::DERIVATION_CODE_SEQUENCE,
+        vec![code_item(
+            "113091",
+            "DCM",
+            "Spatially-related frames extracted from the volume",
+        )],
+    ));
+    let mut source_image = InMemDicomObject::new_empty();
+    source_image.put_str(
+        tags::REFERENCED_SOP_CLASS_UID,
+        VR::UI,
+        "1.2.840.10008.5.1.4.1.1.1.2",
+    );
+    source_image.put_str(tags::REFERENCED_SOP_INSTANCE_UID, VR::UI, SOURCE_UIDS[0]);
+    source_image.put(code_sequence(
+        tags::PURPOSE_OF_REFERENCE_CODE_SEQUENCE,
+        vec![code_item(
+            "121322",
+            "DCM",
+            "Source image for image processing operation",
+        )],
+    ));
+    object.put(code_sequence(
+        tags::SOURCE_IMAGE_SEQUENCE,
+        vec![source_image],
+    ));
+    round_trip(&object)
+}
+
+fn assert_code(item: &InMemDicomObject, value: &str, scheme: &str, meaning: &str, context: &str) {
+    assert_eq!(
+        text(item, tags::CODE_VALUE).as_deref(),
+        Some(value),
+        "{context}"
+    );
+    assert_eq!(
+        text(item, tags::CODING_SCHEME_DESIGNATOR).as_deref(),
+        Some(scheme),
+        "{context}"
+    );
+    assert_eq!(
+        text(item, tags::CODE_MEANING).as_deref(),
+        Some(meaning),
+        "{context}"
+    );
+}
+
+#[test]
+fn shipped_maps_keep_the_other_code_sequences_under_safe_harbor() {
+    let fixtures = Fixtures::new();
+    for (name, fixture) in fixtures.named() {
+        let source = with_reference_codes(&round_trip(fixture));
+        let (output, report) = Anonymizer::new(guarded_options(&[VIEW_MAP, REFERENCES_MAP]))
+            .unwrap()
+            .anonymize(&source)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        for tag in CODE_TAGS {
+            assert!(
+                !report.unmapped_dummy_replacements.contains_key(tag),
+                "{name}: {tag}"
+            );
+        }
+        let output = round_trip(&output);
+        assert_code(
+            item(&output, tags::PARTIAL_VIEW_CODE_SEQUENCE, 0),
+            "255549009",
+            "SCT",
+            "Anterior",
+            name,
+        );
+        assert_code(
+            item(&output, tags::DERIVATION_CODE_SEQUENCE, 0),
+            "113091",
+            "DCM",
+            "Spatially-related frames extracted from the volume",
+            name,
+        );
+        assert_code(
+            item(
+                item(&output, tags::SOURCE_IMAGE_SEQUENCE, 0),
+                tags::PURPOSE_OF_REFERENCE_CODE_SEQUENCE,
+                0,
+            ),
+            "121322",
+            "DCM",
+            "Source image for image processing operation",
+            name,
+        );
+        // The View Code in the fixtures is kept by the other shipped map.
+        let view = item(&output, tags::VIEW_CODE_SEQUENCE, 0);
+        assert_ne!(
+            text(view, tags::CODE_VALUE).as_deref(),
+            Some("ANONYMIZED"),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn view_map_alone_stops_on_the_other_code_sequences() {
+    let source = with_reference_codes(&round_trip(&Fixtures::new().named()[0].1.clone()));
+    let result = Anonymizer::new(guarded_options(&[VIEW_MAP]))
+        .unwrap()
+        .anonymize(&source);
+    assert!(result.is_err());
+}
+
+#[test]
+fn an_unknown_code_still_stops_with_both_maps() {
+    let mut source = with_reference_codes(&round_trip(&Fixtures::new().named()[0].1.clone()));
+    source.put(code_sequence(
+        tags::DERIVATION_CODE_SEQUENCE,
+        vec![code_item("LOCAL-1", "99LOCAL", "Site specific derivation")],
+    ));
+    let result = Anonymizer::new(guarded_options(&[VIEW_MAP, REFERENCES_MAP]))
+        .unwrap()
+        .anonymize(&round_trip(&source));
+    assert!(result.is_err());
 }
 
 #[test]
