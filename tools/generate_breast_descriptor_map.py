@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the shipped breast-imaging coded-concept descriptor map.
+"""Generate the shipped breast-imaging coded-concept descriptor maps.
 
 Run with:
 
@@ -7,9 +7,9 @@ Run with:
 
 The source URLs point at ``current``, but generation fails unless every page
 identifies itself as DICOM PS3.16 2026d. This prevents a later edition from
-silently changing the reviewed map. The map keeps each Code Value, Coding
-Scheme Designator, and Code Meaning of the selected context groups unchanged.
-SRT entries use the SNOMED-RT ID column of the same table rows.
+silently changing a reviewed map. Each map keeps every Code Value, Coding
+Scheme Designator, and Code Meaning of its selected context groups unchanged.
+SRT entries use the SNOMED-RT ID column of the same table rows, when a group has it.
 """
 
 from __future__ import annotations
@@ -22,16 +22,24 @@ from urllib.request import urlopen
 
 EDITION = "2026d"
 BASE_URL = "https://dicom.nema.org/medical/dicom/current/output/chtml/part16"
-OUTPUT = Path(__file__).parents[1] / "descriptor-maps/breast-imaging-ps3.16-2026d.json"
+OUTPUT_DIR = Path(__file__).parents[1] / "descriptor-maps"
 
 # Context group -> predicate that selects the rows to include.
-CONTEXT_GROUPS = {
+VIEW_CONTEXT_GROUPS = {
     "4013": lambda meaning: True,
     "4014": lambda meaning: True,
     "4015": lambda meaning: True,
     "4031": lambda meaning: meaning == "Breast",
 }
-HEADER = ["Coding Scheme Designator", "Code Value", "Code Meaning", "SNOMED-RT ID"]
+REFERENCE_CONTEXT_GROUPS = {
+    "4005": lambda meaning: True,
+    "7202": lambda meaning: True,
+    "7203": lambda meaning: True,
+}
+HEADER = ["Coding Scheme Designator", "Code Value", "Code Meaning"]
+SNOMED_RT_COLUMN = "SNOMED-RT ID"
+# These groups have no SCT rows in the edition, so they have no SNOMED-RT column.
+GROUPS_WITHOUT_SNOMED_RT = {"7202", "7203"}
 CODE_VALUE = "00080100"
 CODING_SCHEME_DESIGNATOR = "00080102"
 CODE_MEANING = "00080104"
@@ -83,27 +91,34 @@ def context_group_rows(cid: str) -> list[tuple[str, str, str, str]]:
     if not " ".join(parser.title.split()).startswith(f"CID {cid} "):
         raise SystemExit(f"unexpected page title for CID {cid}: {parser.title!r}")
     header_index = next(
-        (index for index, row in enumerate(parser.rows) if row[:4] == HEADER), None
+        (index for index, row in enumerate(parser.rows) if row[:3] == HEADER), None
     )
     if header_index is None:
         raise SystemExit(f"CID {cid} has no recognized code table")
+    has_snomed_rt = parser.rows[header_index][3:4] == [SNOMED_RT_COLUMN]
+    if has_snomed_rt == (cid in GROUPS_WITHOUT_SNOMED_RT):
+        raise SystemExit(f"CID {cid} has an unexpected {SNOMED_RT_COLUMN} column state")
     rows = []
     for row in parser.rows[header_index + 1 :]:
-        if len(row) < 4 or row[0] not in {"DCM", "SCT"}:
+        # The page navigation row ends the table.
+        if row[:1] == ["Prev"]:
             break
-        rows.append((row[0], row[1], row[2], row[3]))
+        # Any other row must be a code row, so that no code is dropped without an error.
+        if len(row) < (4 if has_snomed_rt else 3) or row[0] not in {"DCM", "SCT"}:
+            raise SystemExit(f"CID {cid} has an unexpected table row")
+        rows.append((row[0], row[1], row[2], row[3] if has_snomed_rt else ""))
     if not rows:
         raise SystemExit(f"CID {cid} has no code rows")
     return rows
 
 
-def main() -> None:
+def mappings_for(context_groups: dict) -> dict[str, dict[str, str]]:
     mappings: dict[str, dict[str, str]] = {
         CODE_VALUE: {},
         CODING_SCHEME_DESIGNATOR: {"DCM": "DCM", "SCT": "SCT", "SRT": "SRT"},
         CODE_MEANING: {},
     }
-    for cid, selected in CONTEXT_GROUPS.items():
+    for cid, selected in context_groups.items():
         for scheme, value, meaning, snomed_rt in context_group_rows(cid):
             if not selected(meaning):
                 continue
@@ -112,16 +127,34 @@ def main() -> None:
             if snomed_rt:
                 mappings[CODE_VALUE][snomed_rt] = snomed_rt
             mappings[CODE_MEANING][meaning] = meaning
+    return mappings
+
+
+def write_map(file_name: str, name: str, source: str, notes: list[str], mappings: dict) -> None:
     document = {
         "format": "dicom-anon-descriptor-map/1",
-        "name": "breast-imaging-coded-concepts",
+        "name": name,
         "version": f"{EDITION}.1",
-        "source": (
+        "source": source,
+        "notes": notes,
+        "mappings": mappings,
+    }
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    (OUTPUT_DIR / file_name).write_text(
+        json.dumps(document, indent=2, sort_keys=True) + "\n"
+    )
+
+
+def main() -> None:
+    write_map(
+        f"breast-imaging-ps3.16-{EDITION}.json",
+        "breast-imaging-coded-concepts",
+        (
             f"DICOM PS3.16 {EDITION}: CID 4013 Anatomic Region for Mammography, "
             "CID 4014 View for Mammography, CID 4015 View Modifier for Mammography, "
             "and the Breast row of CID 4031 Common Anatomic Region"
         ),
-        "notes": [
+        [
             "Generated by tools/generate_breast_descriptor_map.py; do not edit by hand.",
             "Every entry maps a standard value to itself.",
             "SCT values come from the Code Value column. SRT values come from the "
@@ -131,10 +164,29 @@ def main() -> None:
             "Mappings apply to the tag at every nesting level, not only in the "
             "View Code, View Modifier Code, and Anatomic Region sequences.",
         ],
-        "mappings": mappings,
-    }
-    OUTPUT.parent.mkdir(exist_ok=True)
-    OUTPUT.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
+        mappings_for(VIEW_CONTEXT_GROUPS),
+    )
+    write_map(
+        f"breast-imaging-references-ps3.16-{EDITION}.json",
+        "breast-imaging-reference-coded-concepts",
+        (
+            f"DICOM PS3.16 {EDITION}: CID 4005 Partial View Section for Mammography, "
+            "CID 7202 Source Image Purpose of Reference, and CID 7203 Image Derivation"
+        ),
+        [
+            "Generated by tools/generate_breast_descriptor_map.py; do not edit by hand.",
+            "Every entry maps a standard value to itself.",
+            "CID 4005 gives Partial View Code Sequence (0028,1352) values. CID 7202 gives "
+            "Purpose of Reference Code Sequence (0040,A170) values in Source Image Sequence "
+            "(0008,2112). CID 7203 gives Derivation Code Sequence (0008,9215) values.",
+            "SCT values come from the Code Value column. SRT values come from the "
+            "SNOMED-RT ID column of the same rows. CID 7202 and CID 7203 use the DCM "
+            "scheme and have no such column.",
+            "Code Meaning values match the CID text exactly.",
+            "Mappings apply to the tag at every nesting level, not only in these sequences.",
+        ],
+        mappings_for(REFERENCE_CONTEXT_GROUPS),
+    )
 
 
 if __name__ == "__main__":
