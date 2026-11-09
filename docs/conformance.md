@@ -171,42 +171,43 @@ Burned-in text in the pixel samples is an identifier under Safe Harbor. The anon
 3. Glyphs of similar height whose centers align and whose gaps are at most twice their height form a text line.
 4. A line of two or more glyphs is text, and so is a lone glyph at least 9 pixels high, such as a laterality marker.
 
-**Censoring.** Each text line's bounding box, with a margin of a quarter of the glyph height and at least 2 pixels, is overwritten with the frame's background value. This happens only when every pixel in the box is background or one of that line's glyphs. So a tissue pixel is never written. Censoring applies to names and to valid laterality or view markers alike. Laterality and view are kept in the header (Image Laterality, View Code Sequence), so the image does not lose them.
+**Censoring.** Each text line has a bounding box with a margin of a quarter of the glyph height and at least 2 pixels. Lines whose boxes overlap, such as the stacked lines of a header, form one region with one box. The line's glyphs are overwritten with the frame's darkest value. So is every text mark that lies in the rows of the glyphs and does not touch the box edge: a bright component (top 20 % of the range) of at least 3 pixels, no thicker than a third of the glyph height (at least 3 pixels), and no longer than 1.2 glyph heights. Such marks are punctuation, the dot of an `i` and solid strokes such as `I`, `1` or `-`. This happens only when every other pixel in the box is background. The anonymizer does not write background pixels, so it writes only the text pixels. Censoring applies to names and to valid laterality or view markers alike. Image Laterality is kept in the header. View Code Sequence keeps its codes only when a verified descriptor map keeps them, such as the breast imaging map; otherwise they become `ANONYMIZED`, and the output can lose both the header view and the burned-in view marker.
 
-**Tissue.** The background is the dark end of the frame's own range: the frame has one only when its darkest value is at most 5 % of its brightest. Inside a padded box, any pixel that is neither background nor one of the line's glyphs stops the write. That includes tissue, a bright structure that is not a glyph, and the anti-aliased edge of a glyph, which cannot be told apart from tissue next to it. Such a box is not censored:
-- a line of three or more glyphs over tissue fails closed with the error `burned-in text over tissue in frame N`, and the anonymizer writes no output;
-- a line of one or two glyphs with tissue in its box, such as a calcification or a marker against the skin line, is left alone. A marker there is not censored.
+**Tissue.** A frame has a background only when its darkest value is at most 5 % of its brightest. A background pixel has exactly the frame's darkest value, because any brighter pixel can be faint tissue. It must also be in a dark region that reaches the frame border, outside the imaged anatomy, or in a dark region that lies strictly inside the box, such as the hole of an `O`. So text in a dark box over tissue, or a bright structure in a dark patch inside tissue, is not written. Inside a padded box, any other pixel that is not text stops the write. That includes faint tissue, a noisy background, a bright structure that is not a text mark or that extends out of the box, and the anti-aliased edge of a glyph, which cannot be told apart from tissue next to it. Such a box is not censored:
+- a region with a line of three or more glyphs over tissue fails closed with the error `burned-in text over tissue in frame N`, and the anonymizer writes no output;
+- a region of one or two glyphs with tissue in its box, such as a calcification or a marker against the skin line, is left alone and counted in `regions_left_in_place`. A marker there is not censored.
 
-**Output.** When nothing is censored, Pixel Data and the transfer syntax are copied unchanged. When a region is censored, the anonymizer writes the decoded and censored samples as native Pixel Data in Explicit VR Little Endian. No lossy step is applied. It removes Encapsulated Pixel Data Value Total Length and the Extended Offset Table. Burned In Annotation `(0028,0301)` keeps its source value, because censoring does not show that no text remains.
+**Output.** When nothing is censored, Pixel Data and the transfer syntax are copied unchanged. When a region is censored, the anonymizer writes the decoded and censored samples as native Pixel Data in Explicit VR Little Endian. No lossy step is applied. Odd-length 8-bit data gets one padding byte. It removes Encapsulated Pixel Data Value Total Length and the Extended Offset Table. Burned In Annotation `(0028,0301)` keeps its source value, because censoring does not show that no text remains. Lossy Image Compression `(0028,2110)` becomes `01` for a lossy JPEG `.50` or `.51` source (Method `ISO_10918_1` when absent) and for a JPEG-LS near-lossless `.81` source (Method `ISO_14495_1`). JPEG 2000 `.91` keeps a source value, because it can be reversible; when the source has none, it becomes `01` with Method `ISO_15444_1`.
 
 **Fail closed.** These cases stop the run with the error `pixel data was not assessed for burned-in text: <reason>`, and no output is written:
 - a transfer syntax other than native little endian, JPEG 2000 lossless, JPEG-LS or JPEG `.50`, `.51`, `.57` and `.70`;
 - a frame that the pinned decoders cannot decode;
-- color or signed samples;
+- color or signed samples, MONOCHROME2 with Presentation LUT Shape `INVERSE`, MONOCHROME1 with `IDENTITY`, or a Presentation LUT Sequence;
+- a frame with more than 2^20 bright components or dark regions, or more than 256 text-like lines (4096 open during grouping);
 - a sample size other than 8 or 16 bits;
 - multi-frame encapsulated data without one fragment per frame;
-- native Pixel Data whose length does not match its geometry, or more than 2^30 decoded samples;
-- a sample above Bits Stored;
+- native Pixel Data whose length does not match its geometry, more than 2^26 samples in a frame, or more than 2^30 decoded samples;
+- an unreadable Samples per Pixel or Pixel Representation, an invalid Bits Stored (empty, unreadable, 0, or more than Bits Allocated), a High Bit other than Bits Stored - 1, or a sample above Bits Stored;
 - Float or Double Float Pixel Data.
 
 The codestream and frame-layout checks in the next section also run when an object is censored.
 
-The JPEG 2000 decoder supports a single tile and a single component, so some vendor codestreams fail closed. Anti-aliased text, and text in lossy JPEG with ringing around its edges, also fails closed, because its edge pixels are neither background nor glyph. Measure the failure rate on an approved sample before deployment. The JPEG decoder uses its scalar inverse DCT, so lossy JPEG samples do not depend on the host CPU.
+The JPEG 2000 decoder supports a single tile and a single component, so some vendor codestreams fail closed. A line of three or more glyphs of anti-aliased text, or of text in lossy JPEG with ringing around its edges, also fails closed, because its edge pixels are neither background nor glyph. A line of one or two such glyphs is left in place without an error. Measure the failure rate on an approved sample before deployment. The JPEG decoder uses its scalar inverse DCT, so lossy JPEG samples do not depend on the host CPU.
 
 **Limits: this check can miss text.**
 - Text that is not bright on the background, or not in the top 20 % of the range: low-contrast, dark or semi-transparent text.
-- Text in a line of one or two glyphs with tissue in its box, which is left alone.
+- Text in a line of one or two glyphs whose box holds anything other than background and text, such as tissue, a noisy background, anti-aliased edges or JPEG ringing. It is left in place without an error, for example initials or an age.
 - Text whose glyphs are smaller than 5 pixels, larger than the size limits, rotated, curved, outlined, connected into one component, or spaced more than twice their height apart.
 - Text in an overlay (60xx,3000), a presentation state, or another object. These are outside the pixel samples.
 - Identifying graphics that are not text, such as a face, a barcode or a logo.
 
-It can also censor non-text, such as a ruler or a scale bar, on the background.
+It can also censor non-text, such as a ruler or a scale bar, on the background. A bright structure in a dark patch of the frame's exact darkest value that reaches the frame border, even through a narrow channel, counts as being outside the anatomy and can be censored. Tissue in MG and DBT For Presentation images is not stored at that value, so this needs a dark channel through tissue.
 
 The detector is a mitigation, not proof that no identifier remains. A later release adds a pinned text-detection model, run on the CPU, to improve recall.
 
 ## Pixel and disclosure limits
 
-The tool does not claim the Clean Pixel Data Option. Under `safe-harbor-metadata` it decodes pixel samples to censor burned-in text, as the next section describes. The validator emits the warning `pixel_data_not_assessed` when Pixel Data is present. Source-aware validation with the check on replaces it with `pixel_text_check_heuristic`, because the expected output was built with the check. Candidate-only validation cannot tell whether the check ran. DICOM PS3.15 notes that applying an attribute confidentiality profile does not guarantee that the complete information object is de-identified.
+The tool does not claim the Clean Pixel Data Option. Under `safe-harbor-metadata` it decodes pixel samples to censor burned-in text, as the next section describes. The validator emits the warning `pixel_data_not_assessed` when Pixel Data is present. Source-aware validation with the check on keeps this code and states that a heuristic check ran, because the expected output was built with the check and the heuristic can miss text. Candidate-only validation cannot tell whether the check ran. DICOM PS3.15 notes that applying an attribute confidentiality profile does not guarantee that the complete information object is de-identified.
 
 The tool controls these pixel risks:
 

@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use dicom_core::header::Header;
 use dicom_core::value::{DataSetSequence, Value};
 use dicom_core::{DataElement, PrimitiveValue, Tag, VR};
-use dicom_dictionary_std::tags;
+use dicom_dictionary_std::{tags, uids};
 use dicom_object::mem::{InMemDicomObject, InMemElement};
 use dicom_object::{DefaultDicomObject, FileMetaTableBuilder};
 use serde::{Deserialize, Serialize};
@@ -106,8 +106,10 @@ pub struct AnonymizationReport {
     #[serde(default)]
     pub unmapped_dummy_replacements: BTreeMap<String, u64>,
     /// Whether pixel samples were inspected and censored for burned-in text.
+    #[serde(default)]
     pub burned_in_text_censoring: bool,
     /// Frames, regions and pixels of the burned-in text check. No pixel values or text.
+    #[serde(default)]
     pub burned_in_text: CensorCounts,
 }
 
@@ -185,7 +187,8 @@ impl Anonymizer {
     /// List each source UID occurrence that the configured profile replaces.
     ///
     /// This runs the same rule decisions as [`Self::anonymize`] and discards the
-    /// output. It fails for the same input errors, except a missing UID mapping.
+    /// output. It fails for the same input errors, except a missing UID mapping and the
+    /// burned-in text check, which it does not run.
     /// The result contains source UIDs; keep it under source-data custody.
     pub fn required_uids(&self, source: &DefaultDicomObject) -> Result<Vec<RequiredUid>> {
         // Listing UIDs does not need the pixels, so the burned-in text check is skipped.
@@ -242,6 +245,8 @@ impl Anonymizer {
             &self.options.profile,
         )?;
         let source_transfer_syntax = source.meta().transfer_syntax().trim_end_matches('\0');
+        // The patient scope is checked before the pixels are decoded.
+        let patient_scope = self.patient_scope(source)?;
         let mut censored = if inspect_pixels && self.options.profile.censors_burned_in_text() {
             Some(pixel_text::censor(source, source_transfer_syntax)?)
         } else {
@@ -250,18 +255,17 @@ impl Anonymizer {
         let censored_pixels = censored.as_mut().and_then(|c| c.pixel_data.take());
         // Censored samples are written uncompressed, so no lossy step is applied.
         let transfer_syntax = if censored_pixels.is_some() {
-            pixel_text::EXPLICIT_VR_LITTLE_ENDIAN
+            uids::EXPLICIT_VR_LITTLE_ENDIAN
         } else {
             source_transfer_syntax
         };
         // The codestream and frame-layout checks run in every case, so that censoring
-        // cannot accept a malformed object that they reject.
+        // cannot accept a malformed object that they reject. They run after the pixel
+        // check, so an undecodable frame is reported as not assessed.
         let codestream = pixel::Codestream::for_transfer_syntax(source_transfer_syntax)
             .map(|kind| pixel::clean_codestreams(source, kind).map(|cleaning| (kind, cleaning)))
-            .transpose()?
-            .filter(|_| censored_pixels.is_none());
+            .transpose()?;
 
-        let patient_scope = self.patient_scope(source)?;
         let patient_pseudonym = self.options.secret.patient_id(&patient_scope);
         let (date_shift_days, time_shift_hours) =
             if self.options.profile.policy == DeidentificationPolicy::SafeHarborMetadata {
@@ -288,34 +292,67 @@ impl Anonymizer {
             uids: &uids,
         };
 
-        let replacements = match codestream {
-            Some((kind, cleaning)) => {
-                let removed = cleaning.removed;
-                if kind == pixel::Codestream::Jpeg2000 {
-                    report.removed_jpeg2000_comment_segments = removed.comments;
-                } else {
-                    report.removed_jpeg_comment_segments = removed.comments;
-                    report.removed_jpeg_application_segments = removed.applications;
-                }
-                cleaning.replacement
+        let censored_output = censored_pixels.is_some();
+        // The censored Pixel Data replaces the source element in place, so the source
+        // value is not copied first.
+        // The segments are absent from censored native output too, so they are counted.
+        let cleaned = codestream.map(|(kind, cleaning)| {
+            let removed = cleaning.removed;
+            if kind == pixel::Codestream::Jpeg2000 {
+                report.removed_jpeg2000_comment_segments = removed.comments;
+            } else {
+                report.removed_jpeg_comment_segments = removed.comments;
+                report.removed_jpeg_application_segments = removed.applications;
             }
-            None => Vec::new(),
+            cleaning.replacement
+        });
+        let replacements = match (censored_pixels, cleaned) {
+            (Some(pixel_data), _) => vec![pixel_data],
+            (None, Some(replacement)) => replacement,
+            (None, None) => Vec::new(),
         };
         let mut output = self.process_dataset(source, &context, &mut report, replacements)?;
         if let Some(censored) = &censored {
             report.burned_in_text = censored.counts;
         }
-        if let Some(pixel_data) = censored_pixels {
-            output.put(pixel_data);
+        if censored_output {
+            // The pixel value range can hold the former text level and no longer applies.
             for tag in [
                 tags::ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH,
                 tags::EXTENDED_OFFSET_TABLE,
                 tags::EXTENDED_OFFSET_TABLE_LENGTHS,
+                tags::SMALLEST_IMAGE_PIXEL_VALUE,
+                tags::LARGEST_IMAGE_PIXEL_VALUE,
+                tags::SMALLEST_PIXEL_VALUE_IN_SERIES,
+                tags::LARGEST_PIXEL_VALUE_IN_SERIES,
             ] {
-                output.remove_element(tag);
+                if output.remove_element(tag) {
+                    report.removed_attributes += 1;
+                }
             }
             // Burned In Annotation keeps its source value: the detector can miss text, so
             // censoring does not show that none remains.
+            // PS3.3 C.7.6.1.1.5: lossy samples stay marked as lossy after they are written
+            // natively. JPEG 2000 `.91` can be reversible, so a source value is kept, and
+            // only an absent one becomes 01.
+            let method = pixel_text::lossy_method(source_transfer_syntax).or_else(|| {
+                (source_transfer_syntax == "1.2.840.10008.1.2.4.91"
+                    && source.get(tags::LOSSY_IMAGE_COMPRESSION).is_none())
+                .then_some("ISO_15444_1")
+            });
+            if let Some(method) = method {
+                let previous = output
+                    .get(tags::LOSSY_IMAGE_COMPRESSION)
+                    .and_then(|element| element.to_str().ok())
+                    .map(|value| value.trim().to_owned());
+                output.put_str(tags::LOSSY_IMAGE_COMPRESSION, VR::CS, "01");
+                if previous.is_some_and(|value| value != "01") {
+                    report.replaced_attributes += 1;
+                }
+                if output.get(tags::LOSSY_IMAGE_COMPRESSION_METHOD).is_none() {
+                    output.put_str(tags::LOSSY_IMAGE_COMPRESSION_METHOD, VR::CS, method);
+                }
+            }
         }
         // A source value that profile processing kept can be stale or wrong.
         match pixel::repair_total_length(&mut output, transfer_syntax) {
@@ -1157,6 +1194,8 @@ mod tests {
             "removed_jpeg2000_comment_segments",
             "removed_jpeg_comment_segments",
             "removed_jpeg_application_segments",
+            "burned_in_text_censoring",
+            "burned_in_text",
         ] {
             fields.remove(added).unwrap();
         }

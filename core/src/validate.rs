@@ -793,12 +793,20 @@ fn format_tag(tag: Tag) -> String {
 
 fn profile_name(profile: &ProfileConfiguration) -> String {
     // The fail-on-unmapped guard does not change the output, so it does not
-    // change the profile name.
+    // change the profile name. Nor does a burned-in text setting that censors exactly
+    // when the preset does.
     let is_preset = |preset: ProfileConfiguration| {
+        let burned_in_text = if profile.censors_burned_in_text() == preset.censors_burned_in_text()
+        {
+            profile.burned_in_text
+        } else {
+            preset.burned_in_text
+        };
         *profile
             == ProfileConfiguration {
                 fail_on_unmapped: profile.fail_on_unmapped.clone(),
                 fail_on_unmapped_sequences: profile.fail_on_unmapped_sequences.clone(),
+                burned_in_text,
                 ..preset
             }
     };
@@ -960,11 +968,11 @@ pub fn validate_source_object(
         .findings
         .retain(|finding| finding.code != "source_not_compared");
     if validation_options.profile.censors_burned_in_text() {
-        // The expected output was built with the check, so a match shows that it ran.
+        // The expected output was built with the check, so a match shows that it ran. The
+        // pixels stay unassessed: the heuristic can miss text, so the code is kept.
         for finding in &mut report.findings {
             if finding.code == "pixel_data_not_assessed" {
-                finding.code = "pixel_text_check_heuristic".to_owned();
-                finding.message = "burned-in text was censored by a heuristic detector that can miss text; the Clean Pixel Data Option is not claimed".to_owned();
+                finding.message = "pixel data was checked for burned-in text by a heuristic detector that can miss text; the Clean Pixel Data Option is not claimed".to_owned();
             }
         }
     }
@@ -1074,6 +1082,15 @@ mod tests {
         let mut profile = ProfileConfiguration::dicom_extended();
         profile.fail_on_unmapped.insert("00080100".to_owned());
         assert_eq!(profile_name(&profile), PROFILE_NAME);
+    }
+
+    #[test]
+    fn a_burned_in_text_setting_that_does_not_censor_keeps_the_dicom_profile_name() {
+        let mut profile = ProfileConfiguration::dicom_extended();
+        profile.burned_in_text = crate::BurnedInText::Off;
+        assert_eq!(profile_name(&profile), PROFILE_NAME);
+        profile.burned_in_text = crate::BurnedInText::Censor;
+        assert_ne!(profile_name(&profile), PROFILE_NAME);
     }
 
     fn source() -> DefaultDicomObject {

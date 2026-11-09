@@ -143,6 +143,10 @@ fn native(sop_class: &str, frames: &[Vec<u16>]) -> DefaultDicomObject {
 }
 
 fn jpeg2000(frames: &[Vec<u16>]) -> DefaultDicomObject {
+    jpeg2000_as(frames, uids::JPEG2000_LOSSLESS)
+}
+
+fn jpeg2000_as(frames: &[Vec<u16>], transfer_syntax: &str) -> DefaultDicomObject {
     let fragments: Vec<Vec<u8>> = frames
         .iter()
         .map(|samples| {
@@ -170,7 +174,7 @@ fn jpeg2000(frames: &[Vec<u16>]) -> DefaultDicomObject {
         uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION,
         frames.len(),
         pixel_data,
-        uids::JPEG2000_LOSSLESS,
+        transfer_syntax,
     )
 }
 
@@ -218,6 +222,12 @@ fn text_in_a_mammogram_with_a_wrong_header_is_censored() {
         uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION,
         std::slice::from_ref(&source_frame),
     );
+    let mut source = source;
+    source.put(InMemElement::new(
+        tags::LARGEST_IMAGE_PIXEL_VALUE,
+        VR::US,
+        PrimitiveValue::from(TEXT),
+    ));
     let anonymizer = Anonymizer::new(options(BurnedInText::Auto)).unwrap();
     let (output, report, uid_map) = anonymizer
         .anonymize_with_generated_uid_map(&source)
@@ -228,6 +238,7 @@ fn text_in_a_mammogram_with_a_wrong_header_is_censored() {
     assert_eq!(report.burned_in_text.regions_censored, 3);
     assert!(report.burned_in_text.pixels_censored > 0);
     assert_censored(&source_frame, &samples(&output));
+    assert!(output.get(tags::LARGEST_IMAGE_PIXEL_VALUE).is_none());
     assert_eq!(
         output
             .element(tags::BURNED_IN_ANNOTATION)
@@ -498,4 +509,262 @@ fn other_policies_do_not_inspect_pixels_by_default() {
     let profile = ProfileConfiguration::dicom_extended();
     assert!(!profile.censors_burned_in_text());
     assert!(ProfileConfiguration::safe_harbor().censors_burned_in_text());
+}
+
+#[test]
+fn an_invalid_bits_stored_fails_closed() {
+    for bits_stored in [
+        PrimitiveValue::from(0_u16),
+        PrimitiveValue::from(17_u16),
+        PrimitiveValue::Empty,
+    ] {
+        let mut source = native(
+            uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION,
+            &[frame()],
+        );
+        source.put(InMemElement::new(tags::BITS_STORED, VR::US, bits_stored));
+        let error = Anonymizer::new(options(BurnedInText::Auto))
+            .unwrap()
+            .anonymize_with_generated_uid_map(&source)
+            .unwrap_err();
+        assert!(matches!(error, Error::PixelTextNotAssessed(_)), "{error}");
+    }
+}
+
+#[test]
+fn censored_8_bit_pixel_data_with_an_odd_sample_count_has_even_length() {
+    // 95 x 191 samples is odd, so the source carries one padding byte.
+    let (rows, columns) = (ROWS - 1, COLUMNS - 1);
+    let full = frame();
+    let mut bytes: Vec<u8> = (0..rows)
+        .flat_map(|row| (0..columns).map(move |column| (row, column)))
+        .map(|(row, column)| (full[row * COLUMNS + column] >> 4) as u8)
+        .collect();
+    assert_eq!(bytes.len() % 2, 1);
+    bytes.push(0);
+    let mut source = native(
+        uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION,
+        &[full],
+    );
+    for (tag, value) in [
+        (tags::ROWS, rows as u16),
+        (tags::COLUMNS, columns as u16),
+        (tags::BITS_ALLOCATED, 8),
+        (tags::BITS_STORED, 8),
+        (tags::HIGH_BIT, 7),
+    ] {
+        source.put(InMemElement::new(tag, VR::US, PrimitiveValue::from(value)));
+    }
+    source.put(InMemElement::new(
+        tags::PIXEL_DATA,
+        VR::OB,
+        PrimitiveValue::U8(bytes.into()),
+    ));
+    let (output, report, _) = Anonymizer::new(options(BurnedInText::Auto))
+        .unwrap()
+        .anonymize_with_generated_uid_map(&source)
+        .unwrap();
+    assert!(report.burned_in_text.regions_censored > 0);
+    let pixel_data = output.get(tags::PIXEL_DATA).unwrap().to_bytes().unwrap();
+    assert_eq!(pixel_data.len(), rows * columns + 1);
+    assert!(pixel_data[..rows * columns]
+        .iter()
+        .all(|&value| value != 255));
+}
+
+#[test]
+fn a_censored_jpeg2000_object_keeps_its_lossy_image_compression_value() {
+    for (transfer_syntax, expected) in [(uids::JPEG2000, "00"), (uids::JPEG2000_LOSSLESS, "00")] {
+        let mut source = jpeg2000_as(&[frame()], transfer_syntax);
+        source.put_str(tags::LOSSY_IMAGE_COMPRESSION, VR::CS, "00");
+        let (output, report, _) = Anonymizer::new(options(BurnedInText::Auto))
+            .unwrap()
+            .anonymize_with_generated_uid_map(&source)
+            .unwrap();
+        assert!(report.burned_in_text.regions_censored > 0);
+        assert_eq!(
+            output
+                .element(tags::LOSSY_IMAGE_COMPRESSION)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .trim(),
+            expected,
+            "{transfer_syntax}"
+        );
+    }
+}
+
+#[test]
+fn a_high_bit_other_than_bits_stored_minus_one_fails_closed() {
+    let mut source = native(
+        uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION,
+        &[frame()],
+    );
+    source.put(InMemElement::new(
+        tags::HIGH_BIT,
+        VR::US,
+        PrimitiveValue::from(15_u16),
+    ));
+    let error = Anonymizer::new(options(BurnedInText::Auto))
+        .unwrap()
+        .anonymize_with_generated_uid_map(&source)
+        .unwrap_err();
+    assert!(matches!(error, Error::PixelTextNotAssessed(_)), "{error}");
+}
+
+#[test]
+fn an_empty_pixel_description_attribute_fails_closed() {
+    for tag in [tags::PIXEL_REPRESENTATION, tags::SAMPLES_PER_PIXEL] {
+        let mut source = native(
+            uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION,
+            &[frame()],
+        );
+        source.put(InMemElement::new(tag, VR::US, PrimitiveValue::Empty));
+        let error = Anonymizer::new(options(BurnedInText::Auto))
+            .unwrap()
+            .anonymize_with_generated_uid_map(&source)
+            .unwrap_err();
+        assert!(matches!(error, Error::PixelTextNotAssessed(_)), "{error}");
+    }
+}
+
+#[test]
+fn eight_bit_samples_in_implicit_vr_ow_pixel_data_are_censored() {
+    let full = frame();
+    let bytes: Vec<u8> = full.iter().map(|&value| (value >> 4) as u8).collect();
+    let words: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    let pixel_data = InMemElement::new(tags::PIXEL_DATA, VR::OW, PrimitiveValue::U16(words.into()));
+    let mut source = object(
+        uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION,
+        1,
+        pixel_data,
+        uids::IMPLICIT_VR_LITTLE_ENDIAN,
+    );
+    for (tag, value) in [
+        (tags::BITS_ALLOCATED, 8_u16),
+        (tags::BITS_STORED, 8),
+        (tags::HIGH_BIT, 7),
+    ] {
+        source.put(InMemElement::new(tag, VR::US, PrimitiveValue::from(value)));
+    }
+    // Write and read the object back, as a receiver would.
+    let mut file = Vec::new();
+    source.write_all(&mut file).unwrap();
+    let source = dicom_object::from_reader(&file[128..]).unwrap();
+    let (output, report, _) = Anonymizer::new(options(BurnedInText::Auto))
+        .unwrap()
+        .anonymize_with_generated_uid_map(&source)
+        .unwrap();
+    assert_eq!(report.burned_in_text.regions_censored, 3);
+    let pixel_data = output.get(tags::PIXEL_DATA).unwrap().to_bytes().unwrap();
+    assert!(pixel_data.iter().all(|&value| value != 255));
+}
+
+#[test]
+fn monochrome2_with_an_inverse_presentation_lut_fails_closed() {
+    let mut source = native(
+        uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION,
+        &[frame()],
+    );
+    source.put_str(tags::PRESENTATION_LUT_SHAPE, VR::CS, "INVERSE");
+    let error = Anonymizer::new(options(BurnedInText::Auto))
+        .unwrap()
+        .anonymize_with_generated_uid_map(&source)
+        .unwrap_err();
+    assert!(matches!(error, Error::PixelTextNotAssessed(_)), "{error}");
+}
+
+#[test]
+fn a_censored_jpeg2000_object_without_a_lossy_value_is_marked_possibly_lossy() {
+    let source = jpeg2000_as(&[frame()], uids::JPEG2000);
+    let (output, report, _) = Anonymizer::new(options(BurnedInText::Auto))
+        .unwrap()
+        .anonymize_with_generated_uid_map(&source)
+        .unwrap();
+    assert!(report.burned_in_text.regions_censored > 0);
+    let value = |tag| {
+        output
+            .element(tag)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .trim()
+            .to_owned()
+    };
+    assert_eq!(value(tags::LOSSY_IMAGE_COMPRESSION), "01");
+    assert_eq!(value(tags::LOSSY_IMAGE_COMPRESSION_METHOD), "ISO_15444_1");
+}
+
+#[test]
+fn a_presentation_lut_sequence_fails_closed() {
+    use dicom_core::value::DataSetSequence;
+    let mut source = native(
+        uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION,
+        &[frame()],
+    );
+    source.put(InMemElement::new(
+        tags::PRESENTATION_LUT_SEQUENCE,
+        VR::SQ,
+        DataSetSequence::from(vec![InMemDicomObject::new_empty()]),
+    ));
+    let error = Anonymizer::new(options(BurnedInText::Auto))
+        .unwrap()
+        .anonymize_with_generated_uid_map(&source)
+        .unwrap_err();
+    assert!(matches!(error, Error::PixelTextNotAssessed(_)), "{error}");
+}
+
+#[test]
+fn a_censored_jpeg_ls_near_lossless_object_is_marked_lossy() {
+    let mut encoded = Vec::new();
+    jpegls::encode(&frame(), COLUMNS as u32, ROWS as u32, &mut encoded).unwrap();
+    if encoded.len() % 2 == 1 {
+        encoded.push(0);
+    }
+    let pixel_data = InMemElement::new(
+        tags::PIXEL_DATA,
+        VR::OB,
+        Value::PixelSequence(PixelFragmentSequence::new(Vec::new(), vec![encoded])),
+    );
+    let source = object(
+        uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION,
+        1,
+        pixel_data,
+        uids::JPEGLS_NEAR_LOSSLESS,
+    );
+    let (output, report, _) = Anonymizer::new(options(BurnedInText::Auto))
+        .unwrap()
+        .anonymize_with_generated_uid_map(&source)
+        .unwrap();
+    assert_eq!(report.burned_in_text.regions_censored, 3);
+    let value = |tag| {
+        output
+            .element(tag)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .trim()
+            .to_owned()
+    };
+    assert_eq!(value(tags::LOSSY_IMAGE_COMPRESSION), "01");
+    assert_eq!(value(tags::LOSSY_IMAGE_COMPRESSION_METHOD), "ISO_14495_1");
+}
+
+#[test]
+fn monochrome1_with_an_identity_presentation_lut_fails_closed() {
+    let mut source = native(
+        uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION,
+        &[frame()],
+    );
+    source.put_str(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, "MONOCHROME1");
+    source.put_str(tags::PRESENTATION_LUT_SHAPE, VR::CS, "IDENTITY");
+    let error = Anonymizer::new(options(BurnedInText::Auto))
+        .unwrap()
+        .anonymize_with_generated_uid_map(&source)
+        .unwrap_err();
+    assert!(matches!(error, Error::PixelTextNotAssessed(_)), "{error}");
 }

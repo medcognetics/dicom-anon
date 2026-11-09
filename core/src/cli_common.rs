@@ -5,9 +5,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
 
-use crate::BurnedInText;
-
-use crate::{DicomOption, ProfileConfiguration, SafePrivateElement, SecretKey};
+use crate::{BurnedInText, DicomOption, ProfileConfiguration, SafePrivateElement, SecretKey};
 
 /// `--version` text: crate version and the source commit recorded at build time.
 pub const LONG_VERSION: &str = concat!(
