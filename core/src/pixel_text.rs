@@ -82,6 +82,18 @@ pub enum BurnedInText {
     Censor,
 }
 
+/// What the anonymizer does with text that lies over tissue and cannot be censored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum TextOverTissue {
+    /// Fail closed: the anonymizer writes no output.
+    #[default]
+    Fail,
+    /// Leave the text in place and count it in `regions_left_over_tissue`. This is a
+    /// temporary relief for false positives: the output can keep identifying text.
+    Leave,
+}
+
 /// Per-object counts for the anonymization report. They hold no pixel values or text.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CensorCounts {
@@ -92,6 +104,10 @@ pub struct CensorCounts {
     /// background and text. They may be text that remains in the output.
     #[serde(default)]
     pub regions_left_in_place: u64,
+    /// Regions of text over tissue left in place because `text_over_tissue` is `leave`.
+    /// Without that setting such a region fails closed.
+    #[serde(default)]
+    pub regions_left_over_tissue: u64,
 }
 
 /// The result of censoring one object.
@@ -727,7 +743,8 @@ fn text_lines(glyphs: &[Component]) -> Result<Vec<Vec<Component>>> {
 /// censored.
 #[cfg(test)]
 fn censor_frame(samples: &mut [u16], geometry: &Geometry, frame: usize) -> Result<(u64, u64)> {
-    censor_frame_counted(samples, geometry, frame).map(|counts| (counts.0, counts.1))
+    censor_frame_counted(samples, geometry, frame, TextOverTissue::Fail)
+        .map(|counts| (counts.0, counts.1))
 }
 
 /// Merge boxes that overlap, directly or through other boxes, with a union-find over
@@ -779,12 +796,13 @@ struct Region {
 }
 
 /// Censor the text in one frame, in place. Returns the regions censored, the pixels
-/// censored and the regions left in place.
+/// censored, the short regions left in place and the regions over tissue left in place.
 fn censor_frame_counted(
     samples: &mut [u16],
     geometry: &Geometry,
     frame: usize,
-) -> Result<(u64, u64, u64)> {
+    over_tissue: TextOverTissue,
+) -> Result<(u64, u64, u64, u64)> {
     let (rows, columns) = (geometry.rows, geometry.columns);
     // Work in a view where text is bright and the background is dark.
     let max_value = geometry.max_value();
@@ -797,11 +815,11 @@ fn censor_frame_counted(
         samples.to_vec()
     };
     let (Some(&low), Some(&high)) = (view.iter().min(), view.iter().max()) else {
-        return Ok((0, 0, 0));
+        return Ok((0, 0, 0, 0));
     };
     let range = f64::from(high - low);
     if range == 0.0 {
-        return Ok((0, 0, 0));
+        return Ok((0, 0, 0, 0));
     }
     let text_level = low + (TEXT_LEVEL * range).ceil() as u16;
     // The background is the dark end of the frame's own range, which does not depend on
@@ -822,7 +840,7 @@ fn censor_frame_counted(
 
     let lines = text_lines(&glyphs)?;
     if lines.is_empty() {
-        return Ok((0, 0, 0));
+        return Ok((0, 0, 0, 0));
     }
     let (dark, dark_labels) = if has_background {
         dark_regions(&view, rows, columns, low)?
@@ -873,7 +891,7 @@ fn censor_frame_counted(
     } else {
         low
     };
-    let (mut censored, mut pixels, mut left_in_place) = (0, 0, 0);
+    let (mut censored, mut pixels, mut left_in_place, mut left_over_tissue) = (0, 0, 0, 0);
     for (index, region) in text_regions.iter().enumerate() {
         let (top, left, bottom, right) = (region.top, region.left, region.bottom, region.right);
         let region_label = index as u32 + 1;
@@ -954,7 +972,11 @@ fn censor_frame_counted(
                 .sum();
             if text_glyphs >= 3 {
                 // Text over tissue cannot be censored without censoring tissue.
-                return Err(Error::BurnedInTextOverTissue { frame });
+                if over_tissue == TextOverTissue::Fail {
+                    return Err(Error::BurnedInTextOverTissue { frame });
+                }
+                left_over_tissue += 1;
+                continue;
             }
             // One or two glyphs, such as a calcification or a marker on the skin line.
             left_in_place += 1;
@@ -969,11 +991,15 @@ fn censor_frame_counted(
         }
         censored += 1;
     }
-    Ok((censored, pixels, left_in_place))
+    Ok((censored, pixels, left_in_place, left_over_tissue))
 }
 
 /// Decode, inspect and censor every frame of an object.
-pub(crate) fn censor(object: &InMemDicomObject, transfer_syntax: &str) -> Result<Censored> {
+pub(crate) fn censor(
+    object: &InMemDicomObject,
+    transfer_syntax: &str,
+    over_tissue: TextOverTissue,
+) -> Result<Censored> {
     if object.get(tags::PIXEL_DATA).is_none()
         && object.get(tags::FLOAT_PIXEL_DATA).is_none()
         && object.get(tags::DOUBLE_FLOAT_PIXEL_DATA).is_none()
@@ -1000,11 +1026,13 @@ pub(crate) fn censor(object: &InMemDicomObject, transfer_syntax: &str) -> Result
         .chunks_mut(geometry.rows * geometry.columns)
         .enumerate()
     {
-        let (regions, pixels, left_in_place) = censor_frame_counted(frame, &geometry, index)?;
+        let (regions, pixels, left_in_place, left_over_tissue) =
+            censor_frame_counted(frame, &geometry, index, over_tissue)?;
         counts.frames_assessed += 1;
         counts.regions_censored += regions;
         counts.pixels_censored += pixels;
         counts.regions_left_in_place += left_in_place;
+        counts.regions_left_over_tissue += left_over_tissue;
     }
     if counts.regions_censored == 0 {
         return Ok(Censored {
@@ -1404,8 +1432,14 @@ mod tests {
         samples[3 * columns + 6] = 100;
         let original = samples.clone();
         assert_eq!(
-            censor_frame_counted(&mut samples, &geometry(rows, columns), 0).unwrap(),
-            (0, 0, 1)
+            censor_frame_counted(
+                &mut samples,
+                &geometry(rows, columns),
+                0,
+                TextOverTissue::Fail
+            )
+            .unwrap(),
+            (0, 0, 1, 0)
         );
         assert_eq!(samples, original);
     }
@@ -1496,8 +1530,13 @@ mod tests {
             }
         }
         let original = samples.clone();
-        let (regions, pixels, left) =
-            censor_frame_counted(&mut samples, &geometry(rows, columns), 0).unwrap();
+        let (regions, pixels, left, _) = censor_frame_counted(
+            &mut samples,
+            &geometry(rows, columns),
+            0,
+            TextOverTissue::Fail,
+        )
+        .unwrap();
         assert_eq!((regions, pixels), (0, 0));
         assert!(left > 0);
         assert_eq!(samples, original);
@@ -1570,6 +1609,25 @@ mod tests {
             censor_frame(&mut samples, &geometry(rows, columns), 0),
             Err(Error::BurnedInTextOverTissue { frame: 0 })
         ));
+        assert_eq!(samples, original);
+    }
+
+    #[test]
+    fn text_over_tissue_is_left_and_counted_when_asked() {
+        let (rows, columns) = (64, 128);
+        let mut samples = vec![1500_u16; rows * columns];
+        draw_block_text(&mut samples, columns, 20, 20, 5, 4095);
+        let original = samples.clone();
+        assert_eq!(
+            censor_frame_counted(
+                &mut samples,
+                &geometry(rows, columns),
+                0,
+                TextOverTissue::Leave
+            )
+            .unwrap(),
+            (0, 0, 0, 1)
+        );
         assert_eq!(samples, original);
     }
 

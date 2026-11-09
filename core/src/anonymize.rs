@@ -248,7 +248,11 @@ impl Anonymizer {
         // The patient scope is checked before the pixels are decoded.
         let patient_scope = self.patient_scope(source)?;
         let mut censored = if inspect_pixels && self.options.profile.censors_burned_in_text() {
-            Some(pixel_text::censor(source, source_transfer_syntax)?)
+            Some(pixel_text::censor(
+                source,
+                source_transfer_syntax,
+                self.options.profile.text_over_tissue,
+            )?)
         } else {
             None
         };

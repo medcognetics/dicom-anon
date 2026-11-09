@@ -16,7 +16,7 @@ mod validate;
 pub use anonymize::{AnonymizationReport, Anonymizer, Options};
 pub use error::{Error, Result};
 pub use io::{anonymize_file, anonymize_reader, read_dicom, write_dicom};
-pub use pixel_text::{BurnedInText, CensorCounts};
+pub use pixel_text::{BurnedInText, CensorCounts, TextOverTissue};
 pub use profile::{
     profile_rule, profile_rule_for, DeidentificationPolicy, DicomOption, ProfileAction,
     ProfileConfiguration, ProfileRule, ResolvedProfileRule, SafePrivateElement, PROFILE_NAME,

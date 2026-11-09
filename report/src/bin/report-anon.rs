@@ -675,6 +675,7 @@ fn validate_dicom_options(args: &AnonymizeArgs) -> Result<(), String> {
         require_no_burned_in_annotation,
         allow_sop_class,
         burned_in_text,
+        text_over_tissue,
     } = &args.profile;
     let option = if !matches!(policy, ProfilePreset::DicomExtended) {
         Some("--policy")
@@ -698,6 +699,8 @@ fn validate_dicom_options(args: &AnonymizeArgs) -> Result<(), String> {
         Some("--allow-sop-class")
     } else if *burned_in_text != dicom_anon::BurnedInText::Auto {
         Some("--burned-in-text")
+    } else if *text_over_tissue != dicom_anon::TextOverTissue::Fail {
+        Some("--text-over-tissue")
     } else {
         None
     };

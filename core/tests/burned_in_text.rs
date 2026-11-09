@@ -12,7 +12,7 @@ use dicom_object::{DefaultDicomObject, FileMetaTableBuilder, InMemDicomObject};
 
 use dicom_anon::{
     validate_source_object, Anonymizer, BurnedInText, Error, Options, ProfileConfiguration,
-    SecretKey,
+    SecretKey, TextOverTissue,
 };
 
 const KEY: &str = "burned-in-text-fixture-key-0123456789";
@@ -931,4 +931,33 @@ fn a_decreasing_voi_lut_fails_closed_and_an_increasing_one_is_assessed() {
             Err(error) => panic!("{error}"),
         }
     }
+}
+
+#[test]
+fn text_over_tissue_is_left_and_counted_with_leave_and_validates() {
+    let mut source_frame = frame();
+    draw(&mut source_frame, 40, 124, "DOE", TEXT);
+    let source = native(
+        uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION,
+        &[source_frame.clone()],
+    );
+    let mut leave = options(BurnedInText::Auto);
+    leave.profile.text_over_tissue = TextOverTissue::Leave;
+    let (output, report, uid_map) = Anonymizer::new(leave.clone())
+        .unwrap()
+        .anonymize_with_generated_uid_map(&source)
+        .unwrap();
+    assert_eq!(report.burned_in_text.regions_left_over_tissue, 1);
+    // The text on the background is still censored; the text over tissue stays.
+    assert_eq!(report.burned_in_text.regions_censored, 3);
+    let output_samples = samples(&output);
+    for (row, column) in [(40, 124), (41, 125)] {
+        assert_eq!(
+            output_samples[row * COLUMNS + column],
+            source_frame[row * COLUMNS + column]
+        );
+    }
+    leave.profile.uid_mappings = uid_map;
+    let validation = validate_source_object(&source, &output, leave).unwrap();
+    assert!(validation.conformant, "{:#?}", validation.findings);
 }

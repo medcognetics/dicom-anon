@@ -11,7 +11,7 @@ use dicom_dictionary_std::{tags, StandardDataDictionary};
 use dicom_object::mem::InMemDicomObject;
 use serde::{Deserialize, Serialize};
 
-use crate::pixel_text::BurnedInText;
+use crate::pixel_text::{BurnedInText, TextOverTissue};
 use crate::{Error, Result};
 
 /// Human-readable name of the default extended DICOM profile.
@@ -170,6 +170,10 @@ pub struct ProfileConfiguration {
     /// and does nothing under the other policies.
     #[serde(default)]
     pub burned_in_text: BurnedInText,
+    /// Text over tissue that the check cannot censor: `fail` (the default) writes no
+    /// output, and `leave` keeps the text and counts it. `leave` is a temporary relief.
+    #[serde(default)]
+    pub text_over_tissue: TextOverTissue,
 }
 
 impl Default for ProfileConfiguration {
@@ -193,6 +197,7 @@ impl ProfileConfiguration {
             fail_on_unmapped: BTreeSet::new(),
             fail_on_unmapped_sequences: BTreeSet::new(),
             burned_in_text: BurnedInText::Auto,
+            text_over_tissue: TextOverTissue::Fail,
         }
     }
 
