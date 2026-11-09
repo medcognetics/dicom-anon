@@ -232,12 +232,12 @@ impl Anonymizer {
             &self.options.profile,
         )?;
         let source_transfer_syntax = source.meta().transfer_syntax().trim_end_matches('\0');
-        let censored = if self.options.profile.censors_burned_in_text() {
+        let mut censored = if self.options.profile.censors_burned_in_text() {
             Some(pixel_text::censor(source, source_transfer_syntax)?)
         } else {
             None
         };
-        let censored_pixels = censored.as_ref().and_then(|c| c.pixel_data.clone());
+        let censored_pixels = censored.as_mut().and_then(|c| c.pixel_data.take());
         // Censored samples are written uncompressed, so no lossy step is applied.
         let transfer_syntax = if censored_pixels.is_some() {
             pixel_text::EXPLICIT_VR_LITTLE_ENDIAN
@@ -305,9 +305,8 @@ impl Anonymizer {
             ] {
                 output.remove_element(tag);
             }
-            // The text that the header could declare has been removed.
-            output.put_str(tags::BURNED_IN_ANNOTATION, VR::CS, "NO");
-            report.replaced_attributes += 1;
+            // Burned In Annotation keeps its source value: the detector can miss text, so
+            // censoring does not show that none remains.
         }
         // A source value that profile processing kept can be stale or wrong.
         match pixel::repair_total_length(&mut output, transfer_syntax) {

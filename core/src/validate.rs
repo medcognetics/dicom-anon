@@ -148,25 +148,16 @@ pub fn validate_object_with_options(
     validate_dataset(object, "root", &options.profile, &mut report)?;
 
     if object.get(tags::PIXEL_DATA).is_some() {
-        if options.profile.censors_burned_in_text() {
-            push_finding(
-                &mut report,
-                Severity::Warning,
-                "pixel_text_check_heuristic",
-                Some(tags::PIXEL_DATA),
-                "root",
-                "burned-in text was censored by a heuristic detector that can miss text; the Clean Pixel Data Option is not claimed",
-            );
-        } else {
-            push_finding(
-                &mut report,
-                Severity::Warning,
-                "pixel_data_not_assessed",
-                Some(tags::PIXEL_DATA),
-                "root",
-                "pixel data was not inspected for burned-in identifying information; the Clean Pixel Data Option is not claimed",
-            );
-        }
+        // A candidate alone does not show whether its pixels were checked, so the
+        // source comparison is the only place that can report the check.
+        push_finding(
+            &mut report,
+            Severity::Warning,
+            "pixel_data_not_assessed",
+            Some(tags::PIXEL_DATA),
+            "root",
+            "pixel data was not inspected for burned-in identifying information; the Clean Pixel Data Option is not claimed",
+        );
     }
     validate_pixel_gates(object, &options.profile, &mut report);
     if !options.profile.require_no_burned_in_annotation
@@ -968,6 +959,15 @@ pub fn validate_source_object(
     report
         .findings
         .retain(|finding| finding.code != "source_not_compared");
+    if validation_options.profile.censors_burned_in_text() {
+        // The expected output was built with the check, so a match shows that it ran.
+        for finding in &mut report.findings {
+            if finding.code == "pixel_data_not_assessed" {
+                finding.code = "pixel_text_check_heuristic".to_owned();
+                finding.message = "burned-in text was censored by a heuristic detector that can miss text; the Clean Pixel Data Option is not claimed".to_owned();
+            }
+        }
+    }
     compare_datasets(&expected, &normalized_candidate, "root", &mut report);
     report.findings.sort_by(|left, right| {
         (&left.path, &left.tag, &left.code).cmp(&(&right.path, &right.tag, &right.code))

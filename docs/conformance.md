@@ -171,20 +171,21 @@ Burned-in text in the pixel samples is an identifier under Safe Harbor. The anon
 3. Glyphs of similar height whose centers align and whose gaps are at most twice their height form a text line.
 4. A line of two or more glyphs is text, and so is a lone glyph at least 9 pixels high, such as a laterality marker.
 
-**Censoring.** Each text line's bounding box, with a margin of a quarter of the glyph height and at least 2 pixels, is overwritten with the frame's background value. Censoring applies to names and to valid laterality or view markers alike. Laterality and view are kept in the header (Image Laterality, View Code Sequence), so the image does not lose them.
+**Censoring.** In each text line's bounding box, with a margin of a quarter of the glyph height and at least 2 pixels, every pixel that is not tissue is overwritten with the frame's background value. A tissue pixel is never written. Censoring applies to names and to valid laterality or view markers alike. Laterality and view are kept in the header (Image Laterality, View Code Sequence), so the image does not lose them.
 
-**Tissue.** The background is the dark end of the stored range. Inside a padded box, a pixel that is neither background nor text, and is not next to a text pixel, is tissue. A box with more than 10 % tissue is never overwritten:
-- a line of three or more glyphs over tissue fails closed, with `burned_in_text_over_tissue`, and the anonymizer writes no output;
+**Tissue.** The background is the dark end of the frame's own range: the frame has one only when its darkest value is at most 5 % of its brightest. Inside a padded box, a pixel that is neither background nor text, and is not next to a text pixel, is tissue. A box with more than 10 % tissue is not censored:
+- a line of three or more glyphs over tissue fails closed with the error `burned-in text over tissue in frame N`, and the anonymizer writes no output;
 - a smaller bright structure in tissue, such as a calcification, is left alone.
 
-**Output.** When nothing is censored, Pixel Data and the transfer syntax are copied unchanged. When a region is censored, the anonymizer writes the decoded and censored samples as native Pixel Data in Explicit VR Little Endian. No lossy step is applied. It removes Encapsulated Pixel Data Value Total Length and the Extended Offset Table, and sets Burned In Annotation `(0028,0301)` to `NO`.
+**Output.** When nothing is censored, Pixel Data and the transfer syntax are copied unchanged. When a region is censored, the anonymizer writes the decoded and censored samples as native Pixel Data in Explicit VR Little Endian. No lossy step is applied. It removes Encapsulated Pixel Data Value Total Length and the Extended Offset Table. Burned In Annotation `(0028,0301)` keeps its source value, because censoring does not show that no text remains.
 
-**Fail closed.** These cases stop the run with `pixel_text_not_assessed`, and no output is written:
+**Fail closed.** These cases stop the run with the error `pixel data was not assessed for burned-in text: <reason>`, and no output is written:
 - a transfer syntax other than native little endian, JPEG 2000 lossless, JPEG-LS or JPEG `.50`, `.51`, `.57` and `.70`;
 - a frame that the pinned decoders cannot decode;
 - color or signed samples;
 - a sample size other than 8 or 16 bits;
-- multi-frame encapsulated data without one fragment per frame.
+- multi-frame encapsulated data without one fragment per frame;
+- native Pixel Data whose length does not match its geometry, or a geometry too large to address.
 
 The JPEG 2000 decoder supports a single tile and a single component, so some vendor codestreams fail closed. Measure the failure rate on an approved sample before deployment.
 
@@ -201,7 +202,7 @@ The detector is a mitigation, not proof that no identifier remains. A later rele
 
 ## Pixel and disclosure limits
 
-The tool does not claim the Clean Pixel Data Option. Under `safe-harbor-metadata` it decodes pixel samples to censor burned-in text, as the next section describes. The validator emits the warning `pixel_data_not_assessed` when Pixel Data is present and the check is off, and `pixel_text_check_heuristic` when the check ran. DICOM PS3.15 notes that applying an attribute confidentiality profile does not guarantee that the complete information object is de-identified.
+The tool does not claim the Clean Pixel Data Option. Under `safe-harbor-metadata` it decodes pixel samples to censor burned-in text, as the next section describes. The validator emits the warning `pixel_data_not_assessed` when Pixel Data is present. Source-aware validation with the check on replaces it with `pixel_text_check_heuristic`, because the expected output was built with the check. Candidate-only validation cannot tell whether the check ran. DICOM PS3.15 notes that applying an attribute confidentiality profile does not guarantee that the complete information object is de-identified.
 
 The tool controls these pixel risks:
 

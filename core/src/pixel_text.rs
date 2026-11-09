@@ -2,10 +2,10 @@
 //!
 //! The detector is a deterministic heuristic. It decodes every frame and looks for
 //! rendered text: groups of bright, character-sized, stroke-like components on the
-//! image background. Each such region, with a margin, is overwritten with the
-//! background value. A region whose surroundings are tissue, not background, is not
-//! overwritten: it fails closed, so that no breast tissue is ever censored. A frame
-//! or transfer syntax that cannot be decoded also fails closed.
+//! image background. In each such region, with a margin, every pixel that is not
+//! tissue is overwritten with the background value; tissue pixels are never written.
+//! A line of text over tissue fails closed. A frame or transfer syntax that cannot be
+//! decoded also fails closed.
 //!
 //! The detector does not read text. It censors identifiers and laterality or view
 //! markers alike. It can miss text: see `docs/conformance.md`.
@@ -149,7 +149,10 @@ fn decode_frames(
     let element = object
         .get(tags::PIXEL_DATA)
         .ok_or_else(|| not_assessed("Pixel Data is missing"))?;
-    let frame_samples = geometry.rows * geometry.columns;
+    let frame_samples = geometry
+        .rows
+        .checked_mul(geometry.columns)
+        .ok_or_else(|| not_assessed("Rows and Columns are too large"))?;
     let mask = if geometry.bits_stored >= 16 {
         u16::MAX
     } else {
@@ -160,10 +163,14 @@ fn decode_frames(
             .to_bytes()
             .map_err(|_| not_assessed("native Pixel Data cannot be read"))?;
         let width = usize::from(geometry.bits_allocated / 8);
-        let needed = frame_samples * geometry.frames * width;
-        if bytes.len() < needed {
+        let needed = frame_samples
+            .checked_mul(geometry.frames)
+            .and_then(|samples| samples.checked_mul(width))
+            .ok_or_else(|| not_assessed("the Pixel Data geometry is too large"))?;
+        // One padding byte is allowed. More data than the geometry would go uninspected.
+        if bytes.len() != needed && bytes.len() != needed + 1 {
             return Err(not_assessed(
-                "native Pixel Data is shorter than its geometry",
+                "native Pixel Data does not match its geometry",
             ));
         }
         return Ok(bytes[..needed]
@@ -212,7 +219,7 @@ fn decode_frames(
                     .map(|(samples, _, _)| samples)
                     .map_err(|_| not_assessed("a JPEG-LS frame cannot be decoded"))?
             } else if JPEG.contains(&transfer_syntax) {
-                decode_jpeg(codestream)?
+                decode_jpeg(codestream, geometry)?
             } else {
                 return Err(not_assessed("this transfer syntax is not supported"));
             };
@@ -226,7 +233,7 @@ fn decode_frames(
         .collect()
 }
 
-fn decode_jpeg(codestream: &[u8]) -> Result<Vec<u16>> {
+fn decode_jpeg(codestream: &[u8], geometry: &Geometry) -> Result<Vec<u16>> {
     let mut decoder = jpeg_decoder::Decoder::new(codestream);
     let pixels = decoder
         .decode()
@@ -234,11 +241,15 @@ fn decode_jpeg(codestream: &[u8]) -> Result<Vec<u16>> {
     let info = decoder
         .info()
         .ok_or_else(|| not_assessed("a JPEG frame has no header"))?;
+    if usize::from(info.width) != geometry.columns || usize::from(info.height) != geometry.rows {
+        return Err(not_assessed("a JPEG frame does not match Rows and Columns"));
+    }
     match info.pixel_format {
         jpeg_decoder::PixelFormat::L8 => Ok(pixels.into_iter().map(u16::from).collect()),
         jpeg_decoder::PixelFormat::L16 => Ok(pixels
             .chunks_exact(2)
-            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            // jpeg-decoder returns 16-bit samples in native byte order.
+            .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
             .collect()),
         _ => Err(not_assessed("a JPEG frame is not grayscale")),
     }
@@ -376,11 +387,11 @@ fn censor_frame(samples: &mut [u16], geometry: &Geometry, frame: usize) -> Resul
         return Ok((0, 0));
     }
     let text_level = low + (TEXT_LEVEL * range).ceil() as u16;
-    // The background is the dark end of the stored range. A frame whose darkest value is
-    // above it has no background, so every candidate there is over tissue.
-    let background_band = (BACKGROUND_LEVEL * f64::from(max_value)) as u16;
-    let background_level = if low <= background_band {
-        low + background_band
+    // The background is the dark end of the frame's own range, which does not depend on
+    // Bits Stored. A frame whose darkest value is not near black has no background, so
+    // every candidate there is over tissue.
+    let background_level = if f64::from(low) <= BACKGROUND_LEVEL * f64::from(high) {
+        low + (BACKGROUND_LEVEL * range) as u16
     } else {
         0
     };
@@ -439,11 +450,20 @@ fn censor_frame(samples: &mut [u16], geometry: &Geometry, frame: usize) -> Resul
         } else {
             low
         };
+        let mut written = 0_u64;
         for row in top..=bottom {
-            samples[row * columns + left..=row * columns + right].fill(fill);
+            for column in left..=right {
+                let value = view[row * columns + column];
+                let is_tissue =
+                    value > background_level && value < text_level && !near_text(row, column);
+                if !is_tissue {
+                    samples[row * columns + column] = fill;
+                    written += 1;
+                }
+            }
         }
         regions += 1;
-        pixels += area as u64;
+        pixels += written;
     }
     Ok((regions, pixels))
 }
@@ -458,6 +478,7 @@ pub(crate) fn censor(object: &InMemDicomObject, transfer_syntax: &str) -> Result
     }
     let geometry = geometry(object)?;
     let mut frames = decode_frames(object, transfer_syntax, &geometry)?;
+    // `frames` is consumed below to build the output without another copy.
     let mut counts = CensorCounts::default();
     for (index, frame) in frames.iter_mut().enumerate() {
         let (regions, pixels) = censor_frame(frame, &geometry, index)?;
@@ -471,18 +492,16 @@ pub(crate) fn censor(object: &InMemDicomObject, transfer_syntax: &str) -> Result
             pixel_data: None,
         });
     }
+    // Consume the frames, so the output holds no second copy of the samples.
+    let samples: Vec<u16> = frames.into_iter().flatten().collect();
     let pixel_data = if geometry.bits_allocated == 8 {
-        let bytes: Vec<u8> = frames
-            .concat()
-            .into_iter()
-            .map(|value| value as u8)
-            .collect();
+        let bytes: Vec<u8> = samples.into_iter().map(|value| value as u8).collect();
         InMemElement::new(tags::PIXEL_DATA, VR::OB, PrimitiveValue::U8(bytes.into()))
     } else {
         InMemElement::new(
             tags::PIXEL_DATA,
             VR::OW,
-            PrimitiveValue::U16(frames.concat().into()),
+            PrimitiveValue::U16(samples.into()),
         )
     };
     Ok(Censored {
@@ -545,6 +564,30 @@ mod tests {
         assert!(samples[..].iter().all(|&value| value != 4095));
         for row in 0..rows {
             for column in 80..columns {
+                assert_eq!(
+                    samples[row * columns + column],
+                    original[row * columns + column]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_line_next_to_tissue_never_overwrites_a_tissue_pixel() {
+        let (rows, columns) = (64, 128);
+        let mut samples = vec![0_u16; rows * columns];
+        // Tissue begins one pixel after the text, inside the margin.
+        for row in 0..rows {
+            for column in 48..columns {
+                samples[row * columns + column] = 1500;
+            }
+        }
+        draw_block_text(&mut samples, columns, 4, 4, 5, 4095);
+        let original = samples.clone();
+        let (regions, _) = censor_frame(&mut samples, &geometry(rows, columns), 0).unwrap();
+        assert_eq!(regions, 1);
+        for row in 0..rows {
+            for column in 50..columns {
                 assert_eq!(
                     samples[row * columns + column],
                     original[row * columns + column]

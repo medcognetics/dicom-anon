@@ -311,6 +311,71 @@ fn an_object_without_text_keeps_its_pixel_data_and_transfer_syntax() {
 }
 
 #[test]
+fn a_lossless_jpeg_object_keeps_its_untouched_samples() {
+    let source_frame = frame();
+    let mut encoded = Vec::new();
+    jpegli::encode(&source_frame, COLUMNS as u32, ROWS as u32, &mut encoded).unwrap();
+    if encoded.len() % 2 == 1 {
+        encoded.push(0);
+    }
+    let pixel_data = InMemElement::new(
+        tags::PIXEL_DATA,
+        VR::OB,
+        Value::PixelSequence(PixelFragmentSequence::new(Vec::new(), vec![encoded])),
+    );
+    let source = object(
+        uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION,
+        1,
+        pixel_data,
+        uids::JPEG_LOSSLESS_SV1,
+    );
+    let (output, report, _) = Anonymizer::new(options(BurnedInText::Auto))
+        .unwrap()
+        .anonymize_with_generated_uid_map(&source)
+        .unwrap();
+    assert_eq!(report.burned_in_text.regions_censored, 3);
+    assert_censored(&source_frame, &samples(&output));
+}
+
+#[test]
+fn a_source_yes_is_kept_after_censoring() {
+    let mut source = native(
+        uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION,
+        &[frame()],
+    );
+    source.put_str(tags::BURNED_IN_ANNOTATION, VR::CS, "YES");
+    let (output, report, _) = Anonymizer::new(options(BurnedInText::Auto))
+        .unwrap()
+        .anonymize_with_generated_uid_map(&source)
+        .unwrap();
+    assert!(report.burned_in_text.regions_censored > 0);
+    assert_eq!(
+        output
+            .element(tags::BURNED_IN_ANNOTATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .trim(),
+        "YES"
+    );
+}
+
+#[test]
+fn native_data_longer_than_its_geometry_fails_closed() {
+    let mut long = frame();
+    long.extend([0; 8]);
+    let source = native(
+        uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION,
+        &[long],
+    );
+    let error = Anonymizer::new(options(BurnedInText::Auto))
+        .unwrap()
+        .anonymize_with_generated_uid_map(&source)
+        .unwrap_err();
+    assert!(matches!(error, Error::PixelTextNotAssessed(_)), "{error}");
+}
+
+#[test]
 fn text_over_tissue_fails_closed() {
     let mut samples = frame();
     draw(&mut samples, 40, 124, "DOE", TEXT);
