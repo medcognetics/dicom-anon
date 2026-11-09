@@ -891,3 +891,44 @@ fn a_negative_rescale_slope_in_a_functional_group_fails_closed() {
         .unwrap_err();
     assert!(error.to_string().contains("Rescale Slope"), "{error}");
 }
+
+#[test]
+fn a_decreasing_voi_lut_fails_closed_and_an_increasing_one_is_assessed() {
+    use dicom_core::value::DataSetSequence;
+    for (data, fails) in [
+        (vec![4095_u16, 2048, 0], true),
+        (vec![0_u16, 2048, 4095], false),
+    ] {
+        let mut lut = InMemDicomObject::new_empty();
+        lut.put(InMemElement::new(
+            tags::LUT_DESCRIPTOR,
+            VR::US,
+            PrimitiveValue::from([3_u16, 0, 12]),
+        ));
+        lut.put(InMemElement::new(
+            tags::LUT_DATA,
+            VR::US,
+            PrimitiveValue::U16(data.into()),
+        ));
+        let mut source = native(
+            uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION,
+            &[frame()],
+        );
+        source.put(InMemElement::new(
+            tags::VOILUT_SEQUENCE,
+            VR::SQ,
+            DataSetSequence::from(vec![lut]),
+        ));
+        let result = Anonymizer::new(options(BurnedInText::Auto))
+            .unwrap()
+            .anonymize_with_generated_uid_map(&source);
+        match result {
+            Err(Error::PixelTextNotAssessed(reason)) => assert!(fails, "{reason}"),
+            Ok((_, report, _)) => {
+                assert!(!fails);
+                assert_eq!(report.burned_in_text.regions_censored, 3);
+            }
+            Err(error) => panic!("{error}"),
+        }
+    }
+}

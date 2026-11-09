@@ -156,6 +156,20 @@ fn sequence_items(object: &InMemDicomObject, tag: dicom_core::Tag) -> &[InMemDic
         .unwrap_or(&[])
 }
 
+/// Fail closed on a VOI LUT whose data decreases, which displays stored-bright text dark.
+fn check_voi_luts(object: &InMemDicomObject) -> Result<()> {
+    for lut in sequence_items(object, tags::VOILUT_SEQUENCE) {
+        let data = lut
+            .get(tags::LUT_DATA)
+            .and_then(|element| element.to_multi_int::<i64>().ok())
+            .ok_or_else(|| not_assessed("a VOI LUT has unreadable LUT Data"))?;
+        if data.windows(2).any(|pair| pair[1] < pair[0]) {
+            return Err(not_assessed("a decreasing VOI LUT is not supported"));
+        }
+    }
+    Ok(())
+}
+
 /// Fail closed on a Rescale Slope that is unreadable or not positive.
 fn check_rescale_slope(object: &InMemDicomObject) -> Result<()> {
     if let Some(element) = object.get(tags::RESCALE_SLOPE) {
@@ -205,6 +219,7 @@ fn geometry(object: &InMemDicomObject) -> Result<Geometry> {
     // objects such as DBT carry it in the Pixel Value Transformation Sequence of their
     // shared and per-frame functional groups.
     check_rescale_slope(object)?;
+    check_voi_luts(object)?;
     for groups in [
         tags::SHARED_FUNCTIONAL_GROUPS_SEQUENCE,
         tags::PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE,
@@ -212,6 +227,10 @@ fn geometry(object: &InMemDicomObject) -> Result<Geometry> {
         for group in sequence_items(object, groups) {
             for transformation in sequence_items(group, tags::PIXEL_VALUE_TRANSFORMATION_SEQUENCE) {
                 check_rescale_slope(transformation)?;
+            }
+            check_voi_luts(group)?;
+            for voi in sequence_items(group, tags::FRAME_VOILUT_SEQUENCE) {
+                check_voi_luts(voi)?;
             }
             if group.get(tags::MODALITY_LUT_SEQUENCE).is_some()
                 || group.get(tags::PRESENTATION_LUT_SEQUENCE).is_some()

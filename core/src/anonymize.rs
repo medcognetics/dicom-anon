@@ -352,9 +352,9 @@ impl Anonymizer {
                     if previous.is_some() {
                         report.replaced_attributes += 1;
                     }
-                    if output.get(tags::LOSSY_IMAGE_COMPRESSION_METHOD).is_none() {
-                        output.put_str(tags::LOSSY_IMAGE_COMPRESSION_METHOD, VR::CS, method);
-                    }
+                }
+                if output.get(tags::LOSSY_IMAGE_COMPRESSION_METHOD).is_none() {
+                    output.put_str(tags::LOSSY_IMAGE_COMPRESSION_METHOD, VR::CS, method);
                 }
             }
         }

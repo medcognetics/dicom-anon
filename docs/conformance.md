@@ -182,7 +182,7 @@ Burned-in text in the pixel samples is an identifier under Safe Harbor. The anon
 **Fail closed.** These cases stop the run with the error `pixel data was not assessed for burned-in text: <reason>`, and no output is written:
 - a transfer syntax other than native little endian, JPEG 2000 `.90` and `.91`, JPEG-LS or JPEG `.50`, `.51`, `.57` and `.70`;
 - a frame that the pinned decoders cannot decode, or a lossless JPEG frame with a restart interval or a nonzero point transform, which the pinned JPEG decoder does not decode correctly;
-- color or signed samples, MONOCHROME2 with Presentation LUT Shape `INVERSE`, MONOCHROME1 with `IDENTITY`, a Presentation or Modality LUT Sequence, or a Rescale Slope that is not positive, also in the shared or per-frame functional groups;
+- color or signed samples, MONOCHROME2 with Presentation LUT Shape `INVERSE`, MONOCHROME1 with `IDENTITY`, a Presentation or Modality LUT Sequence, a decreasing VOI LUT, or a Rescale Slope that is not positive, also in the shared or per-frame functional groups;
 - a frame with more than 2^20 bright components or dark regions, or more than 256 text-like lines (4096 open during grouping);
 - a sample size other than 8 or 16 bits;
 - multi-frame encapsulated data without one fragment per frame;
@@ -207,7 +207,7 @@ The detector is a mitigation, not proof that no identifier remains. A later rele
 
 ## Pixel and disclosure limits
 
-The tool does not claim the Clean Pixel Data Option. Under `safe-harbor-metadata` it decodes pixel samples to censor burned-in text, as the next section describes. The validator emits the warning `pixel_data_not_assessed` when Pixel Data is present. Source-aware validation with the check on keeps this code and states that a heuristic check ran, because the expected output was built with the check and the heuristic can miss text. Candidate-only validation cannot tell whether the check ran. DICOM PS3.15 notes that applying an attribute confidentiality profile does not guarantee that the complete information object is de-identified.
+The tool does not claim the Clean Pixel Data Option. Under `safe-harbor-metadata` it decodes pixel samples to censor burned-in text, as [Burned-in text](#burned-in-text) describes. The validator emits the warning `pixel_data_not_assessed` when Pixel Data is present. Source-aware validation with the check on keeps this code and states that a heuristic check ran, because the expected output was built with the check and the heuristic can miss text. Candidate-only validation cannot tell whether the check ran. DICOM PS3.15 notes that applying an attribute confidentiality profile does not guarantee that the complete information object is de-identified.
 
 The tool controls these pixel risks:
 
