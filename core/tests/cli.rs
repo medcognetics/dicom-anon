@@ -867,6 +867,20 @@ fn fail_on_unmapped_sequence_counts_misses_outside_its_scope() {
 }
 
 #[test]
+fn fail_on_unmapped_sequence_rejects_a_tag_that_is_not_a_sequence() {
+    let output = run_with_stdin(
+        Command::new(env!("CARGO_BIN_EXE_dicom-anonymize"))
+            .args(["-", "--key-env", KEY_ENV])
+            .args(["--fail-on-unmapped", "00080100"])
+            .args(["--fail-on-unmapped-sequence", "00080100"])
+            .env(KEY_ENV, KEY),
+        &source_bytes(),
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not a standard sequence"));
+}
+
+#[test]
 fn fail_on_unmapped_rejects_malformed_tags() {
     let output = Command::new(env!("CARGO_BIN_EXE_dicom-anonymize"))
         .args(["-", "--fail-on-unmapped", "(0008,0100)"])

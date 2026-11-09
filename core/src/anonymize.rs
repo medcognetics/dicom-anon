@@ -1,6 +1,7 @@
 //! Core de-identification engine.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use dicom_core::header::Header;
 use dicom_core::value::{DataSetSequence, Value};
@@ -244,7 +245,8 @@ impl Anonymizer {
             date_shift_days,
             time_shift_hours: i32::from(time_shift_hours),
             path: String::new(),
-            sequences: Vec::new(),
+            in_guard_scope: false,
+            guard_scope: &self.options.profile.fail_on_unmapped_sequences,
             uids: &uids,
         };
 
@@ -734,12 +736,8 @@ impl Anonymizer {
         report: &mut AnonymizationReport,
     ) -> Result<()> {
         let key = format!("{:04X}{:04X}", tag.0, tag.1);
-        let scope = &self.options.profile.fail_on_unmapped_sequences;
-        let in_scope = scope.is_empty()
-            || context
-                .sequences
-                .iter()
-                .any(|sequence| scope.contains(sequence));
+        let in_scope =
+            self.options.profile.fail_on_unmapped_sequences.is_empty() || context.in_guard_scope;
         if in_scope && self.options.profile.fail_on_unmapped.contains(&key) {
             return Err(Error::UnmappedDummyReplacement {
                 tag: format_tag(tag),
@@ -764,8 +762,10 @@ struct Context<'a> {
     time_shift_hours: i32,
     /// Path of the enclosing sequence item; empty at the top level.
     path: String,
-    /// Canonical tags of every enclosing sequence, outermost first.
-    sequences: Vec<String>,
+    /// True inside a `fail_on_unmapped_sequences` sequence, at any depth below it.
+    in_guard_scope: bool,
+    /// The sequences that set `in_guard_scope`.
+    guard_scope: &'a BTreeSet<String>,
     /// UID resolution state shared by every item of one object.
     uids: &'a RefCell<UidResolver>,
 }
@@ -777,12 +777,12 @@ impl<'a> Context<'a> {
             date_shift_days: self.date_shift_days,
             time_shift_hours: self.time_shift_hours,
             path: format!("{}[{index}]", self.element_path(tag)),
-            sequences: self
-                .sequences
-                .iter()
-                .cloned()
-                .chain([format!("{:04X}{:04X}", tag.0, tag.1)])
-                .collect(),
+            in_guard_scope: self.in_guard_scope
+                || (!self.guard_scope.is_empty()
+                    && self
+                        .guard_scope
+                        .contains(&format!("{:04X}{:04X}", tag.0, tag.1))),
+            guard_scope: self.guard_scope,
             uids: self.uids,
         }
     }
@@ -1587,7 +1587,8 @@ mod tests {
             date_shift_days: 1,
             time_shift_hours: 1,
             path: String::new(),
-            sequences: Vec::new(),
+            in_guard_scope: false,
+            guard_scope: &anonymizer.options.profile.fail_on_unmapped_sequences,
             uids: &uids,
         };
         let mut report = AnonymizationReport::new(

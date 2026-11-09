@@ -669,6 +669,7 @@ fn validate_dicom_options(args: &AnonymizeArgs) -> Result<(), String> {
         disable_option,
         descriptor_map,
         fail_on_unmapped,
+        fail_on_unmapped_sequence,
         safe_private_allowlist,
         uid_map,
         require_no_burned_in_annotation,
@@ -684,6 +685,8 @@ fn validate_dicom_options(args: &AnonymizeArgs) -> Result<(), String> {
         Some("--descriptor-map")
     } else if !fail_on_unmapped.is_empty() {
         Some("--fail-on-unmapped")
+    } else if !fail_on_unmapped_sequence.is_empty() {
+        Some("--fail-on-unmapped-sequence")
     } else if safe_private_allowlist.is_some() {
         Some("--safe-private-allowlist")
     } else if uid_map.is_some() {

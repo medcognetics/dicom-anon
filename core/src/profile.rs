@@ -3,10 +3,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use clap::ValueEnum;
+use dicom_core::dictionary::{DataDictionary, DataDictionaryEntry};
 use dicom_core::header::Header;
 use dicom_core::value::Value;
-use dicom_core::Tag;
-use dicom_dictionary_std::tags;
+use dicom_core::{Tag, VR};
+use dicom_dictionary_std::{tags, StandardDataDictionary};
 use dicom_object::mem::InMemDicomObject;
 use serde::{Deserialize, Serialize};
 
@@ -286,6 +287,16 @@ impl ProfileConfiguration {
                 "fail-on-unmapped sequence tags must be eight uppercase hexadecimal digits"
                     .to_owned(),
             ));
+        }
+        if let Some(tag) = self
+            .fail_on_unmapped_sequences
+            .iter()
+            .find(|tag| !is_standard_sequence(tag))
+        {
+            // A scope that names no sequence would guard nothing and fail open.
+            return Err(Error::InvalidProfileConfiguration(format!(
+                "fail-on-unmapped sequence {tag} is not a standard sequence attribute"
+            )));
         }
         if !self.fail_on_unmapped_sequences.is_empty() && self.fail_on_unmapped.is_empty() {
             // A scope without guarded tags guards nothing, which is a configuration mistake.
@@ -685,6 +696,19 @@ pub(crate) fn profile_option_action(tag: Tag, option: DicomOption) -> Option<Pro
 #[must_use]
 pub(crate) fn profile_basic_action(tag: Tag) -> Option<ProfileAction> {
     raw_profile_rule(tag).map(|rule| rule.basic_action)
+}
+
+/// Whether a canonical tag names a sequence attribute in the standard data dictionary.
+fn is_standard_sequence(tag: &str) -> bool {
+    let (Ok(group), Ok(element)) = (
+        u16::from_str_radix(&tag[..4], 16),
+        u16::from_str_radix(&tag[4..], 16),
+    ) else {
+        return false;
+    };
+    StandardDataDictionary
+        .by_tag(Tag(group, element))
+        .is_some_and(|entry| entry.vr().relaxed() == VR::SQ)
 }
 
 #[cfg(test)]
