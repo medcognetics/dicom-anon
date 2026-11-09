@@ -109,9 +109,7 @@ Each entry maps a value to itself. The map contains the SCT Code Value, the SRT 
 | Sequence | DICOM PS3.16 2026d context group | Codes |
 |---|---|---|
 | Partial View Code Sequence `(0028,1352)` | CID 4005 Partial View Section for Mammography | Seven SCT codes and their SRT values |
-| Purpose of Reference Code Sequence `(0040,A170)` in Contributing Equipment Sequence `(0018,A001)` | CID 7005 Contributing Equipment Purpose of Reference | All DCM codes |
-| Purpose of Reference Code Sequence `(0040,A170)` in Referenced Image Sequence `(0008,1140)` | CID 7201 Referenced Image Purpose of Reference | All DCM codes |
-| Purpose of Reference Code Sequence `(0040,A170)` in Source Image Sequence `(0008,2112)` | CID 7202 Source Image Purpose of Reference | All DCM codes |
+| Purpose of Reference Code Sequence `(0040,A170)`, in every context where it occurs: Source Image, Referenced Image, Related Series and Contributing Equipment Sequences, and others | Every context group whose title names a Purpose of Reference: CID 7004, 7005, 7006, 7009, 7013, 7019, 7022, 7060, 7062, 7201, 7202, 7205, 7210, 7215, 7221 and 7222. CID 7003 applies to report references and is left out. | All codes |
 | Derivation Code Sequence `(0008,9215)` | CID 7203 Image Derivation | All DCM codes |
 
 Load both maps to keep these sequences. The maps are not exhaustive: with `--fail-on-unmapped`, any other kept code sequence that holds a code outside the maps, such as a local Procedure Code, also stops the run. Each entry maps a value to itself. `tools/generate_breast_descriptor_map.py` regenerates both files and fails if the published standard is not the 2026d edition. Do not edit the files by hand.

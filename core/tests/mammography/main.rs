@@ -458,8 +458,8 @@ fn with_reference_codes(source: &DefaultDicomObject) -> DefaultDicomObject {
         tags::SOURCE_IMAGE_SEQUENCE,
         vec![source_image],
     ));
-    // Purpose of Reference codes also occur in Referenced Image Sequence (CID 7201) and
-    // Contributing Equipment Sequence (CID 7005).
+    // Purpose of Reference codes also occur in Referenced Image Sequence (CID 7201),
+    // Contributing Equipment Sequence (CID 7005) and Related Series Sequence (CID 7210).
     for (sequence, value, meaning) in [
         (
             tags::REFERENCED_IMAGE_SEQUENCE,
@@ -470,6 +470,11 @@ fn with_reference_codes(source: &DefaultDicomObject) -> DefaultDicomObject {
             tags::CONTRIBUTING_EQUIPMENT_SEQUENCE,
             "109104",
             "De-identifying Equipment",
+        ),
+        (
+            tags::RELATED_SERIES_SEQUENCE,
+            "121327",
+            "Full fidelity image",
         ),
     ] {
         let mut parent = InMemDicomObject::new_empty();
@@ -559,6 +564,11 @@ fn shipped_maps_keep_the_other_code_sequences_under_safe_harbor() {
                 tags::CONTRIBUTING_EQUIPMENT_SEQUENCE,
                 "109104",
                 "De-identifying Equipment",
+            ),
+            (
+                tags::RELATED_SERIES_SEQUENCE,
+                "121327",
+                "Full fidelity image",
             ),
         ] {
             assert_code(
