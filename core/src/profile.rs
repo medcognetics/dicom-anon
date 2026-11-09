@@ -288,22 +288,6 @@ impl ProfileConfiguration {
                     .to_owned(),
             ));
         }
-        if let Some(tag) = self
-            .fail_on_unmapped_sequences
-            .iter()
-            .find(|tag| !is_standard_sequence(tag))
-        {
-            // A scope that names no sequence would guard nothing and fail open.
-            return Err(Error::InvalidProfileConfiguration(format!(
-                "fail-on-unmapped sequence {tag} is not a standard sequence attribute"
-            )));
-        }
-        if !self.fail_on_unmapped_sequences.is_empty() && self.fail_on_unmapped.is_empty() {
-            // A scope without guarded tags guards nothing, which is a configuration mistake.
-            return Err(Error::InvalidProfileConfiguration(
-                "fail-on-unmapped sequences need at least one fail-on-unmapped tag".to_owned(),
-            ));
-        }
         if self
             .safe_private_allowlist
             .iter()
@@ -698,17 +682,38 @@ pub(crate) fn profile_basic_action(tag: Tag) -> Option<ProfileAction> {
     raw_profile_rule(tag).map(|rule| rule.basic_action)
 }
 
-/// Whether a canonical tag names a sequence attribute in the standard data dictionary.
-fn is_standard_sequence(tag: &str) -> bool {
-    let (Ok(group), Ok(element)) = (
-        u16::from_str_radix(&tag[..4], 16),
-        u16::from_str_radix(&tag[4..], 16),
-    ) else {
-        return false;
-    };
-    StandardDataDictionary
-        .by_tag(Tag(group, element))
-        .is_some_and(|entry| entry.vr().relaxed() == VR::SQ)
+impl ProfileConfiguration {
+    /// The sequences that scope the fail-on-unmapped guard, checked for anonymization.
+    ///
+    /// Validation ignores the guard, so `validate` checks only the tag format. A scope
+    /// that guards nothing would fail open, so it is refused: a scope without
+    /// guarded tags, or a tag that the standard dictionary does not list as a sequence.
+    pub(crate) fn fail_on_unmapped_scope(&self) -> Result<BTreeSet<Tag>> {
+        if !self.fail_on_unmapped_sequences.is_empty() && self.fail_on_unmapped.is_empty() {
+            return Err(Error::InvalidProfileConfiguration(
+                "fail-on-unmapped sequences need at least one fail-on-unmapped tag".to_owned(),
+            ));
+        }
+        self.fail_on_unmapped_sequences
+            .iter()
+            .map(|text| {
+                let tag = Tag(
+                    u16::from_str_radix(&text[..4], 16).unwrap_or(0),
+                    u16::from_str_radix(&text[4..], 16).unwrap_or(0),
+                );
+                let sequence = StandardDataDictionary
+                    .by_tag(tag)
+                    .is_some_and(|entry| entry.vr().relaxed() == VR::SQ);
+                if sequence {
+                    Ok(tag)
+                } else {
+                    Err(Error::InvalidProfileConfiguration(format!(
+                        "fail-on-unmapped sequence {text} is not a sequence in the standard data dictionary"
+                    )))
+                }
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

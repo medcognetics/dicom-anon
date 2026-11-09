@@ -854,6 +854,15 @@ fn fail_on_unmapped_sequence_counts_misses_outside_its_scope() {
     let report: serde_json::Value = serde_json::from_slice(&outside.stderr).unwrap();
     assert_eq!(report["unmapped_dummy_replacements"]["00080100"], 1);
 
+    // Two scopes, one of them on the path, still stop the run.
+    let mut both = safe_harbor_command(&uid_map);
+    both.arg("--descriptor-map")
+        .arg(SHIPPED_BREAST_MAP)
+        .args(["--fail-on-unmapped", "00080100"])
+        .args(["--fail-on-unmapped-sequence", "00281352"])
+        .args(["--fail-on-unmapped-sequence", "00540220"]);
+    assert_eq!(run_with_stdin(&mut both, &source).status.code(), Some(2));
+
     for scope in ["00540220", "00540222"] {
         let inside = run(scope);
         assert_eq!(inside.status.code(), Some(2), "{scope}");
@@ -877,7 +886,8 @@ fn fail_on_unmapped_sequence_rejects_a_tag_that_is_not_a_sequence() {
         &source_bytes(),
     );
     assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("not a standard sequence"));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("not a sequence in the standard data dictionary"));
 }
 
 #[test]
