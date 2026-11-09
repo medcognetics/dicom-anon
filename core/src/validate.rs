@@ -962,7 +962,7 @@ pub fn validate_source_object(
         profile: anonymization_options.profile.clone(),
     };
     let anonymizer = Anonymizer::new(anonymization_options)?;
-    let (expected, _) = anonymizer.anonymize(source)?;
+    let (expected, expected_report) = anonymizer.anonymize(source)?;
     let mut expected_bytes = Vec::new();
     crate::write_dicom(&expected, &mut expected_bytes)?;
     let expected = read_dicom(&expected_bytes[..])?;
@@ -981,6 +981,32 @@ pub fn validate_source_object(
             if finding.code == "pixel_data_not_assessed" {
                 finding.message = "pixel data was checked for burned-in text by a heuristic detector that can miss text; the Clean Pixel Data Option is not claimed".to_owned();
             }
+        }
+    }
+    // Text that the check left in place matches the expected output, so it is reported
+    // here: the output can keep identifying text.
+    let counts = expected_report.burned_in_text;
+    for (count, code, message) in [
+        (
+            counts.regions_left_over_tissue,
+            "burned_in_text_left_over_tissue",
+            "text over tissue was left in the pixels because text_over_tissue is leave",
+        ),
+        (
+            counts.regions_left_in_place,
+            "burned_in_text_left_in_place",
+            "short text-like regions that could not be censored were left in the pixels",
+        ),
+    ] {
+        if count > 0 {
+            push_finding(
+                &mut report,
+                Severity::Warning,
+                code,
+                Some(tags::PIXEL_DATA),
+                "root",
+                &format!("{message} ({count})"),
+            );
         }
     }
     compare_datasets(&expected, &normalized_candidate, "root", &mut report);

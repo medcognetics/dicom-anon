@@ -19,6 +19,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result};
 
+/// The ratio of the native Pixel Data size to the encapsulated size, as a DS value, or
+/// `None` when it cannot be computed.
+pub(crate) fn compression_ratio(object: &InMemDicomObject) -> Option<String> {
+    let Value::PixelSequence(sequence) = object.get(tags::PIXEL_DATA)?.value() else {
+        return None;
+    };
+    let compressed: usize = sequence.fragments().iter().map(Vec::len).sum();
+    let geometry = geometry(object).ok()?;
+    let native = geometry.rows
+        * geometry.columns
+        * geometry.frames
+        * usize::from(geometry.bits_allocated / 8);
+    (compressed > 0).then(|| format!("{:.2}", native as f64 / compressed as f64))
+}
+
 /// Native transfer syntaxes that the check reads.
 const NATIVE_TRANSFER_SYNTAXES: [&str; 2] = [
     uids::IMPLICIT_VR_LITTLE_ENDIAN,
@@ -26,12 +41,17 @@ const NATIVE_TRANSFER_SYNTAXES: [&str; 2] = [
 ];
 /// JPEG 2000 lossless only (`.90`) and lossless or lossy (`.91`).
 const JPEG_2000: [&str; 2] = ["1.2.840.10008.1.2.4.90", "1.2.840.10008.1.2.4.91"];
-/// The Lossy Image Compression Method of an accepted lossy transfer syntax: JPEG
-/// baseline and extended (ISO 10918-1), and JPEG-LS near-lossless (ISO 14495-1).
-pub(crate) fn lossy_method(transfer_syntax: &str) -> Option<&'static str> {
+/// The Lossy Image Compression Method to record when a censored object from this source
+/// transfer syntax is written natively, or `None` to keep the source value. JPEG
+/// baseline and extended (ISO 10918-1) and JPEG-LS near-lossless (ISO 14495-1) are
+/// lossy. A reversible JPEG 2000 `.91` codestream (ISO 15444-1) can still be lossy,
+/// because its coding passes can be truncated, so it is marked only when the source has
+/// no value; `source_has_value` is false for an absent or empty value.
+pub(crate) fn lossy_method(transfer_syntax: &str, source_has_value: bool) -> Option<&'static str> {
     match transfer_syntax {
         "1.2.840.10008.1.2.4.50" | "1.2.840.10008.1.2.4.51" => Some("ISO_10918_1"),
         "1.2.840.10008.1.2.4.81" => Some("ISO_14495_1"),
+        "1.2.840.10008.1.2.4.91" if !source_has_value => Some("ISO_15444_1"),
         _ => None,
     }
 }
@@ -172,15 +192,22 @@ fn sequence_items(object: &InMemDicomObject, tag: dicom_core::Tag) -> &[InMemDic
         .unwrap_or(&[])
 }
 
-/// Fail closed on a VOI LUT whose data decreases, which displays stored-bright text dark.
+/// Fail closed on a VOI or Pixel Intensity Relationship LUT whose data decreases, which
+/// displays stored-bright text dark.
 fn check_voi_luts(object: &InMemDicomObject) -> Result<()> {
-    for lut in sequence_items(object, tags::VOILUT_SEQUENCE) {
+    for lut in sequence_items(object, tags::VOILUT_SEQUENCE)
+        .iter()
+        .chain(sequence_items(
+            object,
+            tags::PIXEL_INTENSITY_RELATIONSHIP_LUT_SEQUENCE,
+        ))
+    {
         let data = lut
             .get(tags::LUT_DATA)
             .and_then(|element| element.to_multi_int::<i64>().ok())
-            .ok_or_else(|| not_assessed("a VOI LUT has unreadable LUT Data"))?;
+            .ok_or_else(|| not_assessed("a LUT has unreadable LUT Data"))?;
         if data.windows(2).any(|pair| pair[1] < pair[0]) {
-            return Err(not_assessed("a decreasing VOI LUT is not supported"));
+            return Err(not_assessed("a decreasing LUT is not supported"));
         }
     }
     Ok(())
@@ -248,8 +275,13 @@ fn geometry(object: &InMemDicomObject) -> Result<Geometry> {
             for voi in sequence_items(group, tags::FRAME_VOILUT_SEQUENCE) {
                 check_voi_luts(voi)?;
             }
-            if group.get(tags::MODALITY_LUT_SEQUENCE).is_some()
-                || group.get(tags::PRESENTATION_LUT_SEQUENCE).is_some()
+            if [
+                tags::MODALITY_LUT_SEQUENCE,
+                tags::PRESENTATION_LUT_SEQUENCE,
+                tags::VARIABLE_MODALITY_LUT_SEQUENCE,
+            ]
+            .iter()
+            .any(|&tag| group.get(tag).is_some())
             {
                 return Err(not_assessed(
                     "a functional group LUT Sequence is not supported",
@@ -262,8 +294,16 @@ fn geometry(object: &InMemDicomObject) -> Result<Geometry> {
     if object.get(tags::PRESENTATION_LUT_SEQUENCE).is_some() {
         return Err(not_assessed("a Presentation LUT Sequence is not supported"));
     }
-    if object.get(tags::MODALITY_LUT_SEQUENCE).is_some() {
-        return Err(not_assessed("a Modality LUT Sequence is not supported"));
+    for (tag, name) in [
+        (tags::MODALITY_LUT_SEQUENCE, "a Modality LUT Sequence"),
+        (
+            tags::VARIABLE_MODALITY_LUT_SEQUENCE,
+            "a Variable Modality LUT Sequence",
+        ),
+    ] {
+        if object.get(tag).is_some() {
+            return Err(not_assessed(&format!("{name} is not supported")));
+        }
     }
     if number_or(object, tags::PIXEL_REPRESENTATION, 0)? != 0 {
         return Err(not_assessed("signed pixel samples are not supported"));
@@ -460,6 +500,14 @@ fn unsupported_lossless_jpeg(codestream: &[u8]) -> Option<&'static str> {
                 // The last byte of a scan header holds Ah and Al; in a lossless scan, Al is
                 // the point transform.
                 let transform = segment.last().is_some_and(|&byte| byte & 0x0F != 0);
+                // Ns, then Ns pairs of selectors, then Ss: in a lossless scan, the predictor.
+                let components = usize::from(segment.first().copied().unwrap_or(0));
+                let predictor = segment.get(1 + 2 * components).copied().unwrap_or(0);
+                if lossless && (components != 1 || !(1..=7).contains(&predictor)) {
+                    return Some(
+                        "lossless JPEG with more than one component or another predictor is not supported",
+                    );
+                }
                 if lossless && restarts {
                     return Some("lossless JPEG with a restart interval is not supported");
                 }
@@ -826,11 +874,6 @@ fn censor_frame_counted(
     // Bits Stored. A frame whose darkest value is not near black has no background, so
     // every candidate there is over tissue.
     let has_background = f64::from(low) <= BACKGROUND_LEVEL * f64::from(high);
-    // Only pixels of the frame's darkest value are background, because any brighter pixel
-    // may be faint tissue. A dark region that reaches the frame border lies outside the
-    // imaged anatomy. Any other dark region, such as a glyph's hole or a dark patch in
-    // tissue, counts only when it lies strictly inside the box: then every pixel next to
-    // it is in the box and checked, so it is closed in by text alone.
     let (found, labels) = components(&view, rows, columns, text_level)?;
     let glyphs: Vec<Component> = found
         .iter()
@@ -870,7 +913,7 @@ fn censor_frame_counted(
         })
         .collect();
     // A merged box can reach a box that overlapped neither part, so merge until stable.
-    let mut text_regions = merge_overlapping(boxes);
+    let mut text_regions = boxes;
     loop {
         let count = text_regions.len();
         text_regions = merge_overlapping(text_regions);
@@ -1570,7 +1613,8 @@ mod tests {
     #[test]
     fn the_pre_scan_follows_the_last_restart_interval_and_every_scan() {
         let sof3 = [0xFF, 0xC3, 0x00, 0x02];
-        let sos = |al: u8| [0xFF, 0xDA, 0x00, 0x03, al];
+        // Ns = 1, one selector pair, predictor 1, Se, then Ah and Al.
+        let sos = |al: u8| [0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x01, 0x00, al];
         let dri = |interval: u8| [0xFF, 0xDD, 0x00, 0x04, 0x00, interval];
         let stream = |parts: &[&[u8]]| {
             let mut codestream = vec![0xFF, 0xD8];

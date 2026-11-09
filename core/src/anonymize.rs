@@ -341,14 +341,12 @@ impl Anonymizer {
             // Burned In Annotation keeps its source value: the detector can miss text, so
             // censoring does not show that none remains.
             // PS3.3 C.7.6.1.1.5: lossy samples stay marked as lossy after they are written
-            // natively. A reversible JPEG 2000 `.91` codestream can still be lossy, because
-            // its coding passes can be truncated, so a `.91` source without a value is
-            // marked as possibly lossy. A source value is kept.
-            let method = pixel_text::lossy_method(source_transfer_syntax).or_else(|| {
-                (source_transfer_syntax == "1.2.840.10008.1.2.4.91"
-                    && source.get(tags::LOSSY_IMAGE_COMPRESSION).is_none())
-                .then_some("ISO_15444_1")
-            });
+            // natively. A present but empty source value counts as absent.
+            let source_has_value = source
+                .get(tags::LOSSY_IMAGE_COMPRESSION)
+                .and_then(|element| element.to_str().ok())
+                .is_some_and(|value| !value.trim().is_empty());
+            let method = pixel_text::lossy_method(source_transfer_syntax, source_has_value);
             if let Some(method) = method {
                 // A value that already records lossy compression, possibly with earlier
                 // generations in its values, is kept with its Method.
@@ -364,6 +362,13 @@ impl Anonymizer {
                 }
                 if output.get(tags::LOSSY_IMAGE_COMPRESSION_METHOD).is_none() {
                     output.put_str(tags::LOSSY_IMAGE_COMPRESSION_METHOD, VR::CS, method);
+                }
+                // The ratio is required with 01 in the MG and DX image modules. It is the
+                // native size over the source's encapsulated size.
+                if output.get(tags::LOSSY_IMAGE_COMPRESSION_RATIO).is_none() {
+                    if let Some(ratio) = pixel_text::compression_ratio(source) {
+                        output.put_str(tags::LOSSY_IMAGE_COMPRESSION_RATIO, VR::DS, ratio);
+                    }
                 }
             }
         }

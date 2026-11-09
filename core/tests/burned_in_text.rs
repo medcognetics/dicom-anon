@@ -769,6 +769,8 @@ fn a_censored_jpeg_ls_near_lossless_object_is_marked_lossy() {
     };
     assert_eq!(value(tags::LOSSY_IMAGE_COMPRESSION), "01");
     assert_eq!(value(tags::LOSSY_IMAGE_COMPRESSION_METHOD), "ISO_14495_1");
+    let ratio: f64 = value(tags::LOSSY_IMAGE_COMPRESSION_RATIO).parse().unwrap();
+    assert!(ratio > 1.0, "{ratio}");
 }
 
 #[test]
@@ -963,4 +965,45 @@ fn text_over_tissue_is_left_and_counted_with_leave_and_validates() {
     leave.profile.uid_mappings = uid_map;
     let validation = validate_source_object(&source, &output, leave).unwrap();
     assert!(validation.conformant, "{:#?}", validation.findings);
+    assert!(validation
+        .findings
+        .iter()
+        .any(|finding| finding.code == "burned_in_text_left_over_tissue"));
+}
+
+#[test]
+fn a_lossless_jpeg_with_another_predictor_fails_closed() {
+    let mut encoded = Vec::new();
+    jpegli::encode(&frame(), COLUMNS as u32, ROWS as u32, &mut encoded).unwrap();
+    let sos = encoded
+        .windows(2)
+        .position(|pair| pair == [0xFF, 0xDA])
+        .unwrap();
+    // Ss, the predictor, follows Ns and one selector pair.
+    encoded[sos + 4 + 1 + 2] = 0;
+    assert_fails_with(&lossless_jpeg(encoded), "another predictor");
+}
+
+#[test]
+fn a_decreasing_pixel_intensity_relationship_lut_fails_closed() {
+    use dicom_core::value::DataSetSequence;
+    let mut lut = InMemDicomObject::new_empty();
+    lut.put(InMemElement::new(
+        tags::LUT_DATA,
+        VR::US,
+        PrimitiveValue::U16(vec![4095_u16, 0].into()),
+    ));
+    let mut group = InMemDicomObject::new_empty();
+    group.put(InMemElement::new(
+        tags::PIXEL_INTENSITY_RELATIONSHIP_LUT_SEQUENCE,
+        VR::SQ,
+        DataSetSequence::from(vec![lut]),
+    ));
+    let mut source = native(uids::BREAST_TOMOSYNTHESIS_IMAGE_STORAGE, &[frame()]);
+    source.put(InMemElement::new(
+        tags::SHARED_FUNCTIONAL_GROUPS_SEQUENCE,
+        VR::SQ,
+        DataSetSequence::from(vec![group]),
+    ));
+    assert_fails_with(&source, "decreasing LUT");
 }
