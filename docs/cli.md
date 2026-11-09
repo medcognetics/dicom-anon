@@ -57,6 +57,7 @@ Anonymization and validation share these profile arguments:
 | `--disable-option OPTION` | Disable an option enabled by the selected preset; repeat for multiple options. |
 | `--descriptor-map PATH` | Load a descriptor map. Repeat to merge maps; two maps that give different outputs for the same tag and source value cause an error. |
 | `--fail-on-unmapped TAG` | Fail when a cleaned attribute with this tag gets a dummy value because no descriptor-map entry matched. Dummy values that the profile requires do not fail; see [Conformance and scope](conformance.md#detection-and-fail-closed-control). `dicom-validate` rejects this option with exit status 2. `TAG` is eight hexadecimal digits, for example `00080100`. Repeat for multiple tags. |
+| `--fail-on-unmapped-sequence TAG` | Apply `--fail-on-unmapped` only inside this sequence, at any depth below it. Repeat as needed. A miss elsewhere is counted in `unmapped_dummy_replacements` and does not fail. Requires at least one `--fail-on-unmapped`. `dicom-validate` rejects it. |
 | `--safe-private-allowlist PATH` | Load a JSON array of `{ "creator": STRING, "element_offset": INTEGER }`. |
 | `--uid-map PATH` | Load a JSON object from original UID to replacement UID. Required for Safe Harbor anonymization unless `--generate-uid-map` assigns the missing entries. |
 | `--require-no-burned-in-annotation` | Fail unless Burned In Annotation `(0028,0301)` is exactly `NO`. A `YES`, empty, or absent value fails. |

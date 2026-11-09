@@ -244,6 +244,7 @@ impl Anonymizer {
             date_shift_days,
             time_shift_hours: i32::from(time_shift_hours),
             path: String::new(),
+            sequences: Vec::new(),
             uids: &uids,
         };
 
@@ -733,7 +734,13 @@ impl Anonymizer {
         report: &mut AnonymizationReport,
     ) -> Result<()> {
         let key = format!("{:04X}{:04X}", tag.0, tag.1);
-        if self.options.profile.fail_on_unmapped.contains(&key) {
+        let scope = &self.options.profile.fail_on_unmapped_sequences;
+        let in_scope = scope.is_empty()
+            || context
+                .sequences
+                .iter()
+                .any(|sequence| scope.contains(sequence));
+        if in_scope && self.options.profile.fail_on_unmapped.contains(&key) {
             return Err(Error::UnmappedDummyReplacement {
                 tag: format_tag(tag),
                 path: context.element_path(tag),
@@ -757,6 +764,8 @@ struct Context<'a> {
     time_shift_hours: i32,
     /// Path of the enclosing sequence item; empty at the top level.
     path: String,
+    /// Canonical tags of every enclosing sequence, outermost first.
+    sequences: Vec<String>,
     /// UID resolution state shared by every item of one object.
     uids: &'a RefCell<UidResolver>,
 }
@@ -768,6 +777,12 @@ impl<'a> Context<'a> {
             date_shift_days: self.date_shift_days,
             time_shift_hours: self.time_shift_hours,
             path: format!("{}[{index}]", self.element_path(tag)),
+            sequences: self
+                .sequences
+                .iter()
+                .cloned()
+                .chain([format!("{:04X}{:04X}", tag.0, tag.1)])
+                .collect(),
             uids: self.uids,
         }
     }
@@ -1263,6 +1278,16 @@ mod tests {
     }
 
     #[test]
+    fn a_scope_without_guarded_tags_is_refused() {
+        let mut options = Options::new(SecretKey::new(KEY).unwrap());
+        options
+            .profile
+            .fail_on_unmapped_sequences
+            .insert("00540220".to_owned());
+        assert!(Anonymizer::new(options).is_err());
+    }
+
+    #[test]
     fn modifies_times_without_disrupting_paired_timestamp_intervals() {
         let mut first = test_object("PATIENT-1", "20200101", "1.2.3.1");
         first.put_str(tags::STUDY_TIME, VR::TM, "230000");
@@ -1562,6 +1587,7 @@ mod tests {
             date_shift_days: 1,
             time_shift_hours: 1,
             path: String::new(),
+            sequences: Vec::new(),
             uids: &uids,
         };
         let mut report = AnonymizationReport::new(

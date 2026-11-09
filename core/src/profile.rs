@@ -156,6 +156,14 @@ pub struct ProfileConfiguration {
     /// replaces as a whole. Validation ignores this field.
     #[serde(default)]
     pub fail_on_unmapped: BTreeSet<String>,
+    /// Canonical hexadecimal tags of the sequences that the guard applies in.
+    ///
+    /// Empty: `fail_on_unmapped` applies at every nesting level. Otherwise a
+    /// guarded tag fails only inside one of these sequences, at any depth below
+    /// it. A miss elsewhere is counted in `unmapped_dummy_replacements` and does
+    /// not fail. Validation ignores this field.
+    #[serde(default)]
+    pub fail_on_unmapped_sequences: BTreeSet<String>,
 }
 
 impl Default for ProfileConfiguration {
@@ -177,6 +185,7 @@ impl ProfileConfiguration {
             require_no_burned_in_annotation: false,
             sop_class_allowlist: BTreeSet::new(),
             fail_on_unmapped: BTreeSet::new(),
+            fail_on_unmapped_sequences: BTreeSet::new(),
         }
     }
 
@@ -266,6 +275,22 @@ impl ProfileConfiguration {
         if !self.fail_on_unmapped.iter().all(|tag| canonical_tag(tag)) {
             return Err(Error::InvalidProfileConfiguration(
                 "fail-on-unmapped tags must be eight uppercase hexadecimal digits".to_owned(),
+            ));
+        }
+        if !self
+            .fail_on_unmapped_sequences
+            .iter()
+            .all(|tag| canonical_tag(tag))
+        {
+            return Err(Error::InvalidProfileConfiguration(
+                "fail-on-unmapped sequence tags must be eight uppercase hexadecimal digits"
+                    .to_owned(),
+            ));
+        }
+        if !self.fail_on_unmapped_sequences.is_empty() && self.fail_on_unmapped.is_empty() {
+            // A scope without guarded tags guards nothing, which is a configuration mistake.
+            return Err(Error::InvalidProfileConfiguration(
+                "fail-on-unmapped sequences need at least one fail-on-unmapped tag".to_owned(),
             ));
         }
         if self
