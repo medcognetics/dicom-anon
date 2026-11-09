@@ -802,11 +802,18 @@ fn profile_name(profile: &ProfileConfiguration) -> String {
         } else {
             preset.burned_in_text
         };
+        // `text_over_tissue` has no effect when nothing is censored.
+        let text_over_tissue = if profile.censors_burned_in_text() {
+            preset.text_over_tissue
+        } else {
+            profile.text_over_tissue
+        };
         *profile
             == ProfileConfiguration {
                 fail_on_unmapped: profile.fail_on_unmapped.clone(),
                 fail_on_unmapped_sequences: profile.fail_on_unmapped_sequences.clone(),
                 burned_in_text,
+                text_over_tissue,
                 ..preset
             }
     };
@@ -1088,6 +1095,8 @@ mod tests {
     fn a_burned_in_text_setting_that_does_not_censor_keeps_the_dicom_profile_name() {
         let mut profile = ProfileConfiguration::dicom_extended();
         profile.burned_in_text = crate::BurnedInText::Off;
+        assert_eq!(profile_name(&profile), PROFILE_NAME);
+        profile.text_over_tissue = crate::TextOverTissue::Leave;
         assert_eq!(profile_name(&profile), PROFILE_NAME);
         profile.burned_in_text = crate::BurnedInText::Censor;
         assert_ne!(profile_name(&profile), PROFILE_NAME);

@@ -337,14 +337,9 @@ impl Anonymizer {
             // Burned In Annotation keeps its source value: the detector can miss text, so
             // censoring does not show that none remains.
             // PS3.3 C.7.6.1.1.5: lossy samples stay marked as lossy after they are written
-            // natively. JPEG 2000 `.91` can be reversible, so a source value is kept, and
-            // only an absent one becomes 01.
-            let method = pixel_text::lossy_method(source_transfer_syntax).or_else(|| {
-                (source_transfer_syntax == "1.2.840.10008.1.2.4.91"
-                    && source.get(tags::LOSSY_IMAGE_COMPRESSION).is_none())
-                .then_some("ISO_15444_1")
-            });
-            if let Some(method) = method {
+            // natively. The JPEG 2000 decoder reads only reversible codestreams, so a
+            // censored `.91` source was lossless and keeps its source value.
+            if let Some(method) = pixel_text::lossy_method(source_transfer_syntax) {
                 // A value that already records lossy compression, possibly with earlier
                 // generations in its values, is kept with its Method.
                 let previous = output

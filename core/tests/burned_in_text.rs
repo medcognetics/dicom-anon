@@ -679,24 +679,16 @@ fn monochrome2_with_an_inverse_presentation_lut_fails_closed() {
 }
 
 #[test]
-fn a_censored_jpeg2000_object_without_a_lossy_value_is_marked_possibly_lossy() {
+fn a_censored_jpeg2000_object_without_a_lossy_value_is_not_marked_lossy() {
+    // The decoder reads only reversible JPEG 2000, so a censored `.91` was lossless.
     let source = jpeg2000_as(&[frame()], uids::JPEG2000);
     let (output, report, _) = Anonymizer::new(options(BurnedInText::Auto))
         .unwrap()
         .anonymize_with_generated_uid_map(&source)
         .unwrap();
     assert!(report.burned_in_text.regions_censored > 0);
-    let value = |tag| {
-        output
-            .element(tag)
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .trim()
-            .to_owned()
-    };
-    assert_eq!(value(tags::LOSSY_IMAGE_COMPRESSION), "01");
-    assert_eq!(value(tags::LOSSY_IMAGE_COMPRESSION_METHOD), "ISO_15444_1");
+    assert!(output.get(tags::LOSSY_IMAGE_COMPRESSION).is_none());
+    assert!(output.get(tags::LOSSY_IMAGE_COMPRESSION_METHOD).is_none());
 }
 
 #[test]
