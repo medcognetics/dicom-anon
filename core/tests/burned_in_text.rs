@@ -679,16 +679,26 @@ fn monochrome2_with_an_inverse_presentation_lut_fails_closed() {
 }
 
 #[test]
-fn a_censored_jpeg2000_object_without_a_lossy_value_is_not_marked_lossy() {
-    // The decoder reads only reversible JPEG 2000, so a censored `.91` was lossless.
+fn a_censored_jpeg2000_object_without_a_lossy_value_is_marked_possibly_lossy() {
+    // A reversible `.91` codestream can be truncated, so its history is unknown.
     let source = jpeg2000_as(&[frame()], uids::JPEG2000);
     let (output, report, _) = Anonymizer::new(options(BurnedInText::Auto))
         .unwrap()
         .anonymize_with_generated_uid_map(&source)
         .unwrap();
     assert!(report.burned_in_text.regions_censored > 0);
-    assert!(output.get(tags::LOSSY_IMAGE_COMPRESSION).is_none());
-    assert!(output.get(tags::LOSSY_IMAGE_COMPRESSION_METHOD).is_none());
+    assert_eq!(report.text_over_tissue, TextOverTissue::Fail);
+    let value = |tag| {
+        output
+            .element(tag)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .trim()
+            .to_owned()
+    };
+    assert_eq!(value(tags::LOSSY_IMAGE_COMPRESSION), "01");
+    assert_eq!(value(tags::LOSSY_IMAGE_COMPRESSION_METHOD), "ISO_15444_1");
 }
 
 #[test]
@@ -940,6 +950,7 @@ fn text_over_tissue_is_left_and_counted_with_leave_and_validates() {
         .anonymize_with_generated_uid_map(&source)
         .unwrap();
     assert_eq!(report.burned_in_text.regions_left_over_tissue, 1);
+    assert_eq!(report.text_over_tissue, TextOverTissue::Leave);
     // The text on the background is still censored; the text over tissue stays.
     assert_eq!(report.burned_in_text.regions_censored, 3);
     let output_samples = samples(&output);

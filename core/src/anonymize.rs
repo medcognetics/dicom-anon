@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 
 use crate::pixel;
-use crate::pixel_text::{self, CensorCounts};
+use crate::pixel_text::{self, CensorCounts, TextOverTissue};
 use crate::profile::{
     profile_basic_action, profile_option_action, profile_rule_for, safe_private_tags,
     DeidentificationPolicy, DicomOption, ProfileAction, ProfileConfiguration, PROFILE_VERSION,
@@ -108,6 +108,9 @@ pub struct AnonymizationReport {
     /// Whether pixel samples were inspected and censored for burned-in text.
     #[serde(default)]
     pub burned_in_text_censoring: bool,
+    /// What the check did with text over tissue: `fail`, or `leave` as a temporary relief.
+    #[serde(default)]
+    pub text_over_tissue: TextOverTissue,
     /// Frames, regions and pixels of the burned-in text check. No pixel values or text.
     #[serde(default)]
     pub burned_in_text: CensorCounts,
@@ -140,6 +143,7 @@ impl AnonymizationReport {
             dummy_replacements: BTreeMap::new(),
             unmapped_dummy_replacements: BTreeMap::new(),
             burned_in_text_censoring: profile.censors_burned_in_text(),
+            text_over_tissue: profile.text_over_tissue,
             burned_in_text: CensorCounts::default(),
         }
     }
@@ -337,9 +341,15 @@ impl Anonymizer {
             // Burned In Annotation keeps its source value: the detector can miss text, so
             // censoring does not show that none remains.
             // PS3.3 C.7.6.1.1.5: lossy samples stay marked as lossy after they are written
-            // natively. The JPEG 2000 decoder reads only reversible codestreams, so a
-            // censored `.91` source was lossless and keeps its source value.
-            if let Some(method) = pixel_text::lossy_method(source_transfer_syntax) {
+            // natively. A reversible JPEG 2000 `.91` codestream can still be lossy, because
+            // its coding passes can be truncated, so a `.91` source without a value is
+            // marked as possibly lossy. A source value is kept.
+            let method = pixel_text::lossy_method(source_transfer_syntax).or_else(|| {
+                (source_transfer_syntax == "1.2.840.10008.1.2.4.91"
+                    && source.get(tags::LOSSY_IMAGE_COMPRESSION).is_none())
+                .then_some("ISO_15444_1")
+            });
+            if let Some(method) = method {
                 // A value that already records lossy compression, possibly with earlier
                 // generations in its values, is kept with its Method.
                 let previous = output
@@ -1199,6 +1209,7 @@ mod tests {
             "removed_jpeg_application_segments",
             "burned_in_text_censoring",
             "burned_in_text",
+            "text_over_tissue",
         ] {
             fields.remove(added).unwrap();
         }
