@@ -198,7 +198,7 @@ The pinned decoders accept less than the transfer syntaxes allow, and every othe
 
 **Limits: this check can miss text.**
 - Text that is not bright on the background, or not in the top 20 % of the range: low-contrast, dark or semi-transparent text.
-- Text in a line of one or two glyphs whose box holds anything other than background and text, such as tissue, a noisy background, anti-aliased edges or JPEG ringing. It is left in place without an error, for example initials or an age.
+- Text in a line of one or two glyphs whose box holds anything other than background and text, such as tissue, a noisy background, anti-aliased edges or JPEG ringing. It is left in place without an error, for example initials or an age, and counted in `regions_left_in_place`. This is a residual risk: the output can keep a short identifier. Measure the count on an approved sample, and decide whether to accept or quarantine such outputs.
 - Text whose glyphs are smaller than 5 pixels, larger than the size limits, rotated, curved, outlined, connected into one component, or spaced more than twice their height apart.
 - Text in an overlay (60xx,3000), a presentation state, or another object. These are outside the pixel samples.
 - Identifying graphics that are not text, such as a face, a barcode or a logo.
