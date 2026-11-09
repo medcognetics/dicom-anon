@@ -2,9 +2,9 @@
 //!
 //! The detector is a deterministic heuristic. It decodes every frame and looks for
 //! rendered text: groups of bright, character-sized, stroke-like components on the
-//! image background. In each such region, with a margin, every pixel that is not
-//! tissue is overwritten with the background value; tissue pixels are never written.
-//! A line of text over tissue fails closed. A frame or transfer syntax that cannot be
+//! image background. Each such region, with a margin, is overwritten with the
+//! background value only when it holds no tissue, so tissue is never written. A line
+//! of text with tissue in its region fails closed. A frame or transfer syntax that cannot be
 //! decoded also fails closed.
 //!
 //! The detector does not read text. It censors identifiers and laterality or view
@@ -39,8 +39,9 @@ const MIN_LONE_GLYPH_HEIGHT: usize = 9;
 const TEXT_LEVEL: f64 = 0.8;
 /// Share of the dynamic range above the background that still counts as background.
 const BACKGROUND_LEVEL: f64 = 0.05;
-/// Largest share of tissue pixels in a padded region that may be censored.
-const MAX_TISSUE_SHARE: f64 = 0.1;
+/// Most samples that one object may decode to, so that a header cannot demand an
+/// unbounded allocation: 2^30 samples, or 2 GiB at 16 bits.
+const MAX_DECODED_SAMPLES: usize = 1 << 30;
 
 /// What the router asks the anonymizer to do with burned-in text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
@@ -153,11 +154,14 @@ fn decode_frames(
         .rows
         .checked_mul(geometry.columns)
         .ok_or_else(|| not_assessed("Rows and Columns are too large"))?;
-    let mask = if geometry.bits_stored >= 16 {
-        u16::MAX
-    } else {
-        (1_u16 << geometry.bits_stored) - 1
-    };
+    if frame_samples
+        .checked_mul(geometry.frames)
+        .is_none_or(|total| total > MAX_DECODED_SAMPLES)
+    {
+        return Err(not_assessed(
+            "the Pixel Data geometry is too large to decode",
+        ));
+    }
     if NATIVE_TRANSFER_SYNTAXES.contains(&transfer_syntax) {
         let bytes = element
             .to_bytes()
@@ -177,11 +181,11 @@ fn decode_frames(
             .chunks(frame_samples * width)
             .map(|frame| {
                 if width == 1 {
-                    frame.iter().map(|&value| u16::from(value) & mask).collect()
+                    frame.iter().map(|&value| u16::from(value)).collect()
                 } else {
                     frame
                         .chunks_exact(2)
-                        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]) & mask)
+                        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
                         .collect()
                 }
             })
@@ -228,15 +232,16 @@ fn decode_frames(
                     "a decoded frame does not match Rows and Columns",
                 ));
             }
-            Ok(samples.into_iter().map(|value| value & mask).collect())
+            Ok(samples)
         })
         .collect()
 }
 
 fn decode_jpeg(codestream: &[u8], geometry: &Geometry) -> Result<Vec<u16>> {
     let mut decoder = jpeg_decoder::Decoder::new(codestream);
-    let pixels = decoder
-        .decode()
+    // Check the frame size before decoding, so that a header cannot force a large decode.
+    decoder
+        .read_info()
         .map_err(|_| not_assessed("a JPEG frame cannot be decoded"))?;
     let info = decoder
         .info()
@@ -244,6 +249,9 @@ fn decode_jpeg(codestream: &[u8], geometry: &Geometry) -> Result<Vec<u16>> {
     if usize::from(info.width) != geometry.columns || usize::from(info.height) != geometry.rows {
         return Err(not_assessed("a JPEG frame does not match Rows and Columns"));
     }
+    let pixels = decoder
+        .decode()
+        .map_err(|_| not_assessed("a JPEG frame cannot be decoded"))?;
     match info.pixel_format {
         jpeg_decoder::PixelFormat::L8 => Ok(pixels.into_iter().map(u16::from).collect()),
         jpeg_decoder::PixelFormat::L16 => Ok(pixels
@@ -437,7 +445,8 @@ fn censor_frame(samples: &mut [u16], geometry: &Geometry, frame: usize) -> Resul
             }
         }
         let area = (bottom - top + 1) * (right - left + 1);
-        if tissue as f64 > MAX_TISSUE_SHARE * area as f64 {
+        // Any tissue in the box means the box cannot be written without touching it.
+        if tissue > 0 {
             if line.len() >= 3 {
                 // A line of text over tissue cannot be censored without censoring tissue.
                 return Err(Error::BurnedInTextOverTissue { frame });
@@ -450,34 +459,42 @@ fn censor_frame(samples: &mut [u16], geometry: &Geometry, frame: usize) -> Resul
         } else {
             low
         };
-        let mut written = 0_u64;
         for row in top..=bottom {
-            for column in left..=right {
-                let value = view[row * columns + column];
-                let is_tissue =
-                    value > background_level && value < text_level && !near_text(row, column);
-                if !is_tissue {
-                    samples[row * columns + column] = fill;
-                    written += 1;
-                }
-            }
+            samples[row * columns + left..=row * columns + right].fill(fill);
         }
         regions += 1;
-        pixels += written;
+        pixels += area as u64;
     }
     Ok((regions, pixels))
 }
 
 /// Decode, inspect and censor every frame of an object.
 pub(crate) fn censor(object: &InMemDicomObject, transfer_syntax: &str) -> Result<Censored> {
-    if object.get(tags::PIXEL_DATA).is_none() {
+    if object.get(tags::PIXEL_DATA).is_none()
+        && object.get(tags::FLOAT_PIXEL_DATA).is_none()
+        && object.get(tags::DOUBLE_FLOAT_PIXEL_DATA).is_none()
+    {
         return Ok(Censored {
             counts: CensorCounts::default(),
             pixel_data: None,
         });
     }
+    if object.get(tags::FLOAT_PIXEL_DATA).is_some()
+        || object.get(tags::DOUBLE_FLOAT_PIXEL_DATA).is_some()
+    {
+        return Err(not_assessed("floating-point Pixel Data is not supported"));
+    }
     let geometry = geometry(object)?;
     let mut frames = decode_frames(object, transfer_syntax, &geometry)?;
+    // A sample above Bits Stored is content that the detector would not see.
+    let max_value = if geometry.bits_stored >= 16 {
+        u16::MAX
+    } else {
+        (1_u16 << geometry.bits_stored) - 1
+    };
+    if frames.iter().flatten().any(|&value| value > max_value) {
+        return Err(not_assessed("a sample uses bits above Bits Stored"));
+    }
     // `frames` is consumed below to build the output without another copy.
     let mut counts = CensorCounts::default();
     for (index, frame) in frames.iter_mut().enumerate() {
@@ -493,7 +510,10 @@ pub(crate) fn censor(object: &InMemDicomObject, transfer_syntax: &str) -> Result
         });
     }
     // Consume the frames, so the output holds no second copy of the samples.
-    let samples: Vec<u16> = frames.into_iter().flatten().collect();
+    let mut samples: Vec<u16> = Vec::with_capacity(frames.iter().map(Vec::len).sum());
+    for frame in frames {
+        samples.extend(frame);
+    }
     let pixel_data = if geometry.bits_allocated == 8 {
         let bytes: Vec<u8> = samples.into_iter().map(|value| value as u8).collect();
         InMemElement::new(tags::PIXEL_DATA, VR::OB, PrimitiveValue::U8(bytes.into()))
@@ -573,12 +593,31 @@ mod tests {
     }
 
     #[test]
-    fn a_line_next_to_tissue_never_overwrites_a_tissue_pixel() {
+    fn a_line_with_tissue_in_its_margin_fails_closed_and_writes_nothing() {
         let (rows, columns) = (64, 128);
         let mut samples = vec![0_u16; rows * columns];
-        // Tissue begins one pixel after the text, inside the margin.
+        // Tissue touches the text, inside the censor margin.
         for row in 0..rows {
-            for column in 48..columns {
+            for column in 46..columns {
+                samples[row * columns + column] = 1500;
+            }
+        }
+        draw_block_text(&mut samples, columns, 4, 4, 5, 4095);
+        let original = samples.clone();
+        assert!(matches!(
+            censor_frame(&mut samples, &geometry(rows, columns), 0),
+            Err(Error::BurnedInTextOverTissue { frame: 0 })
+        ));
+        assert_eq!(samples, original);
+    }
+
+    #[test]
+    fn tissue_just_outside_the_margin_is_unchanged() {
+        let (rows, columns) = (64, 128);
+        let mut samples = vec![0_u16; rows * columns];
+        // The line ends at column 49, and its margin of 2 at column 51.
+        for row in 0..rows {
+            for column in 52..columns {
                 samples[row * columns + column] = 1500;
             }
         }
@@ -587,7 +626,7 @@ mod tests {
         let (regions, _) = censor_frame(&mut samples, &geometry(rows, columns), 0).unwrap();
         assert_eq!(regions, 1);
         for row in 0..rows {
-            for column in 50..columns {
+            for column in 52..columns {
                 assert_eq!(
                     samples[row * columns + column],
                     original[row * columns + column]

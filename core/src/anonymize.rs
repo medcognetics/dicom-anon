@@ -244,13 +244,12 @@ impl Anonymizer {
         } else {
             source_transfer_syntax
         };
-        let codestream = if censored_pixels.is_some() {
-            None
-        } else {
-            pixel::Codestream::for_transfer_syntax(transfer_syntax)
-                .map(|kind| pixel::clean_codestreams(source, kind).map(|cleaning| (kind, cleaning)))
-                .transpose()?
-        };
+        // The codestream and frame-layout checks run in every case, so that censoring
+        // cannot accept a malformed object that they reject.
+        let codestream = pixel::Codestream::for_transfer_syntax(source_transfer_syntax)
+            .map(|kind| pixel::clean_codestreams(source, kind).map(|cleaning| (kind, cleaning)))
+            .transpose()?
+            .filter(|_| censored_pixels.is_none());
 
         let patient_scope = self.patient_scope(source)?;
         let patient_pseudonym = self.options.secret.patient_id(&patient_scope);

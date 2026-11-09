@@ -376,6 +376,67 @@ fn native_data_longer_than_its_geometry_fails_closed() {
 }
 
 #[test]
+fn a_sample_above_bits_stored_fails_closed() {
+    let mut samples = frame();
+    samples[0] = 0x1000;
+    let source = native(
+        uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION,
+        &[samples],
+    );
+    let error = Anonymizer::new(options(BurnedInText::Auto))
+        .unwrap()
+        .anonymize_with_generated_uid_map(&source)
+        .unwrap_err();
+    assert!(matches!(error, Error::PixelTextNotAssessed(_)), "{error}");
+}
+
+#[test]
+fn float_pixel_data_fails_closed() {
+    let mut source = native(
+        uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION,
+        &[frame()],
+    );
+    source.remove_element(tags::PIXEL_DATA);
+    source.put(InMemElement::new(
+        tags::FLOAT_PIXEL_DATA,
+        VR::OF,
+        PrimitiveValue::F32(vec![0.0_f32; ROWS * COLUMNS].into()),
+    ));
+    let error = Anonymizer::new(options(BurnedInText::Auto))
+        .unwrap()
+        .anonymize_with_generated_uid_map(&source)
+        .unwrap_err();
+    assert!(matches!(error, Error::PixelTextNotAssessed(_)), "{error}");
+}
+
+#[test]
+fn a_second_codestream_in_a_censored_frame_still_fails() {
+    let source_frame = frame();
+    let mut encoded = Vec::new();
+    jpegli::encode(&source_frame, COLUMNS as u32, ROWS as u32, &mut encoded).unwrap();
+    let mut doubled = encoded.clone();
+    doubled.extend(&encoded);
+    if doubled.len() % 2 == 1 {
+        doubled.push(0);
+    }
+    let pixel_data = InMemElement::new(
+        tags::PIXEL_DATA,
+        VR::OB,
+        Value::PixelSequence(PixelFragmentSequence::new(Vec::new(), vec![doubled])),
+    );
+    let source = object(
+        uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION,
+        1,
+        pixel_data,
+        uids::JPEG_LOSSLESS_SV1,
+    );
+    assert!(Anonymizer::new(options(BurnedInText::Auto))
+        .unwrap()
+        .anonymize_with_generated_uid_map(&source)
+        .is_err());
+}
+
+#[test]
 fn text_over_tissue_fails_closed() {
     let mut samples = frame();
     draw(&mut samples, 40, 124, "DOE", TEXT);

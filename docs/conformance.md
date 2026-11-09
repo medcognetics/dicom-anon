@@ -171,11 +171,11 @@ Burned-in text in the pixel samples is an identifier under Safe Harbor. The anon
 3. Glyphs of similar height whose centers align and whose gaps are at most twice their height form a text line.
 4. A line of two or more glyphs is text, and so is a lone glyph at least 9 pixels high, such as a laterality marker.
 
-**Censoring.** In each text line's bounding box, with a margin of a quarter of the glyph height and at least 2 pixels, every pixel that is not tissue is overwritten with the frame's background value. A tissue pixel is never written. Censoring applies to names and to valid laterality or view markers alike. Laterality and view are kept in the header (Image Laterality, View Code Sequence), so the image does not lose them.
+**Censoring.** Each text line's bounding box, with a margin of a quarter of the glyph height and at least 2 pixels, is overwritten with the frame's background value. This happens only when the box holds no tissue, so a tissue pixel is never written. Censoring applies to names and to valid laterality or view markers alike. Laterality and view are kept in the header (Image Laterality, View Code Sequence), so the image does not lose them.
 
-**Tissue.** The background is the dark end of the frame's own range: the frame has one only when its darkest value is at most 5 % of its brightest. Inside a padded box, a pixel that is neither background nor text, and is not next to a text pixel, is tissue. A box with more than 10 % tissue is not censored:
+**Tissue.** The background is the dark end of the frame's own range: the frame has one only when its darkest value is at most 5 % of its brightest. Inside a padded box, a pixel that is neither background nor text, and is not next to a text pixel, is tissue. A box with any tissue is not censored:
 - a line of three or more glyphs over tissue fails closed with the error `burned-in text over tissue in frame N`, and the anonymizer writes no output;
-- a smaller bright structure in tissue, such as a calcification, is left alone.
+- a line of one or two glyphs with tissue in its box, such as a calcification or a marker against the skin line, is left alone. A marker there is not censored.
 
 **Output.** When nothing is censored, Pixel Data and the transfer syntax are copied unchanged. When a region is censored, the anonymizer writes the decoded and censored samples as native Pixel Data in Explicit VR Little Endian. No lossy step is applied. It removes Encapsulated Pixel Data Value Total Length and the Extended Offset Table. Burned In Annotation `(0028,0301)` keeps its source value, because censoring does not show that no text remains.
 
@@ -185,13 +185,17 @@ Burned-in text in the pixel samples is an identifier under Safe Harbor. The anon
 - color or signed samples;
 - a sample size other than 8 or 16 bits;
 - multi-frame encapsulated data without one fragment per frame;
-- native Pixel Data whose length does not match its geometry, or a geometry too large to address.
+- native Pixel Data whose length does not match its geometry, or more than 2^30 decoded samples;
+- a sample above Bits Stored;
+- Float or Double Float Pixel Data.
+
+The codestream and frame-layout checks in the next section also run when an object is censored.
 
 The JPEG 2000 decoder supports a single tile and a single component, so some vendor codestreams fail closed. Measure the failure rate on an approved sample before deployment.
 
 **Limits: this check can miss text.**
 - Text that is not bright on the background, or not in the top 20 % of the range: low-contrast, dark or semi-transparent text.
-- Text over tissue in a line of fewer than three glyphs, which is left alone.
+- Text in a line of one or two glyphs with tissue in its box, which is left alone.
 - Text whose glyphs are smaller than 5 pixels, larger than the size limits, rotated, curved, outlined, connected into one component, or spaced more than twice their height apart.
 - Text in an overlay (60xx,3000), a presentation state, or another object. These are outside the pixel samples.
 - Identifying graphics that are not text, such as a face, a barcode or a logo.
