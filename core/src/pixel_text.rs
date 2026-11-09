@@ -3,8 +3,9 @@
 //! The detector is a deterministic heuristic. It decodes every frame and looks for
 //! rendered text: groups of bright, character-sized, stroke-like components on the
 //! image background. Each such region, with a margin, is overwritten with the
-//! background value only when it holds no tissue, so tissue is never written. A line
-//! of text with tissue in its region fails closed. A frame or transfer syntax that cannot be
+//! background value only when every pixel in it is background or one of the line's own
+//! glyphs, so tissue is never written. A line of text with anything else in its region
+//! fails closed. A frame or transfer syntax that cannot be
 //! decoded also fails closed.
 //!
 //! The detector does not read text. It censors identifiers and laterality or view
@@ -266,6 +267,8 @@ fn decode_jpeg(codestream: &[u8], geometry: &Geometry) -> Result<Vec<u16>> {
 /// A connected component of text-level pixels.
 #[derive(Clone, Copy)]
 struct Component {
+    /// Index of the component in `components`' result; labels refer to it.
+    id: u32,
     top: usize,
     left: usize,
     bottom: usize,
@@ -291,7 +294,15 @@ impl Component {
 }
 
 /// 8-connected components of the pixels at or above `level`.
-fn components(samples: &[u16], rows: usize, columns: usize, level: u16) -> Vec<Component> {
+/// 8-connected components of the pixels at or above `level`, and a label for each pixel:
+/// the component's id plus one, or zero for a pixel below `level`.
+fn components(
+    samples: &[u16],
+    rows: usize,
+    columns: usize,
+    level: u16,
+) -> (Vec<Component>, Vec<u32>) {
+    let mut labels = vec![0_u32; samples.len()];
     let mut seen = vec![false; samples.len()];
     let mut found = Vec::new();
     let mut stack = Vec::new();
@@ -302,7 +313,9 @@ fn components(samples: &[u16], rows: usize, columns: usize, level: u16) -> Vec<C
         seen[start] = true;
         stack.push(start);
         let (row, column) = (start / columns, start % columns);
+        let id = u32::try_from(found.len()).unwrap_or(u32::MAX);
         let mut component = Component {
+            id,
             top: row,
             left: column,
             bottom: row,
@@ -311,6 +324,7 @@ fn components(samples: &[u16], rows: usize, columns: usize, level: u16) -> Vec<C
         };
         while let Some(index) = stack.pop() {
             let (row, column) = (index / columns, index % columns);
+            labels[index] = id.saturating_add(1);
             component.area += 1;
             component.top = component.top.min(row);
             component.bottom = component.bottom.max(row);
@@ -339,7 +353,7 @@ fn components(samples: &[u16], rows: usize, columns: usize, level: u16) -> Vec<C
         }
         found.push(component);
     }
-    found
+    (found, labels)
 }
 
 /// Group glyphs into text lines: similar height, aligned centers, small gaps.
@@ -403,7 +417,8 @@ fn censor_frame(samples: &mut [u16], geometry: &Geometry, frame: usize) -> Resul
     } else {
         0
     };
-    let glyphs: Vec<Component> = components(&view, rows, columns, text_level)
+    let (found, labels) = components(&view, rows, columns, text_level);
+    let glyphs: Vec<Component> = found
         .into_iter()
         .filter(|component| component.is_glyph(rows))
         .collect();
@@ -428,30 +443,26 @@ fn censor_frame(samples: &mut [u16], geometry: &Geometry, frame: usize) -> Resul
         let bottom = (line.iter().map(|g| g.bottom).max().unwrap_or(0) + margin).min(rows - 1);
         let right = (line.iter().map(|g| g.right).max().unwrap_or(0) + margin).min(columns - 1);
 
-        // Tissue: neither background nor text, and not the anti-aliased edge of a glyph.
-        let near_text = |row: usize, column: usize| {
-            (row.saturating_sub(1)..=(row + 1).min(rows - 1)).any(|r| {
-                (column.saturating_sub(1)..=(column + 1).min(columns - 1))
-                    .any(|c| view[r * columns + c] >= text_level)
-            })
-        };
-        let mut tissue = 0_usize;
+        // Only background and this line's own glyph pixels may be written. Anything else,
+        // such as tissue, a bright structure that is not a glyph, or a glyph's anti-aliased
+        // edge, which cannot be told apart from tissue next to it, stops the write.
+        let line_labels: Vec<u32> = line.iter().map(|glyph| glyph.id + 1).collect();
+        let mut other = 0_usize;
         for row in top..=bottom {
             for column in left..=right {
-                let value = view[row * columns + column];
-                if value > background_level && value < text_level && !near_text(row, column) {
-                    tissue += 1;
+                let index = row * columns + column;
+                if view[index] > background_level && !line_labels.contains(&labels[index]) {
+                    other += 1;
                 }
             }
         }
         let area = (bottom - top + 1) * (right - left + 1);
-        // Any tissue in the box means the box cannot be written without touching it.
-        if tissue > 0 {
+        if other > 0 {
             if line.len() >= 3 {
                 // A line of text over tissue cannot be censored without censoring tissue.
                 return Err(Error::BurnedInTextOverTissue { frame });
             }
-            // A lone bright structure in tissue, such as a calcification, is not text.
+            // One or two glyphs, such as a calcification or a marker on the skin line.
             continue;
         }
         let fill = if geometry.inverted {
@@ -608,6 +619,37 @@ mod tests {
             censor_frame(&mut samples, &geometry(rows, columns), 0),
             Err(Error::BurnedInTextOverTissue { frame: 0 })
         ));
+        assert_eq!(samples, original);
+    }
+
+    #[test]
+    fn thin_tissue_touching_a_glyph_fails_closed_and_is_unchanged() {
+        let (rows, columns) = (64, 128);
+        let mut samples = vec![0_u16; rows * columns];
+        draw_block_text(&mut samples, columns, 4, 4, 5, 4095);
+        // One row of tissue directly above the glyphs.
+        for column in 4..40 {
+            samples[3 * columns + column] = 1500;
+        }
+        let original = samples.clone();
+        assert!(censor_frame(&mut samples, &geometry(rows, columns), 0).is_err());
+        assert_eq!(samples, original);
+    }
+
+    #[test]
+    fn a_bright_structure_that_is_not_a_glyph_stops_the_write() {
+        let (rows, columns) = (64, 128);
+        let mut samples = vec![0_u16; rows * columns];
+        draw_block_text(&mut samples, columns, 4, 4, 5, 4095);
+        // A large bright block that is too big to be a glyph. The last glyph ends at
+        // column 45, so its margin reaches column 47.
+        for row in 0..rows {
+            for column in 47..columns {
+                samples[row * columns + column] = 4000;
+            }
+        }
+        let original = samples.clone();
+        assert!(censor_frame(&mut samples, &geometry(rows, columns), 0).is_err());
         assert_eq!(samples, original);
     }
 

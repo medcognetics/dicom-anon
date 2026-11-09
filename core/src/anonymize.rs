@@ -188,7 +188,8 @@ impl Anonymizer {
     /// output. It fails for the same input errors, except a missing UID mapping.
     /// The result contains source UIDs; keep it under source-data custody.
     pub fn required_uids(&self, source: &DefaultDicomObject) -> Result<Vec<RequiredUid>> {
-        let (_, _, uids) = self.anonymize_with(source, UidResolver::collect())?;
+        // Listing UIDs does not need the pixels, so the burned-in text check is skipped.
+        let (_, _, uids) = self.anonymize_with_pixels(source, UidResolver::collect(), false)?;
         Ok(uids.into_required())
     }
 
@@ -220,6 +221,15 @@ impl Anonymizer {
         source: &DefaultDicomObject,
         uids: UidResolver,
     ) -> Result<(DefaultDicomObject, AnonymizationReport, UidResolver)> {
+        self.anonymize_with_pixels(source, uids, true)
+    }
+
+    fn anonymize_with_pixels(
+        &self,
+        source: &DefaultDicomObject,
+        uids: UidResolver,
+        inspect_pixels: bool,
+    ) -> Result<(DefaultDicomObject, AnonymizationReport, UidResolver)> {
         if self.options.reject_already_deidentified
             && element_text(source, tags::PATIENT_IDENTITY_REMOVED)
                 .is_some_and(|value| value.eq_ignore_ascii_case("YES"))
@@ -232,7 +242,7 @@ impl Anonymizer {
             &self.options.profile,
         )?;
         let source_transfer_syntax = source.meta().transfer_syntax().trim_end_matches('\0');
-        let mut censored = if self.options.profile.censors_burned_in_text() {
+        let mut censored = if inspect_pixels && self.options.profile.censors_burned_in_text() {
             Some(pixel_text::censor(source, source_transfer_syntax)?)
         } else {
             None
