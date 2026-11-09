@@ -341,16 +341,20 @@ impl Anonymizer {
                 .then_some("ISO_15444_1")
             });
             if let Some(method) = method {
+                // A value that already records lossy compression, possibly with earlier
+                // generations in its values, is kept with its Method.
                 let previous = output
                     .get(tags::LOSSY_IMAGE_COMPRESSION)
-                    .and_then(|element| element.to_str().ok())
-                    .map(|value| value.trim().to_owned());
-                output.put_str(tags::LOSSY_IMAGE_COMPRESSION, VR::CS, "01");
-                if previous.is_some_and(|value| value != "01") {
-                    report.replaced_attributes += 1;
-                }
-                if output.get(tags::LOSSY_IMAGE_COMPRESSION_METHOD).is_none() {
-                    output.put_str(tags::LOSSY_IMAGE_COMPRESSION_METHOD, VR::CS, method);
+                    .and_then(|element| element.to_multi_str().ok())
+                    .map(|values| values.iter().any(|value| value.trim() == "01"));
+                if previous != Some(true) {
+                    output.put_str(tags::LOSSY_IMAGE_COMPRESSION, VR::CS, "01");
+                    if previous.is_some() {
+                        report.replaced_attributes += 1;
+                    }
+                    if output.get(tags::LOSSY_IMAGE_COMPRESSION_METHOD).is_none() {
+                        output.put_str(tags::LOSSY_IMAGE_COMPRESSION_METHOD, VR::CS, method);
+                    }
                 }
             }
         }

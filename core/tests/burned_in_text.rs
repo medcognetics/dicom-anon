@@ -700,7 +700,7 @@ fn a_censored_jpeg2000_object_without_a_lossy_value_is_marked_possibly_lossy() {
 }
 
 #[test]
-fn a_presentation_lut_sequence_fails_closed() {
+fn a_presentation_or_modality_lut_sequence_fails_closed() {
     use dicom_core::value::DataSetSequence;
     let mut source = native(
         uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION,
@@ -708,6 +708,21 @@ fn a_presentation_lut_sequence_fails_closed() {
     );
     source.put(InMemElement::new(
         tags::PRESENTATION_LUT_SEQUENCE,
+        VR::SQ,
+        DataSetSequence::from(vec![InMemDicomObject::new_empty()]),
+    ));
+    let error = Anonymizer::new(options(BurnedInText::Auto))
+        .unwrap()
+        .anonymize_with_generated_uid_map(&source)
+        .unwrap_err();
+    assert!(matches!(error, Error::PixelTextNotAssessed(_)), "{error}");
+
+    let mut source = native(
+        uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION,
+        &[frame()],
+    );
+    source.put(InMemElement::new(
+        tags::MODALITY_LUT_SEQUENCE,
         VR::SQ,
         DataSetSequence::from(vec![InMemDicomObject::new_empty()]),
     ));
@@ -851,4 +866,28 @@ fn a_negative_rescale_slope_fails_closed() {
         .anonymize_with_generated_uid_map(&source)
         .unwrap_err();
     assert!(matches!(error, Error::PixelTextNotAssessed(_)), "{error}");
+}
+
+#[test]
+fn a_negative_rescale_slope_in_a_functional_group_fails_closed() {
+    use dicom_core::value::DataSetSequence;
+    let mut transformation = InMemDicomObject::new_empty();
+    transformation.put_str(tags::RESCALE_SLOPE, VR::DS, "-1");
+    let mut group = InMemDicomObject::new_empty();
+    group.put(InMemElement::new(
+        tags::PIXEL_VALUE_TRANSFORMATION_SEQUENCE,
+        VR::SQ,
+        DataSetSequence::from(vec![transformation]),
+    ));
+    let mut source = native(uids::BREAST_TOMOSYNTHESIS_IMAGE_STORAGE, &[frame()]);
+    source.put(InMemElement::new(
+        tags::SHARED_FUNCTIONAL_GROUPS_SEQUENCE,
+        VR::SQ,
+        DataSetSequence::from(vec![group]),
+    ));
+    let error = Anonymizer::new(options(BurnedInText::Auto))
+        .unwrap()
+        .anonymize_with_generated_uid_map(&source)
+        .unwrap_err();
+    assert!(error.to_string().contains("Rescale Slope"), "{error}");
 }

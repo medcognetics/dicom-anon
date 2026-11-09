@@ -148,6 +148,29 @@ fn number_or(object: &InMemDicomObject, tag: dicom_core::Tag, default: u64) -> R
     }
 }
 
+/// The items of a sequence attribute, or none.
+fn sequence_items(object: &InMemDicomObject, tag: dicom_core::Tag) -> &[InMemDicomObject] {
+    object
+        .get(tag)
+        .and_then(|element| element.items())
+        .unwrap_or(&[])
+}
+
+/// Fail closed on a Rescale Slope that is unreadable or not positive.
+fn check_rescale_slope(object: &InMemDicomObject) -> Result<()> {
+    if let Some(element) = object.get(tags::RESCALE_SLOPE) {
+        let slope = element
+            .to_float64()
+            .map_err(|_| not_assessed("Rescale Slope is unreadable"))?;
+        if slope.is_nan() || slope <= 0.0 {
+            return Err(not_assessed(
+                "a Rescale Slope that is not positive is not supported",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn not_assessed(reason: &str) -> Error {
     Error::PixelTextNotAssessed(reason.to_owned())
 }
@@ -178,20 +201,34 @@ fn geometry(object: &InMemDicomObject) -> Result<Geometry> {
             "MONOCHROME1 with Presentation LUT Shape IDENTITY is not supported",
         ));
     }
-    // A negative Rescale Slope reverses the polarity that the detector assumes.
-    if let Some(element) = object.get(tags::RESCALE_SLOPE) {
-        let slope = element
-            .to_float64()
-            .map_err(|_| not_assessed("Rescale Slope is unreadable"))?;
-        if slope.is_nan() || slope <= 0.0 {
-            return Err(not_assessed(
-                "a Rescale Slope that is not positive is not supported",
-            ));
+    // A negative Rescale Slope reverses the polarity that the detector assumes. Enhanced
+    // objects such as DBT carry it in the Pixel Value Transformation Sequence of their
+    // shared and per-frame functional groups.
+    check_rescale_slope(object)?;
+    for groups in [
+        tags::SHARED_FUNCTIONAL_GROUPS_SEQUENCE,
+        tags::PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE,
+    ] {
+        for group in sequence_items(object, groups) {
+            for transformation in sequence_items(group, tags::PIXEL_VALUE_TRANSFORMATION_SEQUENCE) {
+                check_rescale_slope(transformation)?;
+            }
+            if group.get(tags::MODALITY_LUT_SEQUENCE).is_some()
+                || group.get(tags::PRESENTATION_LUT_SEQUENCE).is_some()
+            {
+                return Err(not_assessed(
+                    "a functional group LUT Sequence is not supported",
+                ));
+            }
         }
     }
-    // A Presentation LUT Sequence can invert the display, so text may not be stored bright.
+    // A Presentation or Modality LUT Sequence can invert the display, so text may not be
+    // stored bright.
     if object.get(tags::PRESENTATION_LUT_SEQUENCE).is_some() {
         return Err(not_assessed("a Presentation LUT Sequence is not supported"));
+    }
+    if object.get(tags::MODALITY_LUT_SEQUENCE).is_some() {
+        return Err(not_assessed("a Modality LUT Sequence is not supported"));
     }
     if number_or(object, tags::PIXEL_REPRESENTATION, 0)? != 0 {
         return Err(not_assessed("signed pixel samples are not supported"));

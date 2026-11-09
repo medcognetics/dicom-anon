@@ -182,7 +182,7 @@ Burned-in text in the pixel samples is an identifier under Safe Harbor. The anon
 **Fail closed.** These cases stop the run with the error `pixel data was not assessed for burned-in text: <reason>`, and no output is written:
 - a transfer syntax other than native little endian, JPEG 2000 `.90` and `.91`, JPEG-LS or JPEG `.50`, `.51`, `.57` and `.70`;
 - a frame that the pinned decoders cannot decode, or a lossless JPEG frame with a restart interval or a nonzero point transform, which the pinned JPEG decoder does not decode correctly;
-- color or signed samples, MONOCHROME2 with Presentation LUT Shape `INVERSE`, MONOCHROME1 with `IDENTITY`, a Presentation LUT Sequence, or a Rescale Slope that is not positive;
+- color or signed samples, MONOCHROME2 with Presentation LUT Shape `INVERSE`, MONOCHROME1 with `IDENTITY`, a Presentation or Modality LUT Sequence, or a Rescale Slope that is not positive, also in the shared or per-frame functional groups;
 - a frame with more than 2^20 bright components or dark regions, or more than 256 text-like lines (4096 open during grouping);
 - a sample size other than 8 or 16 bits;
 - multi-frame encapsulated data without one fragment per frame;
