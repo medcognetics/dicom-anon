@@ -768,3 +768,87 @@ fn monochrome1_with_an_identity_presentation_lut_fails_closed() {
         .unwrap_err();
     assert!(matches!(error, Error::PixelTextNotAssessed(_)), "{error}");
 }
+
+/// A lossless JPEG object from `codestream`.
+fn lossless_jpeg(mut codestream: Vec<u8>) -> DefaultDicomObject {
+    if codestream.len() % 2 == 1 {
+        codestream.push(0);
+    }
+    let pixel_data = InMemElement::new(
+        tags::PIXEL_DATA,
+        VR::OB,
+        Value::PixelSequence(PixelFragmentSequence::new(Vec::new(), vec![codestream])),
+    );
+    object(
+        uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION,
+        1,
+        pixel_data,
+        uids::JPEG_LOSSLESS_SV1,
+    )
+}
+
+fn assert_fails_with(source: &DefaultDicomObject, reason: &str) {
+    let error = Anonymizer::new(options(BurnedInText::Auto))
+        .unwrap()
+        .anonymize_with_generated_uid_map(source)
+        .unwrap_err();
+    assert!(error.to_string().contains(reason), "{error}");
+}
+
+#[test]
+fn lossless_jpeg_with_a_restart_interval_fails_closed() {
+    let mut encoded = Vec::new();
+    jpegli::encode(&frame(), COLUMNS as u32, ROWS as u32, &mut encoded).unwrap();
+    // A DRI segment with a restart interval of 4096 after SOI, then two stray bytes,
+    // which the decoder skips.
+    let mut with_restarts = encoded[..2].to_vec();
+    with_restarts.extend([0xFF, 0xDD, 0x00, 0x04, 0x10, 0x00, 0x12, 0x34]);
+    with_restarts.extend(&encoded[2..]);
+    assert_fails_with(&lossless_jpeg(with_restarts), "restart interval");
+}
+
+#[test]
+fn lossless_jpeg_with_a_point_transform_fails_closed() {
+    let mut encoded = Vec::new();
+    jpegli::encode(&frame(), COLUMNS as u32, ROWS as u32, &mut encoded).unwrap();
+    // Set Al, the point transform, in the last byte of the scan header.
+    let sos = encoded
+        .windows(2)
+        .position(|pair| pair == [0xFF, 0xDA])
+        .unwrap();
+    let length = usize::from(u16::from_be_bytes([encoded[sos + 2], encoded[sos + 3]]));
+    encoded[sos + 1 + length] |= 0x01;
+    assert_fails_with(&lossless_jpeg(encoded), "point transform");
+}
+
+#[test]
+fn a_jpeg_segment_with_an_invalid_length_fails_closed() {
+    for codestream in [
+        vec![0xFF, 0xD8, 0xFF, 0xDD, 0x00, 0x00],
+        vec![0xFF, 0xD8, 0xFF, 0xDD, 0x00, 0x01],
+        vec![0xFF, 0xD8, 0xFF, 0xDD, 0x00, 0x40],
+    ] {
+        assert_fails_with(&lossless_jpeg(codestream), "invalid length");
+    }
+    // EOI ends the scan, and the decoder reports the missing frame.
+    let error = Anonymizer::new(options(BurnedInText::Auto))
+        .unwrap()
+        .anonymize_with_generated_uid_map(&lossless_jpeg(vec![0xFF, 0xD8, 0xFF, 0xD9]))
+        .unwrap_err();
+    assert!(matches!(error, Error::PixelTextNotAssessed(_)), "{error}");
+}
+
+#[test]
+fn a_negative_rescale_slope_fails_closed() {
+    let mut source = native(
+        uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION,
+        &[frame()],
+    );
+    source.put_str(tags::RESCALE_SLOPE, VR::DS, "-1");
+    source.put_str(tags::RESCALE_INTERCEPT, VR::DS, "4095");
+    let error = Anonymizer::new(options(BurnedInText::Auto))
+        .unwrap()
+        .anonymize_with_generated_uid_map(&source)
+        .unwrap_err();
+    assert!(matches!(error, Error::PixelTextNotAssessed(_)), "{error}");
+}
