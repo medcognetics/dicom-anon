@@ -458,6 +458,35 @@ fn with_reference_codes(source: &DefaultDicomObject) -> DefaultDicomObject {
         tags::SOURCE_IMAGE_SEQUENCE,
         vec![source_image],
     ));
+    // Purpose of Reference codes also occur in Referenced Image Sequence (CID 7201) and
+    // Contributing Equipment Sequence (CID 7005).
+    for (sequence, value, meaning) in [
+        (
+            tags::REFERENCED_IMAGE_SEQUENCE,
+            "121313",
+            "Other partial views",
+        ),
+        (
+            tags::CONTRIBUTING_EQUIPMENT_SEQUENCE,
+            "109104",
+            "De-identifying Equipment",
+        ),
+    ] {
+        let mut parent = InMemDicomObject::new_empty();
+        if sequence == tags::REFERENCED_IMAGE_SEQUENCE {
+            parent.put_str(
+                tags::REFERENCED_SOP_CLASS_UID,
+                VR::UI,
+                "1.2.840.10008.5.1.4.1.1.1.2",
+            );
+            parent.put_str(tags::REFERENCED_SOP_INSTANCE_UID, VR::UI, SOURCE_UIDS[1]);
+        }
+        parent.put(code_sequence(
+            tags::PURPOSE_OF_REFERENCE_CODE_SEQUENCE,
+            vec![code_item(value, "DCM", meaning)],
+        ));
+        object.put(code_sequence(sequence, vec![parent]));
+    }
     round_trip(&object)
 }
 
@@ -520,11 +549,34 @@ fn shipped_maps_keep_the_other_code_sequences_under_safe_harbor() {
             "Source image for image processing operation",
             name,
         );
-        // The View Code in the fixtures is kept by the other shipped map.
-        let view = item(&output, tags::VIEW_CODE_SEQUENCE, 0);
-        assert_ne!(
-            text(view, tags::CODE_VALUE).as_deref(),
-            Some("ANONYMIZED"),
+        for (sequence, value, meaning) in [
+            (
+                tags::REFERENCED_IMAGE_SEQUENCE,
+                "121313",
+                "Other partial views",
+            ),
+            (
+                tags::CONTRIBUTING_EQUIPMENT_SEQUENCE,
+                "109104",
+                "De-identifying Equipment",
+            ),
+        ] {
+            assert_code(
+                item(
+                    item(&output, sequence, 0),
+                    tags::PURPOSE_OF_REFERENCE_CODE_SEQUENCE,
+                    0,
+                ),
+                value,
+                "DCM",
+                meaning,
+                name,
+            );
+        }
+        // The other shipped map keeps the fixture's View Code unchanged.
+        assert_eq!(
+            item(&output, tags::VIEW_CODE_SEQUENCE, 0),
+            item(&source, tags::VIEW_CODE_SEQUENCE, 0),
             "{name}"
         );
     }
@@ -536,7 +588,8 @@ fn view_map_alone_stops_on_the_other_code_sequences() {
     let result = Anonymizer::new(guarded_options(&[VIEW_MAP]))
         .unwrap()
         .anonymize(&source);
-    assert!(result.is_err());
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("no descriptor-map entry"), "{error}");
 }
 
 #[test]
