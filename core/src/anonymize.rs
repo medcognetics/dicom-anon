@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 
 use crate::pixel;
+use crate::pixel_text::{self, CensorCounts};
 use crate::profile::{
     profile_basic_action, profile_option_action, profile_rule_for, safe_private_tags,
     DeidentificationPolicy, DicomOption, ProfileAction, ProfileConfiguration, PROFILE_VERSION,
@@ -104,6 +105,10 @@ pub struct AnonymizationReport {
     /// Subset of `dummy_replacements` where a clean action found no descriptor-map entry.
     #[serde(default)]
     pub unmapped_dummy_replacements: BTreeMap<String, u64>,
+    /// Whether pixel samples were inspected and censored for burned-in text.
+    pub burned_in_text_censoring: bool,
+    /// Frames, regions and pixels of the burned-in text check. No pixel values or text.
+    pub burned_in_text: CensorCounts,
 }
 
 impl AnonymizationReport {
@@ -132,6 +137,8 @@ impl AnonymizationReport {
             removed_jpeg_application_segments: 0,
             dummy_replacements: BTreeMap::new(),
             unmapped_dummy_replacements: BTreeMap::new(),
+            burned_in_text_censoring: profile.censors_burned_in_text(),
+            burned_in_text: CensorCounts::default(),
         }
     }
 }
@@ -224,10 +231,26 @@ impl Anonymizer {
             Some(source.meta().media_storage_sop_class_uid()),
             &self.options.profile,
         )?;
-        let transfer_syntax = source.meta().transfer_syntax().trim_end_matches('\0');
-        let codestream = pixel::Codestream::for_transfer_syntax(transfer_syntax)
-            .map(|kind| pixel::clean_codestreams(source, kind).map(|cleaning| (kind, cleaning)))
-            .transpose()?;
+        let source_transfer_syntax = source.meta().transfer_syntax().trim_end_matches('\0');
+        let censored = if self.options.profile.censors_burned_in_text() {
+            Some(pixel_text::censor(source, source_transfer_syntax)?)
+        } else {
+            None
+        };
+        let censored_pixels = censored.as_ref().and_then(|c| c.pixel_data.clone());
+        // Censored samples are written uncompressed, so no lossy step is applied.
+        let transfer_syntax = if censored_pixels.is_some() {
+            pixel_text::EXPLICIT_VR_LITTLE_ENDIAN
+        } else {
+            source_transfer_syntax
+        };
+        let codestream = if censored_pixels.is_some() {
+            None
+        } else {
+            pixel::Codestream::for_transfer_syntax(transfer_syntax)
+                .map(|kind| pixel::clean_codestreams(source, kind).map(|cleaning| (kind, cleaning)))
+                .transpose()?
+        };
 
         let patient_scope = self.patient_scope(source)?;
         let patient_pseudonym = self.options.secret.patient_id(&patient_scope);
@@ -270,6 +293,22 @@ impl Anonymizer {
             None => Vec::new(),
         };
         let mut output = self.process_dataset(source, &context, &mut report, replacements)?;
+        if let Some(censored) = &censored {
+            report.burned_in_text = censored.counts;
+        }
+        if let Some(pixel_data) = censored_pixels {
+            output.put(pixel_data);
+            for tag in [
+                tags::ENCAPSULATED_PIXEL_DATA_VALUE_TOTAL_LENGTH,
+                tags::EXTENDED_OFFSET_TABLE,
+                tags::EXTENDED_OFFSET_TABLE_LENGTHS,
+            ] {
+                output.remove_element(tag);
+            }
+            // The text that the header could declare has been removed.
+            output.put_str(tags::BURNED_IN_ANNOTATION, VR::CS, "NO");
+            report.replaced_attributes += 1;
+        }
         // A source value that profile processing kept can be stale or wrong.
         match pixel::repair_total_length(&mut output, transfer_syntax) {
             Some(pixel::TotalLengthRepair::Replaced) => report.replaced_attributes += 1,

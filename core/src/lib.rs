@@ -6,6 +6,7 @@ pub mod cli_common;
 mod error;
 mod io;
 mod pixel;
+mod pixel_text;
 mod profile;
 mod pseudonym;
 mod temporal;
@@ -15,6 +16,7 @@ mod validate;
 pub use anonymize::{AnonymizationReport, Anonymizer, Options};
 pub use error::{Error, Result};
 pub use io::{anonymize_file, anonymize_reader, read_dicom, write_dicom};
+pub use pixel_text::{BurnedInText, CensorCounts};
 pub use profile::{
     profile_rule, profile_rule_for, DeidentificationPolicy, DicomOption, ProfileAction,
     ProfileConfiguration, ProfileRule, ResolvedProfileRule, SafePrivateElement, PROFILE_NAME,

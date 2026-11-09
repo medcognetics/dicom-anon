@@ -148,14 +148,25 @@ pub fn validate_object_with_options(
     validate_dataset(object, "root", &options.profile, &mut report)?;
 
     if object.get(tags::PIXEL_DATA).is_some() {
-        push_finding(
-            &mut report,
-            Severity::Warning,
-            "pixel_data_not_assessed",
-            Some(tags::PIXEL_DATA),
-            "root",
-            "pixel data was not inspected for burned-in identifying information; the Clean Pixel Data Option is not claimed",
-        );
+        if options.profile.censors_burned_in_text() {
+            push_finding(
+                &mut report,
+                Severity::Warning,
+                "pixel_text_check_heuristic",
+                Some(tags::PIXEL_DATA),
+                "root",
+                "burned-in text was censored by a heuristic detector that can miss text; the Clean Pixel Data Option is not claimed",
+            );
+        } else {
+            push_finding(
+                &mut report,
+                Severity::Warning,
+                "pixel_data_not_assessed",
+                Some(tags::PIXEL_DATA),
+                "root",
+                "pixel data was not inspected for burned-in identifying information; the Clean Pixel Data Option is not claimed",
+            );
+        }
     }
     validate_pixel_gates(object, &options.profile, &mut report);
     if !options.profile.require_no_burned_in_annotation

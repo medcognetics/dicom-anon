@@ -60,7 +60,7 @@ For metadata the tool controls, the policy removes or safely replaces the Safe H
 
 The exact Safe Harbor responsibilities outside this result are:
 
-- Pixel samples, recognizable visual features, burned-in annotations, and identifying graphics encoded only in unsupported pixel formats are not inspected. The optional gates in [Pixel and disclosure limits](#pixel-and-disclosure-limits) reject input by declared attributes; they do not inspect pixels.
+- Recognizable visual features are not inspected. Burned-in text is censored by a heuristic detector under `safe-harbor-metadata` (see [Burned-in text](#burned-in-text)), and that detector can miss text. The optional gates in [Pixel and disclosure limits](#pixel-and-disclosure-limits) reject input by declared attributes.
 - The caller controls whether descriptor outputs, safe-private entries, the independently assigned patient scope, and replacement UID assignments contain or encode PHI.
 - The covered entity must satisfy the Safe Harbor re-identification-code controls and must not disclose the key or mapping mechanism.
 - The covered entity retains the required “actual knowledge” assessment that remaining information could not identify an individual.
@@ -159,9 +159,49 @@ The `core/tests/mammography` suite generates synthetic Digital Mammography X-Ray
 
 In Safe Harbor mode, the View Code Sequence code values are replaced with `ANONYMIZED` at this revision. Issue #20 tracks this behavior.
 
+## Burned-in text
+
+Burned-in text in the pixel samples is an identifier under Safe Harbor. The anonymizer finds it with a deterministic heuristic and censors it. It runs on the CPU and uses no system libraries.
+
+**When it runs.** `burned_in_text` (configuration) and `--burned-in-text` (CLI) take `auto`, `censor` or `off`. `auto` is the default: it means `censor` under `safe-harbor-metadata` and `off` under the other policies. The report gives `burned_in_text_censoring`, and, in `burned_in_text`, the frames assessed and the regions and pixels censored. It holds no pixel values and no text. An explicit `off` therefore shows in every report.
+
+**Detection.** Each frame is decoded in turn: every frame of a multi-frame object. Text is taken to be bright on a dark background, after MONOCHROME1 is inverted.
+1. Pixels in the top 20 % of the frame's range form 8-connected components.
+2. A component counts as a glyph when it is 5 to 160 pixels high (at most a quarter of the frame height) and at most three times as wide as it is high, holds at least 6 pixels, and fills 8 % to 90 % of its bounding box.
+3. Glyphs of similar height whose centers align and whose gaps are at most twice their height form a text line.
+4. A line of two or more glyphs is text, and so is a lone glyph at least 9 pixels high, such as a laterality marker.
+
+**Censoring.** Each text line's bounding box, with a margin of a quarter of the glyph height and at least 2 pixels, is overwritten with the frame's background value. Censoring applies to names and to valid laterality or view markers alike. Laterality and view are kept in the header (Image Laterality, View Code Sequence), so the image does not lose them.
+
+**Tissue.** The background is the dark end of the stored range. Inside a padded box, a pixel that is neither background nor text, and is not next to a text pixel, is tissue. A box with more than 10 % tissue is never overwritten:
+- a line of three or more glyphs over tissue fails closed, with `burned_in_text_over_tissue`, and the anonymizer writes no output;
+- a smaller bright structure in tissue, such as a calcification, is left alone.
+
+**Output.** When nothing is censored, Pixel Data and the transfer syntax are copied unchanged. When a region is censored, the anonymizer writes the decoded and censored samples as native Pixel Data in Explicit VR Little Endian. No lossy step is applied. It removes Encapsulated Pixel Data Value Total Length and the Extended Offset Table, and sets Burned In Annotation `(0028,0301)` to `NO`.
+
+**Fail closed.** These cases stop the run with `pixel_text_not_assessed`, and no output is written:
+- a transfer syntax other than native little endian, JPEG 2000 lossless, JPEG-LS or JPEG `.50`, `.51`, `.57` and `.70`;
+- a frame that the pinned decoders cannot decode;
+- color or signed samples;
+- a sample size other than 8 or 16 bits;
+- multi-frame encapsulated data without one fragment per frame.
+
+The JPEG 2000 decoder supports a single tile and a single component, so some vendor codestreams fail closed. Measure the failure rate on an approved sample before deployment.
+
+**Limits: this check can miss text.**
+- Text that is not bright on the background, or not in the top 20 % of the range: low-contrast, dark or semi-transparent text.
+- Text over tissue in a line of fewer than three glyphs, which is left alone.
+- Text whose glyphs are smaller than 5 pixels, larger than the size limits, rotated, curved, outlined, connected into one component, or spaced more than twice their height apart.
+- Text in an overlay (60xx,3000), a presentation state, or another object. These are outside the pixel samples.
+- Identifying graphics that are not text, such as a face, a barcode or a logo.
+
+It can also censor non-text, such as a ruler or a scale bar, on the background.
+
+The detector is a mitigation, not proof that no identifier remains. A later release adds a pinned text-detection model, run on the CPU, to improve recall.
+
 ## Pixel and disclosure limits
 
-The tool does not decode pixel samples and does not claim the Clean Pixel Data Option. The validator emits the warning `pixel_data_not_assessed` when Pixel Data is present. DICOM PS3.15 notes that applying an attribute confidentiality profile does not guarantee that the complete information object is de-identified.
+The tool does not claim the Clean Pixel Data Option. Under `safe-harbor-metadata` it decodes pixel samples to censor burned-in text, as the next section describes. The validator emits the warning `pixel_data_not_assessed` when Pixel Data is present and the check is off, and `pixel_text_check_heuristic` when the check ran. DICOM PS3.15 notes that applying an attribute confidentiality profile does not guarantee that the complete information object is de-identified.
 
 The tool controls these pixel risks:
 

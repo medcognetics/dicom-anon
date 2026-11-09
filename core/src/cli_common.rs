@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
 
+use crate::BurnedInText;
+
 use crate::{DicomOption, ProfileConfiguration, SafePrivateElement, SecretKey};
 
 /// `--version` text: crate version and the source commit recorded at build time.
@@ -61,6 +63,9 @@ pub struct ProfileArgs {
     /// Permit only this SOP Class UID; repeat as needed. Other SOP Classes fail.
     #[arg(long, value_name = "UID")]
     pub allow_sop_class: Vec<String>,
+    /// Burned-in text in the pixel samples: `auto` censors it under safe-harbor-metadata.
+    #[arg(long, value_enum, default_value_t = BurnedInText::Auto)]
+    pub burned_in_text: BurnedInText,
 }
 
 impl ProfileArgs {
@@ -102,6 +107,7 @@ impl ProfileArgs {
             profile.uid_mappings = read_json(path, "UID map")?;
         }
         profile.require_no_burned_in_annotation |= self.require_no_burned_in_annotation;
+        profile.burned_in_text = self.burned_in_text;
         profile
             .sop_class_allowlist
             .extend(self.allow_sop_class.iter().cloned());
@@ -334,6 +340,7 @@ mod tests {
             uid_map: None,
             require_no_burned_in_annotation: false,
             allow_sop_class: Vec::new(),
+            burned_in_text: BurnedInText::Auto,
         }
     }
 

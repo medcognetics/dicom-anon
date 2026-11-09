@@ -118,6 +118,15 @@ pub enum Error {
     /// The burned-in annotation gate requires Burned In Annotation=NO.
     #[error("Burned In Annotation (0028,0301) is not NO; pixel review is required")]
     BurnedInAnnotationNotNo,
+    /// Burned-in text censoring is on, and the pixel samples cannot be decoded.
+    #[error("pixel data was not assessed for burned-in text: {0}")]
+    PixelTextNotAssessed(String),
+    /// A line of burned-in text lies over tissue, so it cannot be censored.
+    #[error("burned-in text over tissue in frame {frame}; it cannot be censored safely")]
+    BurnedInTextOverTissue {
+        /// Zero-based frame index.
+        frame: usize,
+    },
     /// The SOP Class UID is absent or not in the configured allowlist.
     #[error("SOP Class UID is not in the configured SOP Class allowlist")]
     SopClassNotAllowed,
