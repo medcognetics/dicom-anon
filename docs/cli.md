@@ -140,7 +140,7 @@ A descriptor map is a JSON object keyed by canonical eight-digit tag, then exact
 }
 ```
 
-`descriptor-maps/breast-imaging-ps3.16-2026d.json` is a reviewed versioned map for the mammography view, view modifier, and breast anatomic region codes. `descriptor-maps/breast-imaging-references-ps3.16-2026d.json` covers the Partial View, Source Image Purpose of Reference, and Image Derivation codes. [Conformance and scope](conformance.md#text-attributes-outside-table-e1-1) gives their contents and the attributes that Safe Harbor mode changes. The guard applies to a tag at every nesting level. Before you enable it, add reviewed maps for any code sequence that your objects contain and these maps do not cover; [Conformance and scope](conformance.md#detection-and-fail-closed-control) gives the procedure. For a mammography inference pipeline:
+`descriptor-maps/breast-imaging-ps3.16-2026d.json` is a reviewed versioned map for the mammography view, view modifier, and breast anatomic region codes. `descriptor-maps/breast-imaging-references-ps3.16-2026d.json` covers the Partial View, Referenced and Source Image Purpose of Reference, and Image Derivation codes. [Conformance and scope](conformance.md#text-attributes-outside-table-e1-1) gives their contents and the attributes that Safe Harbor mode changes. The guard applies to a tag at every nesting level. Before you enable it, add reviewed maps for any code sequence that your objects contain and these maps do not cover; [Conformance and scope](conformance.md#detection-and-fail-closed-control) gives the procedure. For a mammography inference pipeline:
 
 ```console
 dicom-anonymize input.dcm output.dcm \
