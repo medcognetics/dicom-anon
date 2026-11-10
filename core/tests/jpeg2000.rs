@@ -35,6 +35,8 @@ struct Config {
     tile_parts: bool,
     /// Code-block style bits (BYPASS 1, RESET 2, RESTART 4, VSC 8, ERTERM 16, SEGMARK 32).
     code_block_style: i32,
+    /// Resolution levels; 0 means the default of 4.
+    resolutions: i32,
 }
 
 /// One frame: exact-zero background, a noisy tissue band on the right, and three short
@@ -78,7 +80,11 @@ fn encode(samples: &[u16], precision: u32, config: Config) -> Vec<u8> {
     unsafe {
         let mut parameters: opj::opj_cparameters_t = std::mem::zeroed();
         opj::opj_set_default_encoder_parameters(&mut parameters);
-        parameters.numresolution = 4;
+        parameters.numresolution = if config.resolutions > 0 {
+            config.resolutions
+        } else {
+            4
+        };
         parameters.irreversible = i32::from(config.irreversible);
         if let Some(tile) = config.tile {
             parameters.tile_size_on = 1;
@@ -529,4 +535,66 @@ fn a_codestream_with_a_missing_tile_fails_closed() {
     }
     let error = anonymize(&object(missing, uids::JPEG2000_LOSSLESS, 12)).unwrap_err();
     assert!(error.to_string().contains("missing tiles"), "{error}");
+}
+
+#[test]
+fn the_codestream_walk_reads_the_wavelet_transform() {
+    let source = frame(4095, 1800);
+    let reversible = encode(&source, 12, Config::default());
+    let irreversible = encode(
+        &source,
+        12,
+        Config {
+            irreversible: true,
+            ..Config::default()
+        },
+    );
+    assert!(!dicom_anon::walk_jpeg2000_codestream(&reversible).unwrap());
+    assert!(dicom_anon::walk_jpeg2000_codestream(&irreversible).unwrap());
+}
+
+#[test]
+fn censored_9_7_output_is_marked_lossy_under_either_transfer_syntax() {
+    // With one resolution level the 9/7 path adds only quantization, which reconstructs
+    // this frame exactly at full quality, so its text can be censored. The output must
+    // still be marked lossy, because the codestream says 9/7.
+    let source = frame(4095, 1800);
+    let codestream = encode(
+        &source,
+        12,
+        Config {
+            irreversible: true,
+            resolutions: 1,
+            ..Config::default()
+        },
+    );
+    for transfer_syntax in [uids::JPEG2000_LOSSLESS, uids::JPEG2000] {
+        let mut source_object = object(codestream.clone(), transfer_syntax, 12);
+        // A source that wrongly says lossless.
+        source_object.put_str(tags::LOSSY_IMAGE_COMPRESSION, VR::CS, "00");
+        let (output, report) = anonymize(&source_object).unwrap();
+        assert!(
+            report.burned_in_text.regions_censored > 0,
+            "{transfer_syntax}"
+        );
+        let value = |tag| {
+            output
+                .element(tag)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .trim()
+                .to_owned()
+        };
+        assert_eq!(
+            value(tags::LOSSY_IMAGE_COMPRESSION),
+            "01",
+            "{transfer_syntax}"
+        );
+        assert_eq!(
+            value(tags::LOSSY_IMAGE_COMPRESSION_METHOD),
+            "ISO_15444_1",
+            "{transfer_syntax}"
+        );
+    }
 }

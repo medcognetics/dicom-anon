@@ -165,7 +165,11 @@ fn check_jpeg2000_tiles(codestream: &[u8], tiles: u64) -> Result<bool> {
         if tile >= tile_count {
             return Err(malformed());
         }
+        // TPsot is one byte, so a tile has at most 255 tile-parts.
         parts[tile] += 1;
+        if parts[tile] > 255 {
+            return Err(malformed());
+        }
         if total != 0 {
             declared[tile] = u16::from(total);
         }
@@ -823,6 +827,10 @@ mod tests {
         let mut reserved = skeleton(1, &[(0, 1)]);
         reserved.splice(59..59, [0xFF, 0x30]);
         assert!(!check_jpeg2000_tiles(&reserved, 1).unwrap());
+        // More than 255 tile-parts for one tile.
+        let many: Vec<(u16, u8)> = vec![(0, 0); 256];
+        assert!(check_jpeg2000_tiles(&skeleton(1, &many), 1).is_err());
+        assert!(check_jpeg2000_tiles(&skeleton(1, &many[..255]), 1).is_ok());
         // An unknown transform value.
         assert!(check_jpeg2000_tiles(&skeleton(7, &[(0, 1)]), 1).is_err());
     }

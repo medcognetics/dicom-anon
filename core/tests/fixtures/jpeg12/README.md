@@ -22,4 +22,3 @@ Source `source.pgm` (37 x 23, maxval 4095):
 | `sequential_37x23_sampling2x2.jpg` | `-quality 90 -sample 2x2` |
 | `progressive_37x23_q90.jpg` | `-quality 90 -progressive` |
 | `sequential_64x16_q100_checker.jpg` | `-quality 100` on 8 x 8 blocks alternating 0 and 4095 (DC categories up to 15) |
-| `color/rgb_37x23.jpg` | `-quality 90` on an RGB version of the source (planes `v`, `v` reversed, `v // 2`) |
