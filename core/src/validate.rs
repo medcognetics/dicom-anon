@@ -802,7 +802,8 @@ fn profile_name(profile: &ProfileConfiguration) -> String {
         } else {
             preset.burned_in_text
         };
-        // `text_over_tissue` has no effect when nothing is censored.
+        // `text_over_tissue` and the detector choice do not change which attributes the
+        // profile keeps, so they do not change the name.
         let text_over_tissue = if profile.censors_burned_in_text() {
             preset.text_over_tissue
         } else {
@@ -814,6 +815,8 @@ fn profile_name(profile: &ProfileConfiguration) -> String {
                 fail_on_unmapped_sequences: profile.fail_on_unmapped_sequences.clone(),
                 burned_in_text,
                 text_over_tissue,
+                burned_in_text_detector: profile.burned_in_text_detector,
+                text_detector_dir: profile.text_detector_dir.clone(),
                 ..preset
             }
     };

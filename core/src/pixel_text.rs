@@ -128,6 +128,10 @@ pub struct CensorCounts {
     /// Without that setting such a region fails closed.
     #[serde(default)]
     pub regions_left_over_tissue: u64,
+    /// Text boxes that the pinned model found, before the censor rules apply. The model
+    /// runs once per object, on the maximum projection of its frames.
+    #[serde(default)]
+    pub model_boxes: u64,
 }
 
 /// The result of censoring one object.
@@ -954,12 +958,184 @@ fn censor_frame_counted(
     Ok((censored, pixels, left_in_place, left_over_tissue))
 }
 
+#[cfg(feature = "text-detector")]
+fn load_detector(
+    profile: &crate::ProfileConfiguration,
+) -> Result<std::sync::Arc<crate::text_detector::Detector>> {
+    let dir = profile
+        .text_detector_dir
+        .as_deref()
+        .ok_or_else(|| not_assessed("burned_in_text_detector needs text_detector_dir"))?;
+    crate::text_detector::detector(std::path::Path::new(dir))
+}
+
+#[cfg(not(feature = "text-detector"))]
+fn load_detector(_profile: &crate::ProfileConfiguration) -> Result<NoDetector> {
+    Err(not_assessed(
+        "this build has no text detector; build with the text-detector feature",
+    ))
+}
+
+/// Stands in for the detector in a build without it; it is never constructed.
+#[cfg(not(feature = "text-detector"))]
+enum NoDetector {}
+
+#[cfg(not(feature = "text-detector"))]
+impl NoDetector {
+    fn detect(
+        &self,
+        _: &[u16],
+        _: usize,
+        _: usize,
+        _: u16,
+        _: u16,
+    ) -> Result<Vec<crate::text_detector::TextBox>> {
+        match *self {}
+    }
+}
+
+/// The frame with text bright: MONOCHROME1 is inverted.
+fn frame_view(samples: &[u16], geometry: &Geometry) -> Vec<u16> {
+    let max_value = geometry.max_value();
+    if geometry.inverted {
+        samples
+            .iter()
+            .map(|&value| max_value - value.min(max_value))
+            .collect()
+    } else {
+        samples.to_vec()
+    }
+}
+
+/// The model boxes with a margin of 2 pixels, clamped to the frame, and with every two
+/// boxes that overlap or touch joined into their bounding box, as stacked lines are for
+/// the heuristic. Each edge test then sees only pixels outside every box.
+fn merged_boxes(
+    boxes: &[crate::text_detector::TextBox],
+    rows: usize,
+    columns: usize,
+) -> Vec<(usize, usize, usize, usize)> {
+    let mut merged: Vec<(usize, usize, usize, usize)> = boxes
+        .iter()
+        .map(|text| {
+            (
+                text.top.saturating_sub(2),
+                text.left.saturating_sub(2),
+                (text.bottom + 2).min(rows - 1),
+                (text.right + 2).min(columns - 1),
+            )
+        })
+        .collect();
+    loop {
+        let mut joined = false;
+        let mut index = 0;
+        while index < merged.len() {
+            let mut other = index + 1;
+            while other < merged.len() {
+                let (a, b) = (merged[index], merged[other]);
+                if a.0 <= b.2 + 1 && b.0 <= a.2 + 1 && a.1 <= b.3 + 1 && b.1 <= a.3 + 1 {
+                    merged[index] = (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3));
+                    merged.swap_remove(other);
+                    joined = true;
+                } else {
+                    other += 1;
+                }
+            }
+            index += 1;
+        }
+        if !joined {
+            return merged;
+        }
+    }
+}
+
+/// Highest model box, in frame pixels, that can be censored: two of the highest glyphs.
+/// A higher box, or one that covers more than 1/16 of the frame, is not a text line, so
+/// it is handled as text over tissue and is never written. This keeps a false box around
+/// anatomy on a dark background from erasing it.
+const MAX_MODEL_BOX_HEIGHT: usize = 2 * MAX_GLYPH_HEIGHT;
+
+/// Censor the model's text boxes in one frame, in place, with the same safety rule as
+/// for the heuristic: nothing that can connect to tissue is written. A box, with a
+/// margin, is censored only when every pixel on its edge is background (the frame's
+/// darkest value, in a dark region that reaches the frame border) and the box is no
+/// larger than a text line. Every non-background pixel inside is then closed in by
+/// background, and it is overwritten. Otherwise a box of one or two characters (at most
+/// three times as wide as it is high) is left in place, and a longer or larger one is
+/// text over tissue. Returns the same counts as the heuristic.
+fn censor_frame_boxes(
+    samples: &mut [u16],
+    view: &[u16],
+    geometry: &Geometry,
+    frame: usize,
+    over_tissue: TextOverTissue,
+    boxes: &[crate::text_detector::TextBox],
+) -> Result<(u64, u64, u64, u64)> {
+    let (rows, columns) = (geometry.rows, geometry.columns);
+    let (mut censored, mut pixels, mut left_in_place, mut left_over_tissue) = (0, 0, 0, 0);
+    if boxes.is_empty() {
+        return Ok((0, 0, 0, 0));
+    }
+    let Some((&low, &high)) = view.iter().min().zip(view.iter().max()) else {
+        return Ok((0, 0, 0, 0));
+    };
+    let has_background = high > low && f64::from(low) <= BACKGROUND_LEVEL * f64::from(high);
+    let (dark, dark_labels) = if has_background {
+        dark_regions(view, rows, columns, low)?
+    } else {
+        (Vec::new(), vec![0; view.len()])
+    };
+    let outside = |index: usize| {
+        let label = dark_labels[index];
+        label > 0 && dark[(label - 1) as usize].border
+    };
+    let fill = if geometry.inverted {
+        geometry.max_value() - low
+    } else {
+        low
+    };
+    for &(top, left, bottom, right) in &merged_boxes(boxes, rows, columns) {
+        let (height, width) = (bottom - top + 1, right - left + 1);
+        let too_large = height > MAX_MODEL_BOX_HEIGHT || 16 * height * width > rows * columns;
+        let edge_is_background = !too_large
+            && (left..=right).all(|column| {
+                outside(top * columns + column) && outside(bottom * columns + column)
+            })
+            && (top..=bottom)
+                .all(|row| outside(row * columns + left) && outside(row * columns + right));
+        if !edge_is_background {
+            if !too_large && width <= 3 * height {
+                left_in_place += 1;
+                continue;
+            }
+            if over_tissue == TextOverTissue::Fail {
+                return Err(Error::BurnedInTextOverTissue { frame });
+            }
+            left_over_tissue += 1;
+            continue;
+        }
+        for row in top..=bottom {
+            for column in left..=right {
+                let index = row * columns + column;
+                if view[index] != low && samples[index] != fill {
+                    samples[index] = fill;
+                    pixels += 1;
+                }
+            }
+        }
+        censored += 1;
+    }
+    Ok((censored, pixels, left_in_place, left_over_tissue))
+}
+
 /// Decode, inspect and censor every frame of an object.
 pub(crate) fn censor(
     object: &InMemDicomObject,
     transfer_syntax: &str,
-    over_tissue: TextOverTissue,
+    profile: &crate::ProfileConfiguration,
 ) -> Result<Censored> {
+    let over_tissue = profile.text_over_tissue;
+    let detector_mode = profile.burned_in_text_detector;
     if object.get(tags::PIXEL_DATA).is_none()
         && object.get(tags::FLOAT_PIXEL_DATA).is_none()
         && object.get(tags::DOUBLE_FLOAT_PIXEL_DATA).is_none()
@@ -984,18 +1160,70 @@ pub(crate) fn censor(
         return Err(not_assessed("a sample uses bits above Bits Stored"));
     }
     let mut counts = CensorCounts::default();
-    for (index, frame) in samples
-        .chunks_mut(geometry.rows * geometry.columns)
-        .enumerate()
-    {
-        let (regions, pixels, left_in_place, left_over_tissue) =
-            censor_frame_counted(frame, &geometry, index, over_tissue)?;
-        counts.frames_assessed += 1;
-        counts.regions_censored += regions;
-        counts.pixels_censored += pixels;
-        counts.regions_left_in_place += left_in_place;
-        counts.regions_left_over_tissue += left_over_tissue;
+    let frame_samples = geometry.rows * geometry.columns;
+    // With both detectors, the first heuristic pass leaves what it cannot censor, because
+    // the model can still censor it: anti-aliased or lossy text has edge pixels that the
+    // heuristic treats as tissue. A last heuristic pass then applies the configured rule
+    // to whatever is left.
+    if detector_mode.uses_heuristic() {
+        let first_rule = if detector_mode.uses_model() {
+            TextOverTissue::Leave
+        } else {
+            over_tissue
+        };
+        for (index, frame) in samples.chunks_mut(frame_samples).enumerate() {
+            let (regions, pixels, left_in_place, left_over_tissue) =
+                censor_frame_counted(frame, &geometry, index, first_rule)?;
+            counts.regions_censored += regions;
+            counts.pixels_censored += pixels;
+            if !detector_mode.uses_model() {
+                counts.regions_left_in_place += left_in_place;
+                counts.regions_left_over_tissue += left_over_tissue;
+            }
+        }
     }
+    if detector_mode.uses_model() {
+        let model = load_detector(profile)?;
+        // The model runs once per object, after the heuristic, so that text it censored
+        // is background here. For several frames it runs on their maximum projection:
+        // text that is bright in any frame is bright in the projection, so one run finds
+        // it, and each frame then applies the boxes with its own background test.
+        let mut projection = vec![0_u16; frame_samples];
+        for frame in samples.chunks(frame_samples) {
+            for (maximum, value) in projection.iter_mut().zip(frame_view(frame, &geometry)) {
+                *maximum = (*maximum).max(value);
+            }
+        }
+        let (low, high) = projection
+            .iter()
+            .fold((u16::MAX, 0), |(low, high), &value| {
+                (low.min(value), high.max(value))
+            });
+        if high > low {
+            let boxes = model.detect(&projection, geometry.rows, geometry.columns, low, high)?;
+            counts.model_boxes += boxes.len() as u64;
+            for (index, frame) in samples.chunks_mut(frame_samples).enumerate() {
+                let view = frame_view(frame, &geometry);
+                let (regions, pixels, left_in_place, left_over_tissue) =
+                    censor_frame_boxes(frame, &view, &geometry, index, over_tissue, &boxes)?;
+                counts.regions_censored += regions;
+                counts.pixels_censored += pixels;
+                counts.regions_left_in_place += left_in_place;
+                counts.regions_left_over_tissue += left_over_tissue;
+            }
+        }
+    }
+    if detector_mode == crate::text_detector::TextDetector::Both {
+        for (index, frame) in samples.chunks_mut(frame_samples).enumerate() {
+            let (regions, pixels, left_in_place, left_over_tissue) =
+                censor_frame_counted(frame, &geometry, index, over_tissue)?;
+            counts.regions_censored += regions;
+            counts.pixels_censored += pixels;
+            counts.regions_left_in_place += left_in_place;
+            counts.regions_left_over_tissue += left_over_tissue;
+        }
+    }
+    counts.frames_assessed = geometry.frames as u64;
     if counts.regions_censored == 0 {
         return Ok(Censored {
             counts,
@@ -1059,6 +1287,119 @@ mod tests {
             bits_stored: 12,
             inverted: false,
         }
+    }
+
+    fn text_box(
+        top: usize,
+        left: usize,
+        bottom: usize,
+        right: usize,
+    ) -> crate::text_detector::TextBox {
+        crate::text_detector::TextBox {
+            top,
+            left,
+            bottom,
+            right,
+        }
+    }
+
+    /// A 256 x 512 frame: background, tissue in columns 400 and up, and a bright block
+    /// at rows 20..40, columns 20..120.
+    fn model_frame() -> (Vec<u16>, Geometry) {
+        let (rows, columns) = (256, 512);
+        let mut samples = vec![0_u16; rows * columns];
+        for row in 0..rows {
+            for column in 400..columns {
+                samples[row * columns + column] = 1500 + (row % 5) as u16;
+            }
+            if (20..40).contains(&row) {
+                for column in 20..120 {
+                    samples[row * columns + column] = 4095;
+                }
+            }
+        }
+        (samples, geometry(rows, columns))
+    }
+
+    #[test]
+    fn overlapping_model_boxes_are_censored_as_one() {
+        let (mut samples, geometry) = model_frame();
+        let view = samples.clone();
+        // Two boxes that each end inside the block; joined, their edge is background.
+        let boxes = [text_box(18, 18, 42, 80), text_box(18, 70, 42, 122)];
+        let (censored, pixels, left, over) = censor_frame_boxes(
+            &mut samples,
+            &view,
+            &geometry,
+            0,
+            TextOverTissue::Fail,
+            &boxes,
+        )
+        .unwrap();
+        assert_eq!((censored, left, over), (1, 0, 0));
+        assert_eq!(pixels, 20 * 100);
+        assert!(samples.iter().all(|&value| value != 4095));
+    }
+
+    #[test]
+    fn a_model_box_larger_than_a_text_line_is_never_written() {
+        let (mut samples, geometry) = model_frame();
+        let view = samples.clone();
+        let original = samples.clone();
+        // Higher than two of the highest glyphs, on the background only.
+        let tall = [text_box(0, 0, MAX_MODEL_BOX_HEIGHT + 4, 200)];
+        let error = censor_frame_boxes(
+            &mut samples.clone(),
+            &view,
+            &geometry,
+            0,
+            TextOverTissue::Fail,
+            &tall,
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::BurnedInTextOverTissue { frame: 0 }));
+        let (censored, _, left, over) = censor_frame_boxes(
+            &mut samples,
+            &view,
+            &geometry,
+            0,
+            TextOverTissue::Leave,
+            &tall,
+        )
+        .unwrap();
+        assert_eq!((censored, left, over), (0, 0, 1));
+        assert_eq!(samples, original);
+    }
+
+    #[test]
+    fn a_model_box_that_reaches_tissue_is_left_or_fails_closed() {
+        let (mut samples, geometry) = model_frame();
+        let view = samples.clone();
+        let original = samples.clone();
+        // A short box (one or two characters) over the tissue edge is left in place.
+        let short = [text_box(100, 390, 120, 410)];
+        let (censored, _, left, over) = censor_frame_boxes(
+            &mut samples,
+            &view,
+            &geometry,
+            0,
+            TextOverTissue::Fail,
+            &short,
+        )
+        .unwrap();
+        assert_eq!((censored, left, over), (0, 1, 0));
+        // A long one is text over tissue.
+        let long = [text_box(100, 300, 120, 420)];
+        assert!(censor_frame_boxes(
+            &mut samples,
+            &view,
+            &geometry,
+            0,
+            TextOverTissue::Fail,
+            &long,
+        )
+        .is_err());
+        assert_eq!(samples, original);
     }
 
     #[test]

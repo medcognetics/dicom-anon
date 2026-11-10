@@ -20,6 +20,9 @@ export declare function anonymizeStudy(instances: Array<Buffer>, key: Buffer, pa
 /** De-identify DICOM Part 10 bytes and assign random Safe Harbor replacement UIDs. */
 export declare function anonymizeWithGeneratedUidMap(data: Buffer, key: Buffer, patientScope?: string | undefined | null, configurationJson?: string | undefined | null): GeneratedUidMapResult
 
+/** Check the text detector installed in `path` against its pinned SHA-256 values. */
+export declare function checkTextDetector(path: string): void
+
 /** Result returned by `anonymizeWithGeneratedUidMap`. */
 export interface GeneratedUidMapResult {
   /** Complete DICOM Part 10 output. */
@@ -29,6 +32,9 @@ export interface GeneratedUidMapResult {
   /** Complete source-to-replacement UID map. Keep it under re-identification custody. */
   uidMapJson: string
 }
+
+/** Download the pinned text detector into `path`, which must not exist, and check it. */
+export declare function installTextDetector(path: string): void
 
 /** Return a JSON list of `{path, uid}` source UID occurrences that the profile replaces. */
 export declare function requiredUids(data: Buffer, key: Buffer, patientScope?: string | undefined | null, configurationJson?: string | undefined | null): string
