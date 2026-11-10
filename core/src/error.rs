@@ -127,6 +127,9 @@ pub enum Error {
         /// Zero-based frame index.
         frame: usize,
     },
+    /// The pinned text detector could not be installed.
+    #[error("text detector install failed: {0}")]
+    TextDetectorInstall(String),
     /// The SOP Class UID is absent or not in the configured allowlist.
     #[error("SOP Class UID is not in the configured SOP Class allowlist")]
     SopClassNotAllowed,

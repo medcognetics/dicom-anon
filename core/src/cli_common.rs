@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use clap::{Args, ValueEnum};
 
 use crate::{
-    BurnedInText, DicomOption, ProfileConfiguration, SafePrivateElement, SecretKey, TextOverTissue,
+    BurnedInText, DicomOption, ProfileConfiguration, SafePrivateElement, SecretKey, TextDetector,
+    TextOverTissue,
 };
 
 /// `--version` text: crate version and the source commit recorded at build time.
@@ -69,6 +70,12 @@ pub struct ProfileArgs {
     /// Text over tissue that cannot be censored: `fail`, or `leave` it and count it.
     #[arg(long, value_enum, default_value_t = TextOverTissue::Fail)]
     pub text_over_tissue: TextOverTissue,
+    /// Burned-in text detector: `heuristic`, the pinned `model`, or `both`.
+    #[arg(long, value_enum, default_value_t = TextDetector::Heuristic)]
+    pub burned_in_text_detector: TextDetector,
+    /// Installed text detector folder, required with `model` or `both`.
+    #[arg(long, value_name = "DIR")]
+    pub text_detector_dir: Option<PathBuf>,
 }
 
 impl ProfileArgs {
@@ -112,6 +119,11 @@ impl ProfileArgs {
         profile.require_no_burned_in_annotation |= self.require_no_burned_in_annotation;
         profile.burned_in_text = self.burned_in_text;
         profile.text_over_tissue = self.text_over_tissue;
+        profile.burned_in_text_detector = self.burned_in_text_detector;
+        profile.text_detector_dir = self
+            .text_detector_dir
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
         profile
             .sop_class_allowlist
             .extend(self.allow_sop_class.iter().cloned());
@@ -346,6 +358,8 @@ mod tests {
             allow_sop_class: Vec::new(),
             burned_in_text: BurnedInText::Auto,
             text_over_tissue: TextOverTissue::Fail,
+            burned_in_text_detector: TextDetector::Heuristic,
+            text_detector_dir: None,
         }
     }
 

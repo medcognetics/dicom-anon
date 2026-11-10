@@ -10,6 +10,7 @@ mod pixel_text;
 mod profile;
 mod pseudonym;
 mod temporal;
+mod text_detector;
 mod uid_map;
 mod validate;
 
@@ -23,6 +24,12 @@ pub use profile::{
     PROFILE_VERSION, TOOL_VERSION,
 };
 pub use pseudonym::SecretKey;
+#[cfg(feature = "text-detector-install")]
+pub use text_detector::install_text_detector;
+pub use text_detector::{
+    runtime_pin, RuntimePin, TextDetector, MODEL_FILE, MODEL_SHA256, MODEL_URL,
+    ONNX_RUNTIME_VERSION,
+};
 pub use uid_map::RequiredUid;
 pub use validate::{
     validate_file, validate_file_with_options, validate_object, validate_object_with_options,

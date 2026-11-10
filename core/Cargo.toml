@@ -11,6 +11,14 @@ repository.workspace = true
 [lib]
 name = "dicom_anon"
 
+[features]
+default = []
+# The pinned ONNX text detector for the burned-in text check. ONNX Runtime is loaded at
+# run time, so this links no native library.
+text-detector = ["dep:ort", "dep:sha2"]
+# `install_text_detector`, which downloads the pinned model and ONNX Runtime library.
+text-detector-install = ["text-detector", "dep:flate2", "dep:tar", "dep:ureq"]
+
 [dependencies]
 blake3.workspace = true
 chrono.workspace = true
@@ -18,14 +26,19 @@ clap.workspace = true
 dicom-core.workspace = true
 dicom-dictionary-std.workspace = true
 dicom-object.workspace = true
+flate2 = { workspace = true, optional = true }
 getrandom.workspace = true
 jpeg-decoder.workspace = true
+ort = { workspace = true, optional = true }
 pure_jpeg2k.workspace = true
 pure_jpegls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2 = { workspace = true, optional = true }
+tar = { workspace = true, optional = true }
 tempfile.workspace = true
 thiserror.workspace = true
+ureq = { workspace = true, optional = true }
 zeroize.workspace = true
 
 [dev-dependencies]

@@ -12,6 +12,7 @@ use dicom_object::mem::InMemDicomObject;
 use serde::{Deserialize, Serialize};
 
 use crate::pixel_text::{BurnedInText, TextOverTissue};
+use crate::text_detector::TextDetector;
 use crate::{Error, Result};
 
 /// Human-readable name of the default extended DICOM profile.
@@ -174,6 +175,14 @@ pub struct ProfileConfiguration {
     /// output, and `leave` keeps the text and counts it. `leave` is a temporary relief.
     #[serde(default)]
     pub text_over_tissue: TextOverTissue,
+    /// Which detector finds burned-in text: `heuristic` (the default), `model` or `both`.
+    /// The model is the pinned PP-OCRv4 mobile text detector.
+    #[serde(default)]
+    pub burned_in_text_detector: TextDetector,
+    /// Folder of the installed text detector (`install_text_detector`), required when
+    /// `burned_in_text_detector` uses the model.
+    #[serde(default)]
+    pub text_detector_dir: Option<String>,
 }
 
 impl Default for ProfileConfiguration {
@@ -198,6 +207,8 @@ impl ProfileConfiguration {
             fail_on_unmapped_sequences: BTreeSet::new(),
             burned_in_text: BurnedInText::Auto,
             text_over_tissue: TextOverTissue::Fail,
+            burned_in_text_detector: TextDetector::Heuristic,
+            text_detector_dir: None,
         }
     }
 

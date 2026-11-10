@@ -255,7 +255,7 @@ impl Anonymizer {
             Some(pixel_text::censor(
                 source,
                 source_transfer_syntax,
-                self.options.profile.text_over_tissue,
+                &self.options.profile,
             )?)
         } else {
             None
