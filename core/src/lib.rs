@@ -1,8 +1,11 @@
 #![doc = include_str!("../../README.md")]
+// The libjpeg-turbo FFI in `codec` is the only exception.
+#![deny(unsafe_code)]
 
 mod anonymize;
 #[doc(hidden)]
 pub mod cli_common;
+mod codec;
 mod error;
 mod io;
 mod pixel;

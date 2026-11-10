@@ -30,6 +30,7 @@ CI_CONTAINER_PACKAGES = (
     "build-essential",
     "ca-certificates",
     "clang",
+    "cmake",
     "curl",
     "git",
     "libclang-dev",
@@ -41,6 +42,7 @@ CI_CONTAINER_PACKAGES = (
 )
 DEPRECATION_NATIVE_PACKAGES = (
     "clang",
+    "cmake",
     "libclang-dev",
     "libleptonica-dev",
     "libtesseract-dev",

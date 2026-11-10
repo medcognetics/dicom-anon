@@ -38,6 +38,7 @@ jobs:
             build-essential \
             ca-certificates \
             clang \
+            cmake \
             curl \
             gh \
             git \
