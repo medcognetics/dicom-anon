@@ -28,7 +28,7 @@ impl FrameInfo {
     }
 }
 
-/// Decode one JPEG 2000 codestream or JP2 file into `rows * columns` samples.
+/// Decode one JPEG 2000 codestream into `rows * columns` samples.
 ///
 /// OpenJPEG runs in strict mode, so a truncated codestream is an error and not a partial
 /// image. The image must have one unsigned component with the frame's size and no
@@ -78,30 +78,9 @@ pub(crate) fn decode_jpeg2000(codestream: &[u8], info: FrameInfo) -> Result<Vec<
 /// Most tiles in one JPEG 2000 frame. Each tile costs OpenJPEG fixed work and memory.
 const MAX_JPEG2000_TILES: u64 = 4096;
 
-/// The SIZ segment of a raw codestream, or of the `jp2c` box of a JP2 file.
-fn jpeg2000_siz(data: &[u8]) -> Option<&[u8]> {
-    let codestream = if data.starts_with(&[0xFF, 0x4F]) {
-        data
-    } else {
-        // JP2 boxes: 4-byte length, 4-byte type; length 1 means an 8-byte length follows.
-        let mut position = 0;
-        loop {
-            let header = data.get(position..position + 8)?;
-            let length = u64::from(u32::from_be_bytes(header[..4].try_into().ok()?));
-            let (start, length) = match length {
-                1 => (
-                    position + 16,
-                    u64::from_be_bytes(data.get(position + 8..position + 16)?.try_into().ok()?),
-                ),
-                0 => (position + 8, (data.len() - position) as u64),
-                _ => (position + 8, length),
-            };
-            if &header[4..8] == b"jp2c" {
-                break data.get(start..)?;
-            }
-            position = position.checked_add(usize::try_from(length).ok()?)?;
-        }
-    };
+/// The SIZ segment of a raw codestream. DICOM does not allow the JP2 file header in
+/// Pixel Data (PS3.5 A.4.4), so a fragment must start with SOC and SIZ.
+fn jpeg2000_siz(codestream: &[u8]) -> Option<&[u8]> {
     if !codestream.starts_with(&[0xFF, 0x4F, 0xFF, 0x51]) {
         return None;
     }
@@ -669,6 +648,20 @@ mod tests {
                     .iter()
                     .all(|&value| u32::from(value) <= frame.max_value()));
             }
+        }
+    }
+
+    #[test]
+    fn only_a_raw_codestream_is_read() {
+        // A JP2 file, a JP2 box with a zero extended length, and a SIZ that runs past the
+        // data are all rejected before OpenJPEG runs.
+        for data in [
+            [&[0, 0, 0, 12][..], b"jP  ", &[0x0D, 0x0A, 0x87, 0x0A]].concat(),
+            [&[0, 0, 0, 1][..], b"free", &[0; 8]].concat(),
+            vec![0xFF, 0x4F, 0xFF, 0x51, 0x00, 0x40, 0, 0],
+        ] {
+            assert!(jpeg2000_siz(&data).is_none(), "{data:?}");
+            assert!(decode_jpeg2000(&data, info(4, 4, 12)).is_err());
         }
     }
 
