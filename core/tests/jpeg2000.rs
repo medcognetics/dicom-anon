@@ -491,3 +491,42 @@ fn a_siz_with_too_many_tiles_fails_closed_before_decoding() {
     let error = anonymize(&object(codestream, uids::JPEG2000_LOSSLESS, 12)).unwrap_err();
     assert!(error.to_string().contains("too many tiles"), "{error}");
 }
+
+/// The start offsets of the SOT markers of a codestream, found by walking tile-parts.
+fn tile_part_starts(codestream: &[u8]) -> Vec<usize> {
+    let mut starts = Vec::new();
+    let mut position = codestream
+        .windows(2)
+        .position(|pair| pair == [0xFF, 0x90])
+        .unwrap();
+    while codestream.get(position..position + 2) == Some(&[0xFF, 0x90]) {
+        starts.push(position);
+        let length = u32::from_be_bytes(codestream[position + 6..position + 10].try_into().unwrap())
+            as usize;
+        position += length;
+    }
+    starts
+}
+
+#[test]
+fn a_codestream_with_a_missing_tile_fails_closed() {
+    // OpenJPEG fills a missing tile with zeroes, even in strict mode.
+    let source = frame(4095, 1800);
+    let codestream = encode(
+        &source,
+        12,
+        Config {
+            tile: Some(64),
+            ..Config::default()
+        },
+    );
+    let starts = tile_part_starts(&codestream);
+    assert_eq!(starts.len(), 6);
+    let mut missing = codestream[..starts[2]].to_vec();
+    missing.extend_from_slice(&codestream[starts[3]..]);
+    if missing.len() % 2 == 1 {
+        missing.push(0);
+    }
+    let error = anonymize(&object(missing, uids::JPEG2000_LOSSLESS, 12)).unwrap_err();
+    assert!(error.to_string().contains("missing tiles"), "{error}");
+}

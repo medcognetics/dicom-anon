@@ -135,6 +135,8 @@ pub(crate) struct Censored {
     pub counts: CensorCounts,
     /// The new native Pixel Data when a region was censored.
     pub pixel_data: Option<InMemElement>,
+    /// A JPEG 2000 frame used the irreversible 9/7 wavelet, so the samples are lossy.
+    pub irreversible: bool,
 }
 
 struct Geometry {
@@ -347,11 +349,13 @@ fn geometry(object: &InMemDicomObject) -> Result<Geometry> {
     })
 }
 
-/// Decode every frame into one sample buffer, frame after frame.
+/// Decode every frame into one sample buffer, frame after frame. `irreversible` is set
+/// when a JPEG 2000 frame uses the irreversible 9/7 wavelet.
 fn decode_frames(
     object: &InMemDicomObject,
     transfer_syntax: &str,
     geometry: &Geometry,
+    irreversible: &mut bool,
 ) -> Result<Vec<u16>> {
     let element = object
         .get(tags::PIXEL_DATA)
@@ -440,7 +444,9 @@ fn decode_frames(
                 bits_stored: geometry.bits_stored,
             };
             let samples = if JPEG_2000.contains(&transfer_syntax) {
-                crate::codec::decode_jpeg2000(codestream, info)?
+                let frame = crate::codec::decode_jpeg2000(codestream, info)?;
+                *irreversible |= frame.irreversible;
+                frame.samples
             } else if JPEG_LS.contains(&transfer_syntax) {
                 jpegls::decode(codestream, columns, rows)
                     .map(|(samples, _, _)| samples)
@@ -954,6 +960,7 @@ pub(crate) fn censor(
         return Ok(Censored {
             counts: CensorCounts::default(),
             pixel_data: None,
+            irreversible: false,
         });
     }
     if object.get(tags::FLOAT_PIXEL_DATA).is_some()
@@ -962,7 +969,8 @@ pub(crate) fn censor(
         return Err(not_assessed("floating-point Pixel Data is not supported"));
     }
     let geometry = geometry(object)?;
-    let mut samples = decode_frames(object, transfer_syntax, &geometry)?;
+    let mut irreversible = false;
+    let mut samples = decode_frames(object, transfer_syntax, &geometry, &mut irreversible)?;
     // A sample above Bits Stored is content that the detector would not see.
     let max_value = geometry.max_value();
     if samples.iter().any(|&value| value > max_value) {
@@ -985,6 +993,7 @@ pub(crate) fn censor(
         return Ok(Censored {
             counts,
             pixel_data: None,
+            irreversible,
         });
     }
     // The 16-bit output takes the decoded buffer without a copy.
@@ -1005,6 +1014,7 @@ pub(crate) fn censor(
     Ok(Censored {
         counts,
         pixel_data: Some(pixel_data),
+        irreversible,
     })
 }
 

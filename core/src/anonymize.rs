@@ -346,7 +346,16 @@ impl Anonymizer {
                 .get(tags::LOSSY_IMAGE_COMPRESSION)
                 .and_then(|element| element.to_str().ok())
                 .is_some_and(|value| !value.trim().is_empty());
-            let method = pixel_text::lossy_method(source_transfer_syntax, source_has_value);
+            // A JPEG 2000 codestream with the irreversible 9/7 wavelet is lossy whatever
+            // its transfer syntax and source value say.
+            let method = if censored
+                .as_ref()
+                .is_some_and(|censored| censored.irreversible)
+            {
+                Some("ISO_15444_1")
+            } else {
+                pixel_text::lossy_method(source_transfer_syntax, source_has_value)
+            };
             if let Some(method) = method {
                 // A value that already records lossy compression, possibly with earlier
                 // generations in its values, is kept with its Method.

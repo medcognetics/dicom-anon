@@ -214,6 +214,13 @@ fn class_1_codestreams_decode_within_the_t803_limits() {
     let mut failures = Vec::new();
     for case in &CASES {
         let codestream = std::fs::read(directory.join(case.file)).unwrap();
+        // The tile-part walk that runs before OpenJPEG must accept every conformance file.
+        if let Err(error) = dicom_anon::walk_jpeg2000_codestream(&codestream) {
+            failures.push(format!(
+                "{}: tile-part walk rejected it: {error}",
+                case.file
+            ));
+        }
         let parameters = openjpeg::DecodeParameters::new()
             .strict(true)
             .reduce(case.reduce);

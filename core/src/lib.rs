@@ -6,6 +6,8 @@ mod anonymize;
 #[doc(hidden)]
 pub mod cli_common;
 mod codec;
+#[doc(hidden)]
+pub use codec::walk_jpeg2000_codestream;
 mod error;
 mod io;
 mod pixel;

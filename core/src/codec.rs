@@ -33,9 +33,13 @@ impl FrameInfo {
 /// OpenJPEG runs in strict mode, so a truncated codestream is an error and not a partial
 /// image. The image must have one unsigned component with the frame's size and no
 /// offset, a precision of at most Bits Allocated, and every sample within Bits Stored.
-pub(crate) fn decode_jpeg2000(codestream: &[u8], info: FrameInfo) -> Result<Vec<u16>> {
+/// Every tile must be present: OpenJPEG fills a missing tile with zeroes even in strict
+/// mode. The result says whether the codestream uses the irreversible 9/7 wavelet, which
+/// makes the samples lossy whatever the transfer syntax says.
+pub(crate) fn decode_jpeg2000(codestream: &[u8], info: FrameInfo) -> Result<Jpeg2000Frame> {
     // OpenJPEG sizes its buffers from the codestream, so the header is checked first.
-    check_jpeg2000_header(codestream, info)?;
+    let tiles = check_jpeg2000_header(codestream, info)?;
+    let irreversible = check_jpeg2000_tiles(codestream, tiles)?;
     let parameters = openjpeg::DecodeParameters::new().strict(true);
     let image = openjpeg::Image::from_bytes_with(codestream, parameters)
         .map_err(|_| not_assessed("a JPEG 2000 frame cannot be decoded"))?;
@@ -64,7 +68,8 @@ pub(crate) fn decode_jpeg2000(codestream: &[u8], info: FrameInfo) -> Result<Vec<
     if data.len() != info.rows * info.columns {
         return Err(not_assessed("a decoded JPEG 2000 frame has the wrong size"));
     }
-    data.iter()
+    let samples = data
+        .iter()
         .map(|&sample| {
             u32::try_from(sample)
                 .ok()
@@ -72,7 +77,145 @@ pub(crate) fn decode_jpeg2000(codestream: &[u8], info: FrameInfo) -> Result<Vec<
                 .map(|value| value as u16)
                 .ok_or_else(|| not_assessed("a JPEG 2000 sample lies outside Bits Stored"))
         })
-        .collect()
+        .collect::<Result<Vec<u16>>>()?;
+    Ok(Jpeg2000Frame {
+        samples,
+        irreversible,
+    })
+}
+
+/// A decoded JPEG 2000 frame.
+pub(crate) struct Jpeg2000Frame {
+    pub samples: Vec<u16>,
+    /// A COD or COC segment selects the irreversible 9/7 wavelet.
+    pub irreversible: bool,
+}
+
+/// Walk the marker segments of the main header and of every tile-part header, by their
+/// declared lengths. Every tile index below `tiles` must have a tile-part, and when a
+/// tile-part gives the number of tile-parts of its tile, all of them must be present.
+/// Returns whether a COD or COC segment selects the irreversible 9/7 wavelet.
+fn check_jpeg2000_tiles(codestream: &[u8], tiles: u64) -> Result<bool> {
+    let malformed = || not_assessed("a JPEG 2000 codestream has malformed or missing tiles");
+    let mut irreversible = false;
+    // A COD's transform is at SPcod byte 4: after Scod (1) and SGcod (4). A COC's is
+    // after Ccoc (1 or 2 bytes) and Scoc (1).
+    let components = jpeg2000_siz(codestream)
+        .and_then(|siz| siz.get(34..36))
+        .map_or(1, |bytes| u16::from_be_bytes([bytes[0], bytes[1]]));
+    let mut note_transform = |marker: u8, segment: &[u8]| -> Result<()> {
+        let index = match marker {
+            0x52 => 9,
+            // Ccoc is two bytes when there are more than 256 components.
+            0x53 if components > 256 => 7,
+            0x53 => 6,
+            _ => return Ok(()),
+        };
+        match segment.get(index) {
+            Some(0) => irreversible = true,
+            Some(1) => {}
+            _ => {
+                return Err(not_assessed(
+                    "a JPEG 2000 coding style segment is malformed",
+                ))
+            }
+        }
+        Ok(())
+    };
+    let segment_at = |position: usize| -> Option<(u8, &[u8], usize)> {
+        let marker = codestream.get(position..position + 2)?;
+        if marker[0] != 0xFF {
+            return None;
+        }
+        // FF30 to FF3F are reserved markers without a segment (ITU-T T.800 A.1.3).
+        if (0x30..=0x3F).contains(&marker[1]) {
+            return Some((marker[1], &[], position + 2));
+        }
+        let length = usize::from(u16::from_be_bytes([
+            *codestream.get(position + 2)?,
+            *codestream.get(position + 3)?,
+        ]));
+        if length < 2 {
+            return None;
+        }
+        let segment = codestream.get(position + 4..position + 2 + length)?;
+        Some((marker[1], segment, position + 2 + length))
+    };
+    // The main header, after SOC, up to the first SOT.
+    let mut position = 2;
+    loop {
+        let (marker, segment, next) = segment_at(position).ok_or_else(malformed)?;
+        if marker == 0x90 {
+            break;
+        }
+        note_transform(marker, segment)?;
+        position = next;
+    }
+    let tile_count = usize::try_from(tiles).map_err(|_| malformed())?;
+    let mut parts = vec![0_u16; tile_count];
+    let mut declared = vec![0_u16; tile_count];
+    loop {
+        let (marker, sot, mut header) = segment_at(position).ok_or_else(malformed)?;
+        if marker != 0x90 || sot.len() != 8 {
+            return Err(malformed());
+        }
+        let tile = usize::from(u16::from_be_bytes([sot[0], sot[1]]));
+        let length = u32::from_be_bytes([sot[2], sot[3], sot[4], sot[5]]) as usize;
+        let total = sot[7];
+        if tile >= tile_count {
+            return Err(malformed());
+        }
+        parts[tile] += 1;
+        if total != 0 {
+            declared[tile] = u16::from(total);
+        }
+        // The tile-part header, up to SOD.
+        while codestream.get(header..header + 2) != Some(&[0xFF, 0x93]) {
+            let (marker, segment, next) = segment_at(header).ok_or_else(malformed)?;
+            note_transform(marker, segment)?;
+            header = next;
+        }
+        // Psot 0 means the tile-part runs to the end of the codestream.
+        if length == 0 {
+            break;
+        }
+        position = position.checked_add(length).ok_or_else(malformed)?;
+        match codestream.get(position..position + 2) {
+            Some([0xFF, 0x90]) => {}
+            Some([0xFF, 0xD9]) | None => break,
+            _ => return Err(malformed()),
+        }
+    }
+    let complete = parts
+        .iter()
+        .zip(&declared)
+        .all(|(&found, &declared)| found > 0 && (declared == 0 || found == declared));
+    if !complete {
+        return Err(malformed());
+    }
+    Ok(irreversible)
+}
+
+/// The tile count from the SIZ segment, then the tile-part walk of
+/// `check_jpeg2000_tiles`, for any codestream. Used by the conformance test to show that
+/// the walk accepts every conformance codestream.
+#[doc(hidden)]
+pub fn walk_jpeg2000_codestream(codestream: &[u8]) -> Result<bool> {
+    let siz = jpeg2000_siz(codestream).ok_or_else(|| not_assessed("no SIZ segment"))?;
+    let field = |index: usize| -> u64 {
+        let start = 2 + 4 * index;
+        siz.get(start..start + 4).map_or(0, |bytes| {
+            u64::from(u32::from_be_bytes(bytes.try_into().unwrap_or_default()))
+        })
+    };
+    let (width, height, tile_width, tile_height, tile_x0, tile_y0) =
+        (field(0), field(1), field(4), field(5), field(6), field(7));
+    if tile_width == 0 || tile_height == 0 {
+        return Err(not_assessed("invalid tile grid"));
+    }
+    let tiles = width.saturating_sub(tile_x0).div_ceil(tile_width)
+        * height.saturating_sub(tile_y0).div_ceil(tile_height);
+    check_jpeg2000_tiles(codestream, tiles)
 }
 
 /// Most tiles in one JPEG 2000 frame. Each tile costs OpenJPEG fixed work and memory.
@@ -94,7 +237,7 @@ fn jpeg2000_siz(codestream: &[u8]) -> Option<&[u8]> {
 /// Check the SIZ segment against the header before OpenJPEG decodes anything: the image
 /// is exactly Rows by Columns at the origin, with one unsubsampled component of at most
 /// Bits Allocated bits and a bounded number of tiles.
-fn check_jpeg2000_header(codestream: &[u8], info: FrameInfo) -> Result<()> {
+fn check_jpeg2000_header(codestream: &[u8], info: FrameInfo) -> Result<u64> {
     let siz = jpeg2000_siz(codestream)
         .ok_or_else(|| not_assessed("a JPEG 2000 frame has no readable SIZ segment"))?;
     let field = |index: usize| -> Option<u64> {
@@ -157,7 +300,7 @@ fn check_jpeg2000_header(codestream: &[u8], info: FrameInfo) -> Result<()> {
     if tiles > MAX_JPEG2000_TILES {
         return Err(not_assessed("a JPEG 2000 frame has too many tiles"));
     }
-    Ok(())
+    Ok(tiles)
 }
 
 /// Decode one JPEG codestream (baseline, extended 12-bit or lossless up to 16-bit) into
@@ -649,6 +792,39 @@ mod tests {
                     .all(|&value| u32::from(value) <= frame.max_value()));
             }
         }
+    }
+
+    /// A minimal codestream skeleton: SOC, a zeroed SIZ, a COD with `transform`, and one
+    /// tile-part per entry of `tiles` (tile index, number of tile-parts), then EOC.
+    fn skeleton(transform: u8, tiles: &[(u16, u8)]) -> Vec<u8> {
+        let mut data = vec![0xFF, 0x4F, 0xFF, 0x51, 0x00, 41];
+        data.extend([0; 39]);
+        data.extend([0xFF, 0x52, 0x00, 12, 0, 0, 0, 1, 0, 3, 4, 4, 0, transform]);
+        for &(tile, parts) in tiles {
+            data.extend([0xFF, 0x90, 0x00, 10]);
+            data.extend(tile.to_be_bytes());
+            data.extend(16_u32.to_be_bytes());
+            data.extend([0, parts, 0xFF, 0x93, 0x12, 0x34]);
+        }
+        data.extend([0xFF, 0xD9]);
+        data
+    }
+
+    #[test]
+    fn the_wavelet_transform_and_every_tile_are_read_from_the_codestream() {
+        assert!(check_jpeg2000_tiles(&skeleton(0, &[(0, 1)]), 1).unwrap());
+        assert!(!check_jpeg2000_tiles(&skeleton(1, &[(0, 1), (1, 1)]), 2).unwrap());
+        // A missing tile, a tile index out of range, and a missing declared tile-part.
+        assert!(check_jpeg2000_tiles(&skeleton(1, &[(0, 1)]), 2).is_err());
+        assert!(check_jpeg2000_tiles(&skeleton(1, &[(0, 1), (2, 1)]), 2).is_err());
+        assert!(check_jpeg2000_tiles(&skeleton(1, &[(0, 2)]), 1).is_err());
+        assert!(check_jpeg2000_tiles(&skeleton(1, &[(0, 2), (0, 2)]), 1).is_ok());
+        // A reserved marker without a segment in the main header is skipped.
+        let mut reserved = skeleton(1, &[(0, 1)]);
+        reserved.splice(59..59, [0xFF, 0x30]);
+        assert!(!check_jpeg2000_tiles(&reserved, 1).unwrap());
+        // An unknown transform value.
+        assert!(check_jpeg2000_tiles(&skeleton(7, &[(0, 1)]), 1).is_err());
     }
 
     #[test]

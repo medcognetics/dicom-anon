@@ -26,7 +26,11 @@ for n in $(seq 1 7); do
 done
 for path in "${paths[@]}"; do
   name=$(basename "$path")
-  [ -f "$dir/$name" ] || curl -sSfL --retry 3 --max-time 120 -o "$dir/$name" "$base/$path"
+  # Download to a temporary name, so an interrupted transfer is fetched again next time.
+  if [ ! -f "$dir/$name" ]; then
+    curl -sSfL --retry 3 --max-time 120 -o "$dir/$name.part" "$base/$path"
+    mv "$dir/$name.part" "$dir/$name"
+  fi
 done
 if [ -f "$here/jpeg2000-conformance.sha256" ]; then
   (cd "$dir" && shasum -a 256 -c --quiet "$here/jpeg2000-conformance.sha256")
