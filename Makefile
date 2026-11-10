@@ -1,7 +1,7 @@
 .PHONY: check ci ci-minimum format lint python-quality test coverage docs node-dependencies \
 		binding-types test-python test-node test-ci audit deprecations release release-assets bench \
 		report-integration report-integration-coverage report-cuda-integration codec-pins \
-		test-jpeg2000-conformance
+		codec-pins-latest test-jpeg2000-conformance
 
 CI_UV_RUN = uv run --project tools/ci --frozen
 ACTIONLINT ?= actionlint
@@ -62,6 +62,10 @@ test-node: node-dependencies
 # The codec crates must match medcognetics/dicom-preprocessing (#47).
 codec-pins:
 	$(CI_UV_RUN) python scripts/check_codec_pins.py
+
+# Nightly only: compare with the current dicom-preprocessing master.
+codec-pins-latest:
+	$(CI_UV_RUN) python scripts/check_codec_pins.py --ref master
 
 # ITU-T T.803 class 1 conformance of the JPEG 2000 decoder. The data is fetched, pinned by
 # SHA-256, because its license does not allow it in this repository.

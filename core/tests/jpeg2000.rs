@@ -461,3 +461,33 @@ fn mutated_codestreams_never_panic_and_never_pass_unchecked() {
         }
     }
 }
+
+/// Overwrite one 4-byte SIZ field (0 Xsiz, 1 Ysiz, ..., 4 XTsiz, 5 YTsiz) of a raw codestream.
+fn patch_siz(codestream: &mut [u8], field: usize, value: u32) {
+    assert_eq!(&codestream[..4], &[0xFF, 0x4F, 0xFF, 0x51]);
+    let start = 8 + 4 * field;
+    codestream[start..start + 4].copy_from_slice(&value.to_be_bytes());
+}
+
+#[test]
+fn a_siz_larger_than_the_header_fails_closed_before_decoding() {
+    let source = frame(4095, 1800);
+    for (field, value) in [(0, 60_000), (1, 60_000)] {
+        let mut codestream = encode(&source, 12, Config::default());
+        patch_siz(&mut codestream, field, value);
+        let started = std::time::Instant::now();
+        let error = anonymize(&object(codestream, uids::JPEG2000_LOSSLESS, 12)).unwrap_err();
+        assert!(matches!(error, Error::PixelTextNotAssessed(_)), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+}
+
+#[test]
+fn a_siz_with_too_many_tiles_fails_closed_before_decoding() {
+    let source = frame(4095, 1800);
+    let mut codestream = encode(&source, 12, Config::default());
+    patch_siz(&mut codestream, 4, 1);
+    patch_siz(&mut codestream, 5, 1);
+    let error = anonymize(&object(codestream, uids::JPEG2000_LOSSLESS, 12)).unwrap_err();
+    assert!(error.to_string().contains("too many tiles"), "{error}");
+}

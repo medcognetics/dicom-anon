@@ -34,6 +34,8 @@ impl FrameInfo {
 /// image. The image must have one unsigned component with the frame's size and no
 /// offset, a precision of at most Bits Allocated, and every sample within Bits Stored.
 pub(crate) fn decode_jpeg2000(codestream: &[u8], info: FrameInfo) -> Result<Vec<u16>> {
+    // OpenJPEG sizes its buffers from the codestream, so the header is checked first.
+    check_jpeg2000_header(codestream, info)?;
     let parameters = openjpeg::DecodeParameters::new().strict(true);
     let image = openjpeg::Image::from_bytes_with(codestream, parameters)
         .map_err(|_| not_assessed("a JPEG 2000 frame cannot be decoded"))?;
@@ -71,6 +73,112 @@ pub(crate) fn decode_jpeg2000(codestream: &[u8], info: FrameInfo) -> Result<Vec<
                 .ok_or_else(|| not_assessed("a JPEG 2000 sample lies outside Bits Stored"))
         })
         .collect()
+}
+
+/// Most tiles in one JPEG 2000 frame. Each tile costs OpenJPEG fixed work and memory.
+const MAX_JPEG2000_TILES: u64 = 4096;
+
+/// The SIZ segment of a raw codestream, or of the `jp2c` box of a JP2 file.
+fn jpeg2000_siz(data: &[u8]) -> Option<&[u8]> {
+    let codestream = if data.starts_with(&[0xFF, 0x4F]) {
+        data
+    } else {
+        // JP2 boxes: 4-byte length, 4-byte type; length 1 means an 8-byte length follows.
+        let mut position = 0;
+        loop {
+            let header = data.get(position..position + 8)?;
+            let length = u64::from(u32::from_be_bytes(header[..4].try_into().ok()?));
+            let (start, length) = match length {
+                1 => (
+                    position + 16,
+                    u64::from_be_bytes(data.get(position + 8..position + 16)?.try_into().ok()?),
+                ),
+                0 => (position + 8, (data.len() - position) as u64),
+                _ => (position + 8, length),
+            };
+            if &header[4..8] == b"jp2c" {
+                break data.get(start..)?;
+            }
+            position = position.checked_add(usize::try_from(length).ok()?)?;
+        }
+    };
+    if !codestream.starts_with(&[0xFF, 0x4F, 0xFF, 0x51]) {
+        return None;
+    }
+    let length = usize::from(u16::from_be_bytes([
+        *codestream.get(4)?,
+        *codestream.get(5)?,
+    ]));
+    codestream.get(6..4 + length)
+}
+
+/// Check the SIZ segment against the header before OpenJPEG decodes anything: the image
+/// is exactly Rows by Columns at the origin, with one unsubsampled component of at most
+/// Bits Allocated bits and a bounded number of tiles.
+fn check_jpeg2000_header(codestream: &[u8], info: FrameInfo) -> Result<()> {
+    let siz = jpeg2000_siz(codestream)
+        .ok_or_else(|| not_assessed("a JPEG 2000 frame has no readable SIZ segment"))?;
+    let field = |index: usize| -> Option<u64> {
+        // Rsiz (2 bytes), then eight 4-byte fields, then Csiz (2 bytes).
+        let start = 2 + 4 * index;
+        siz.get(start..start + 4)
+            .map(|bytes| u64::from(u32::from_be_bytes(bytes.try_into().unwrap_or_default())))
+    };
+    let (
+        Some(width),
+        Some(height),
+        Some(x0),
+        Some(y0),
+        Some(tile_width),
+        Some(tile_height),
+        Some(tile_x0),
+        Some(tile_y0),
+    ) = (
+        field(0),
+        field(1),
+        field(2),
+        field(3),
+        field(4),
+        field(5),
+        field(6),
+        field(7),
+    )
+    else {
+        return Err(not_assessed("a JPEG 2000 SIZ segment is truncated"));
+    };
+    if x0 != 0 || y0 != 0 || width != info.columns as u64 || height != info.rows as u64 {
+        return Err(not_assessed(
+            "a JPEG 2000 frame does not match Rows and Columns",
+        ));
+    }
+    let components = siz
+        .get(34..36)
+        .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]));
+    if components != Some(1) || siz.len() < 39 {
+        return Err(not_assessed(
+            "a JPEG 2000 frame does not have exactly one component",
+        ));
+    }
+    let (depth, x_step, y_step) = (siz[36], siz[37], siz[38]);
+    if depth & 0x80 != 0
+        || u16::from(depth & 0x7F) + 1 > info.bits_allocated
+        || x_step != 1
+        || y_step != 1
+    {
+        return Err(not_assessed(
+            "a JPEG 2000 component is signed, too deep or subsampled",
+        ));
+    }
+    if tile_width == 0 || tile_height == 0 || tile_x0 > x0 || tile_y0 > y0 {
+        return Err(not_assessed(
+            "a JPEG 2000 SIZ segment has an invalid tile grid",
+        ));
+    }
+    let tiles = (width - tile_x0).div_ceil(tile_width) * (height - tile_y0).div_ceil(tile_height);
+    if tiles > MAX_JPEG2000_TILES {
+        return Err(not_assessed("a JPEG 2000 frame has too many tiles"));
+    }
+    Ok(())
 }
 
 /// Decode one JPEG codestream (baseline, extended 12-bit or lossless up to 16-bit) into

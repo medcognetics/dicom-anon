@@ -94,5 +94,7 @@ jobs:
         run: uv sync --project tools/ci --frozen --python "3.14"
       - name: Validate repository
         run: make ci
+      - name: Compare codec pins with the current dicom-preprocessing
+        run: make codec-pins-latest
       - name: Build release profile
         run: make release
