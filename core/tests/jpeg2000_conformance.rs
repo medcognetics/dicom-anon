@@ -204,6 +204,59 @@ fn read_pgx(path: &Path) -> (usize, usize, Vec<i64>) {
     (width, height, samples)
 }
 
+/// The codestream with the second half of its last tile-part's data removed, its Psot
+/// adjusted, and EOC kept.
+fn truncate_last_tile_part(codestream: &[u8]) -> Vec<u8> {
+    let mut position = 2;
+    // The main header.
+    while codestream[position..position + 2] != [0xFF, 0x90] {
+        let marker = codestream[position + 1];
+        position += if (0x30..=0x3F).contains(&marker) {
+            2
+        } else {
+            2 + usize::from(u16::from_be_bytes([
+                codestream[position + 2],
+                codestream[position + 3],
+            ]))
+        };
+    }
+    let mut last;
+    loop {
+        let length = u32::from_be_bytes(codestream[position + 6..position + 10].try_into().unwrap())
+            as usize;
+        last = position;
+        if length == 0
+            || codestream.get(position + length..position + length + 2) != Some(&[0xFF, 0x90])
+        {
+            break;
+        }
+        position += length;
+    }
+    let length = u32::from_be_bytes(codestream[last + 6..last + 10].try_into().unwrap()) as usize;
+    let end = if length == 0 {
+        codestream.len() - 2
+    } else {
+        last + length
+    };
+    // The tile-part body starts after SOD.
+    let mut header = last + 12;
+    while codestream[header..header + 2] != [0xFF, 0x93] {
+        header += 2 + usize::from(u16::from_be_bytes([
+            codestream[header + 2],
+            codestream[header + 3],
+        ]));
+    }
+    let body = header + 2;
+    let keep = body + (end - body) / 2;
+    let mut truncated = codestream[..keep].to_vec();
+    if length != 0 {
+        let new_length = (keep - last) as u32;
+        truncated[last + 6..last + 10].copy_from_slice(&new_length.to_be_bytes());
+    }
+    truncated.extend_from_slice(&[0xFF, 0xD9]);
+    truncated
+}
+
 #[test]
 fn class_1_codestreams_decode_within_the_t803_limits() {
     let Some(directory) = std::env::var_os("DICOM_ANON_J2K_CONFORMANCE") else {
@@ -214,6 +267,26 @@ fn class_1_codestreams_decode_within_the_t803_limits() {
     let mut failures = Vec::new();
     for case in &CASES {
         let codestream = std::fs::read(directory.join(case.file)).unwrap();
+        // The packet walk must read every packet of every tile exactly: the bytes that the
+        // packets use equal the tile data, except for padding after the last packet.
+        match dicom_anon::jpeg2000_packet_usage(&codestream) {
+            Ok(usage) => {
+                for (tile, (used, available)) in usage.iter().enumerate() {
+                    if used != available {
+                        failures.push(format!(
+                            "{}: tile {tile} uses {used} of {available} bytes",
+                            case.file
+                        ));
+                    }
+                }
+            }
+            Err(error) => failures.push(format!("{}: packet walk rejected it: {error}", case.file)),
+        }
+        // Without its last bytes of packet data, the walk must reject it.
+        let truncated = truncate_last_tile_part(&codestream);
+        if dicom_anon::walk_jpeg2000_codestream(&truncated).is_ok() {
+            failures.push(format!("{}: the walk accepted a truncated copy", case.file));
+        }
         // The tile-part walk that runs before OpenJPEG must accept every conformance file.
         if let Err(error) = dicom_anon::walk_jpeg2000_codestream(&codestream) {
             failures.push(format!(

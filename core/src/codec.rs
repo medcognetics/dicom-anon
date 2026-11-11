@@ -40,6 +40,8 @@ pub(crate) fn decode_jpeg2000(codestream: &[u8], info: FrameInfo) -> Result<Jpeg
     // OpenJPEG sizes its buffers from the codestream, so the header is checked first.
     let tiles = check_jpeg2000_header(codestream, info)?;
     let irreversible = check_jpeg2000_tiles(codestream, tiles)?;
+    // OpenJPEG also reconstructs missing packets as zero, so every packet is checked.
+    crate::j2k_packets::check_packets(codestream).map_err(not_assessed)?;
     let parameters = openjpeg::DecodeParameters::new().strict(true);
     let image = openjpeg::Image::from_bytes_with(codestream, parameters)
         .map_err(|_| not_assessed("a JPEG 2000 frame cannot be decoded"))?;
@@ -219,7 +221,16 @@ pub fn walk_jpeg2000_codestream(codestream: &[u8]) -> Result<bool> {
     }
     let tiles = width.saturating_sub(tile_x0).div_ceil(tile_width)
         * height.saturating_sub(tile_y0).div_ceil(tile_height);
-    check_jpeg2000_tiles(codestream, tiles)
+    let irreversible = check_jpeg2000_tiles(codestream, tiles)?;
+    crate::j2k_packets::check_packets(codestream).map_err(not_assessed)?;
+    Ok(irreversible)
+}
+
+/// The bytes that the packets of each tile use, and the bytes it has. Used by the
+/// conformance test to show that the packet walk reads every packet exactly.
+#[doc(hidden)]
+pub fn jpeg2000_packet_usage(codestream: &[u8]) -> Result<Vec<(usize, usize)>> {
+    crate::j2k_packets::packet_usage(codestream).map_err(not_assessed)
 }
 
 /// Most tiles in one JPEG 2000 frame. Each tile costs OpenJPEG fixed work and memory.

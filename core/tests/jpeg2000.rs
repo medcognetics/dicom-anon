@@ -598,3 +598,76 @@ fn censored_9_7_output_is_marked_lossy_under_either_transfer_syntax() {
         );
     }
 }
+
+/// Replace the data of the only tile-part with `body`, adjusting Psot and keeping EOC.
+fn with_tile_data(codestream: &[u8], body: &[u8]) -> Vec<u8> {
+    let sot = tile_part_starts(codestream)[0];
+    let mut sod = sot + 12;
+    while codestream[sod..sod + 2] != [0xFF, 0x93] {
+        sod += 2 + usize::from(u16::from_be_bytes([
+            codestream[sod + 2],
+            codestream[sod + 3],
+        ]));
+    }
+    let mut result = codestream[..sod + 2].to_vec();
+    result.extend_from_slice(body);
+    let length = (result.len() - sot) as u32;
+    result[sot + 6..sot + 10].copy_from_slice(&length.to_be_bytes());
+    result.extend_from_slice(&[0xFF, 0xD9]);
+    if result.len() % 2 == 1 {
+        result.push(0);
+    }
+    result
+}
+
+fn tile_data(codestream: &[u8]) -> &[u8] {
+    let sot = tile_part_starts(codestream)[0];
+    let mut sod = sot + 12;
+    while codestream[sod..sod + 2] != [0xFF, 0x93] {
+        sod += 2 + usize::from(u16::from_be_bytes([
+            codestream[sod + 2],
+            codestream[sod + 3],
+        ]));
+    }
+    &codestream[sod + 2..codestream.len() - 2]
+}
+
+#[test]
+fn a_tile_with_only_its_first_packet_fails_closed() {
+    // OpenJPEG decodes this, filling the missing resolutions with zero.
+    let source = frame(4095, 1800);
+    let codestream = encode(&source, 12, Config::default());
+    let truncated = with_tile_data(&codestream, &[0x00]);
+    let error = anonymize(&object(truncated, uids::JPEG2000_LOSSLESS, 12)).unwrap_err();
+    assert!(error.to_string().contains("missing packets"), "{error}");
+}
+
+#[test]
+fn a_tile_without_its_last_quality_layers_fails_closed() {
+    let source = frame(4095, 1800);
+    let codestream = encode(
+        &source,
+        12,
+        Config {
+            layers: &[40.0, 10.0, 0.0],
+            ..Config::default()
+        },
+    );
+    let data = tile_data(&codestream).to_vec();
+    for keep in [
+        data.len() / 4,
+        data.len() / 2,
+        data.len() * 9 / 10,
+        data.len() - 1,
+    ] {
+        let truncated = with_tile_data(&codestream, &data[..keep]);
+        let error = anonymize(&object(truncated, uids::JPEG2000_LOSSLESS, 12)).unwrap_err();
+        assert!(
+            matches!(error, Error::PixelTextNotAssessed(_)),
+            "{keep}: {error}"
+        );
+    }
+    // The whole data still passes.
+    let whole = with_tile_data(&codestream, &data);
+    assert!(anonymize(&object(whole, uids::JPEG2000_LOSSLESS, 12)).is_ok());
+}
