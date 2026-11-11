@@ -846,6 +846,56 @@ mod tests {
         assert!(check_jpeg2000_tiles(&skeleton(7, &[(0, 1)]), 1).is_err());
     }
 
+    /// SOC, SIZ of `width` x `height` with one 12-bit component and one tile, COD with
+    /// `levels`, user precincts of size exponent 0 and `layers`, optional POC entries,
+    /// then one tile-part with one byte of data and EOC.
+    fn header_only(width: u32, height: u32, levels: u8, layers: u16, changes: usize) -> Vec<u8> {
+        let mut data = vec![0xFF, 0x4F, 0xFF, 0x51, 0x00, 41, 0, 0];
+        for value in [width, height, 0, 0, width, height, 0, 0] {
+            data.extend(value.to_be_bytes());
+        }
+        data.extend([0, 1, 11, 1, 1]);
+        let precincts = usize::from(levels) + 1;
+        data.extend([0xFF, 0x52]);
+        data.extend(((12 + precincts) as u16).to_be_bytes());
+        data.extend([0x01, 0]);
+        data.extend(layers.to_be_bytes());
+        data.extend([0, levels, 4, 4, 0, 1]);
+        data.extend(vec![0; precincts]);
+        if changes > 0 {
+            data.extend([0xFF, 0x5F]);
+            data.extend(((2 + 7 * changes) as u16).to_be_bytes());
+            for _ in 0..changes {
+                data.extend([0, 0, 0, 1, 1, 1, 0]);
+            }
+        }
+        data.extend([0xFF, 0x90, 0x00, 10, 0, 0]);
+        data.extend(15_u32.to_be_bytes());
+        data.extend([0, 1, 0xFF, 0x93, 0x00, 0xFF, 0xD9]);
+        data
+    }
+
+    #[test]
+    fn a_header_that_implies_millions_of_precincts_fails_before_allocating() {
+        // 2048 x 2048 with 1 x 1 precincts: about 4 million precincts, one data byte.
+        let started = std::time::Instant::now();
+        let error = jpeg2000_packet_usage(&header_only(2048, 2048, 0, 1, 0)).unwrap_err();
+        assert!(error.to_string().contains("missing packets"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn too_many_progression_order_changes_fail_closed() {
+        assert!(jpeg2000_packet_usage(&header_only(1, 1, 0, 1, 32)).is_ok());
+        let error = jpeg2000_packet_usage(&header_only(1, 1, 0, 1, 33)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("too many progression order changes"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn only_a_raw_codestream_is_read() {
         // A JP2 file, a JP2 box with a zero extended length, and a SIZ that runs past the

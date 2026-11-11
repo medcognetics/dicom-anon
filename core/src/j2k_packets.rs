@@ -12,8 +12,11 @@
 use std::collections::BTreeMap;
 
 /// Most code-blocks in one tile, so that a crafted header cannot force a large
-/// allocation. A 2^26-sample frame with 4 x 4 code-blocks has 2^22.
-const MAX_CODE_BLOCKS: usize = 1 << 22;
+/// allocation. A 2^26-sample frame with 8 x 8 code-blocks has 2^20; smaller code-blocks
+/// on so large a frame fail closed.
+const MAX_CODE_BLOCKS: usize = 1 << 20;
+/// Most progression order changes in one tile, as in OpenJPEG (`J2K_MAX_POCS`).
+const MAX_CHANGES: usize = 32;
 
 /// Most packets in one tile. Each packet has a header of at least one byte, so this is
 /// also below the size of any frame that the check accepts.
@@ -212,6 +215,9 @@ impl Coding {
                     self.tile_changes = true;
                 }
                 self.changes.extend(parse_poc(segment, components)?);
+                if self.changes.len() > MAX_CHANGES {
+                    return Err("a JPEG 2000 codestream has too many progression order changes");
+                }
             }
             _ => {}
         }
@@ -397,6 +403,40 @@ struct TileComponent {
     step_y: u64,
     resolutions: Vec<Resolution>,
     style: u8,
+}
+
+/// The number of precincts of one tile-component, by the arithmetic of
+/// `tile_component`, without allocating anything.
+fn precinct_count(style: &ComponentStyle, tile: (u64, u64, u64, u64), step: (u64, u64)) -> u64 {
+    let (x0, y0, x1, y1) = (
+        ceil_div(tile.0, step.0),
+        ceil_div(tile.1, step.1),
+        ceil_div(tile.2, step.0),
+        ceil_div(tile.3, step.1),
+    );
+    (0..=style.levels)
+        .map(|resolution| {
+            let level = style.levels - resolution;
+            let (rx0, ry0, rx1, ry1) = (
+                ceil_div_pow2(x0, level),
+                ceil_div_pow2(y0, level),
+                ceil_div_pow2(x1, level),
+                ceil_div_pow2(y1, level),
+            );
+            let (pdx, pdy) = style.precincts[resolution as usize];
+            let wide = if rx0 == rx1 {
+                0
+            } else {
+                ((ceil_div_pow2(rx1, pdx) << pdx) - (floor_div_pow2(rx0, pdx) << pdx)) >> pdx
+            };
+            let high = if ry0 == ry1 {
+                0
+            } else {
+                ((ceil_div_pow2(ry1, pdy) << pdy) - (floor_div_pow2(ry0, pdy) << pdy)) >> pdy
+            };
+            wide.saturating_mul(high)
+        })
+        .fold(0_u64, u64::saturating_add)
 }
 
 /// Build the precinct and code-block structure of one tile-component (OpenJPEG
@@ -1001,6 +1041,25 @@ pub(crate) fn packet_usage(codestream: &[u8]) -> Walk<Vec<(usize, usize)>> {
             (tile_x0 + (column + 1) * tile_width).min(width),
             (tile_y0 + (row + 1) * tile_height).min(height),
         );
+        // Every packet has a header of at least one byte, so a tile that implies more
+        // packets than it has header bytes is incomplete. This is checked from the
+        // geometry alone, before any precinct state is allocated, and it bounds that
+        // state and the packet order to the size of the codestream.
+        let mut precincts = 0_u64;
+        for component in 0..components {
+            precincts = precincts.saturating_add(precinct_count(
+                tile.coding.style(component)?,
+                bounds,
+                steps[component as usize],
+            ));
+        }
+        let expected = precincts
+            .checked_mul(u64::from(tile.coding.layers))
+            .ok_or("a JPEG 2000 tile implies too many packets")?;
+        let header_bytes = tile.packed.as_ref().map_or(tile.body.len(), Vec::len) as u64;
+        if expected > header_bytes || expected > MAX_PACKETS {
+            return Err("a JPEG 2000 tile is missing packets");
+        }
         let mut blocks = 0;
         let mut tile_components = (0..components)
             .map(|component| {
@@ -1012,20 +1071,14 @@ pub(crate) fn packet_usage(codestream: &[u8]) -> Walk<Vec<(usize, usize)>> {
                 )
             })
             .collect::<Walk<Vec<_>>>()?;
-        // Every packet has a header of at least one byte, so a tile that implies more
-        // packets than it has header bytes is incomplete. Checking this first bounds the
-        // packet order that is built below.
-        let precincts: u64 = tile_components
+        // The structure must hold exactly the precincts that were counted.
+        let built: u64 = tile_components
             .iter()
             .flat_map(|component| &component.resolutions)
-            .map(|resolution| resolution.precincts_wide * resolution.precincts_high)
+            .map(|resolution| resolution.precincts.len() as u64)
             .sum();
-        let expected = precincts
-            .checked_mul(u64::from(tile.coding.layers))
-            .ok_or("a JPEG 2000 tile implies too many packets")?;
-        let header_bytes = tile.packed.as_ref().map_or(tile.body.len(), Vec::len) as u64;
-        if expected > header_bytes || expected > MAX_PACKETS {
-            return Err("a JPEG 2000 tile is missing packets");
+        if built != precincts {
+            return Err("a JPEG 2000 tile's precinct grid is inconsistent");
         }
         let order = packet_order(&tile.coding, &tile_components, bounds)?;
         // POC ranges must cover every packet that the tile implies.
