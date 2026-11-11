@@ -796,6 +796,7 @@ fn profile_name(profile: &ProfileConfiguration) -> String {
         *profile
             == ProfileConfiguration {
                 fail_on_unmapped: profile.fail_on_unmapped.clone(),
+                fail_on_unmapped_sequences: profile.fail_on_unmapped_sequences.clone(),
                 ..preset
             }
     };
@@ -936,6 +937,10 @@ pub fn validate_source_object(
     // The fail-on-unmapped guard applies only during anonymization. A candidate
     // that exists was produced without a guarded miss, so the guard is ignored.
     anonymization_options.profile.fail_on_unmapped.clear();
+    anonymization_options
+        .profile
+        .fail_on_unmapped_sequences
+        .clear();
     let validation_options = ValidationOptions {
         profile: anonymization_options.profile.clone(),
     };
