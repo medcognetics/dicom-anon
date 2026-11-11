@@ -15,6 +15,10 @@ use std::collections::BTreeMap;
 /// allocation. A 2^26-sample frame with 4 x 4 code-blocks has 2^22.
 const MAX_CODE_BLOCKS: usize = 1 << 22;
 
+/// Most packets in one tile. Each packet has a header of at least one byte, so this is
+/// also below the size of any frame that the check accepts.
+const MAX_PACKETS: u64 = 1 << 26;
+
 type Walk<T> = Result<T, &'static str>;
 
 fn read_u16(data: &[u8], at: usize) -> Walk<u16> {
@@ -1008,7 +1012,26 @@ pub(crate) fn packet_usage(codestream: &[u8]) -> Walk<Vec<(usize, usize)>> {
                 )
             })
             .collect::<Walk<Vec<_>>>()?;
+        // Every packet has a header of at least one byte, so a tile that implies more
+        // packets than it has header bytes is incomplete. Checking this first bounds the
+        // packet order that is built below.
+        let precincts: u64 = tile_components
+            .iter()
+            .flat_map(|component| &component.resolutions)
+            .map(|resolution| resolution.precincts_wide * resolution.precincts_high)
+            .sum();
+        let expected = precincts
+            .checked_mul(u64::from(tile.coding.layers))
+            .ok_or("a JPEG 2000 tile implies too many packets")?;
+        let header_bytes = tile.packed.as_ref().map_or(tile.body.len(), Vec::len) as u64;
+        if expected > header_bytes || expected > MAX_PACKETS {
+            return Err("a JPEG 2000 tile is missing packets");
+        }
         let order = packet_order(&tile.coding, &tile_components, bounds)?;
+        // POC ranges must cover every packet that the tile implies.
+        if order.len() as u64 != expected {
+            return Err("a JPEG 2000 tile is missing packets");
+        }
         let (mut body, mut header) = (0_usize, 0_usize);
         for (layer, resolution, component, precinct) in order {
             if tile.coding.sop && tile.body.get(body..body + 2) == Some(&[0xFF, 0x91]) {

@@ -671,3 +671,48 @@ fn a_tile_without_its_last_quality_layers_fails_closed() {
     let whole = with_tile_data(&codestream, &data);
     assert!(anonymize(&object(whole, uids::JPEG2000_LOSSLESS, 12)).is_ok());
 }
+
+/// The offset of the first segment with `marker` in the main header.
+fn main_header_segment(codestream: &[u8], marker: u8) -> usize {
+    let mut position = 2;
+    loop {
+        if codestream[position + 1] == marker {
+            return position;
+        }
+        assert_ne!(codestream[position + 1], 0x90, "no such segment");
+        position += 2 + usize::from(u16::from_be_bytes([
+            codestream[position + 2],
+            codestream[position + 3],
+        ]));
+    }
+}
+
+#[test]
+fn a_header_with_far_more_layers_than_data_fails_fast() {
+    let source = frame(4095, 1800);
+    let mut codestream = encode(&source, 12, Config::default());
+    let cod = main_header_segment(&codestream, 0x52);
+    // SGcod layers, after Lcod (2), Scod (1) and the progression order (1).
+    codestream[cod + 6..cod + 8].copy_from_slice(&65_535_u16.to_be_bytes());
+    let started = std::time::Instant::now();
+    let error = anonymize(&object(codestream, uids::JPEG2000_LOSSLESS, 12)).unwrap_err();
+    assert!(error.to_string().contains("missing packets"), "{error}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}
+
+#[test]
+fn a_poc_that_leaves_out_resolutions_fails_closed() {
+    let source = frame(4095, 1800);
+    let codestream = encode(&source, 12, Config::default());
+    let sot = tile_part_starts(&codestream)[0];
+    // POC: RSpoc 0, CSpoc 0, LYEpoc 1, REpoc 1, CEpoc 1, Ppoc LRCP. It names only the
+    // lowest resolution, though the codestream has four.
+    let mut with_poc = codestream[..sot].to_vec();
+    with_poc.extend_from_slice(&[0xFF, 0x5F, 0x00, 0x09, 0, 0, 0, 1, 1, 1, 0]);
+    with_poc.extend_from_slice(&codestream[sot..]);
+    if with_poc.len() % 2 == 1 {
+        with_poc.push(0);
+    }
+    let error = anonymize(&object(with_poc, uids::JPEG2000_LOSSLESS, 12)).unwrap_err();
+    assert!(error.to_string().contains("missing packets"), "{error}");
+}
