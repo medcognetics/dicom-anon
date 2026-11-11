@@ -18,9 +18,11 @@ const MAX_CODE_BLOCKS: usize = 1 << 20;
 /// Most progression order changes in one tile, as in OpenJPEG (`J2K_MAX_POCS`).
 const MAX_CHANGES: usize = 32;
 
-/// Most packets in one tile. Each packet has a header of at least one byte, so this is
-/// also below the size of any frame that the check accepts.
-const MAX_PACKETS: u64 = 1 << 26;
+/// Most packets in one tile. Each packet has a header of at least one byte. The walk keeps
+/// one byte per packet to tell which it has seen.
+const MAX_PACKETS: u64 = 1 << 24;
+/// Most precincts in one tile. Each precinct keeps a small state.
+const MAX_PRECINCTS: u64 = 1 << 20;
 
 type Walk<T> = Result<T, &'static str>;
 
@@ -395,15 +397,19 @@ struct Resolution {
     precincts_high: u64,
     /// Resolution coordinates (x0, y0, x1, y1).
     bounds: (u64, u64, u64, u64),
-    precincts: Vec<Precinct>,
 }
 
+/// The geometry of one tile-component; its precinct states are kept apart, so that the
+/// packet order can read the geometry while the parser updates the states.
 struct TileComponent {
     step_x: u64,
     step_y: u64,
     resolutions: Vec<Resolution>,
     style: u8,
 }
+
+/// The precinct states of one tile-component, by resolution.
+type PrecinctStates = Vec<Vec<Precinct>>;
 
 /// The number of precincts of one tile-component, by the arithmetic of
 /// `tile_component`, without allocating anything.
@@ -446,7 +452,7 @@ fn tile_component(
     tile: (u64, u64, u64, u64),
     step: (u64, u64),
     blocks: &mut usize,
-) -> Walk<TileComponent> {
+) -> Walk<(TileComponent, PrecinctStates)> {
     let (x0, y0, x1, y1) = (
         ceil_div(tile.0, step.0),
         ceil_div(tile.1, step.1),
@@ -454,6 +460,7 @@ fn tile_component(
         ceil_div(tile.3, step.1),
     );
     let mut resolutions = Vec::new();
+    let mut states = Vec::new();
     for resolution in 0..=style.levels {
         let level = style.levels - resolution;
         let bounds = (
@@ -538,6 +545,10 @@ fn tile_component(
                 if *blocks > MAX_CODE_BLOCKS {
                     return Err("a JPEG 2000 tile has too many code-blocks");
                 }
+                // A band without code-blocks adds nothing to a packet header.
+                if columns * rows == 0 {
+                    continue;
+                }
                 band_list.push(BandPrecinct {
                     inclusion: TagTree::new(columns, rows),
                     zero_planes: TagTree::new(columns, rows),
@@ -558,15 +569,18 @@ fn tile_component(
             precincts_wide: wide,
             precincts_high: high,
             bounds,
-            precincts,
         });
+        states.push(precincts);
     }
-    Ok(TileComponent {
-        step_x: step.0,
-        step_y: step.1,
-        resolutions,
-        style: style.block_style,
-    })
+    Ok((
+        TileComponent {
+            step_x: step.0,
+            step_y: step.1,
+            resolutions,
+            style: style.block_style,
+        },
+        states,
+    ))
 }
 
 /// Read the number of new coding passes (T.800 Table B.4).
@@ -673,11 +687,16 @@ struct Tile {
 
 /// The packet order of one tile, as (layer, resolution, component, precinct), with
 /// progression order changes (OpenJPEG `pi.c`).
+/// Visit the packets of one tile in order, as (layer, resolution, component, precinct),
+/// with progression order changes (OpenJPEG `pi.c`). Each packet is visited once, and
+/// `expected` is the number that the tile implies. Returns how many were visited.
 fn packet_order(
     coding: &Coding,
     components: &[TileComponent],
     tile: (u64, u64, u64, u64),
-) -> Walk<Vec<(u32, u32, u32, u64)>> {
+    expected: u64,
+    visit: &mut dyn FnMut(u32, u32, u32, u64) -> Walk<()>,
+) -> Walk<u64> {
     let component_count = components.len() as u32;
     let most_resolutions = components
         .iter()
@@ -696,14 +715,44 @@ fn packet_order(
     } else {
         coding.changes.clone()
     };
-    let mut seen = std::collections::HashSet::new();
-    let mut order = Vec::new();
-    let mut emit =
-        |layer: u32, resolution: u32, component: u32, precinct: u64, order: &mut Vec<_>| {
-            if seen.insert((layer, resolution, component, precinct)) {
-                order.push((layer, resolution, component, precinct));
+    // One byte per packet: the index of a packet is its precinct's place among all
+    // precincts of the tile, times the layer count, plus its layer.
+    let mut offsets = Vec::with_capacity(components.len());
+    let mut total = 0_u64;
+    for component in components {
+        let mut starts = Vec::with_capacity(component.resolutions.len());
+        for resolution in &component.resolutions {
+            starts.push(total);
+            total += resolution.precincts_wide * resolution.precincts_high;
+        }
+        offsets.push(starts);
+    }
+    let layer_count = u64::from(coding.layers);
+    if total.checked_mul(layer_count) != Some(expected) {
+        return Err("a JPEG 2000 tile's precinct grid is inconsistent");
+    }
+    let mut seen = vec![false; expected as usize];
+    let mut visited = 0_u64;
+    let mut failure: Option<&'static str> = None;
+    let mut order = ();
+    let mut emit = |layer: u32, resolution: u32, component: u32, precinct: u64, _: &mut ()| {
+        if failure.is_some() {
+            return;
+        }
+        let index = (offsets[component as usize][resolution as usize] + precinct) * layer_count
+            + u64::from(layer);
+        match seen.get_mut(index as usize) {
+            Some(seen) if !*seen => {
+                *seen = true;
+                visited += 1;
+                if let Err(error) = visit(layer, resolution, component, precinct) {
+                    failure = Some(error);
+                }
             }
-        };
+            Some(_) => {}
+            None => failure = Some("a JPEG 2000 packet names a missing precinct"),
+        }
+    };
     for change in changes {
         let layers = change.layer_end.min(coding.layers);
         let resolutions = change.resolution_start..change.resolution_end.min(most_resolutions);
@@ -717,7 +766,7 @@ fn packet_order(
         match change.order {
             // LRCP and RLCP iterate precinct numbers directly.
             0 | 1 => {
-                let mut visit = |layer: u32, resolution: u32, order: &mut Vec<_>| {
+                let mut walk_precincts = |layer: u32, resolution: u32, order: &mut ()| {
                     for component in comps.clone() {
                         for precinct in 0..precinct_count(component, resolution).unwrap_or(0) {
                             emit(layer, resolution, component, precinct, order);
@@ -727,13 +776,13 @@ fn packet_order(
                 if change.order == 0 {
                     for layer in 0..layers {
                         for resolution in resolutions.clone() {
-                            visit(layer, resolution, &mut order);
+                            walk_precincts(layer, resolution, &mut order);
                         }
                     }
                 } else {
                     for resolution in resolutions.clone() {
                         for layer in 0..layers {
-                            visit(layer, resolution, &mut order);
+                            walk_precincts(layer, resolution, &mut order);
                         }
                     }
                 }
@@ -808,8 +857,8 @@ fn packet_order(
                 if (ys.len() as u64).saturating_mul(xs.len() as u64) > MAX_CODE_BLOCKS as u64 {
                     return Err("a JPEG 2000 tile has too many precinct positions");
                 }
-                let mut visit =
-                    |order: &mut Vec<_>, component: u32, resolution: u32, x: u64, y: u64| {
+                let mut walk_position =
+                    |order: &mut (), component: u32, resolution: u32, x: u64, y: u64| {
                         if let Some(precinct) = positions(component, resolution, x, y) {
                             for layer in 0..layers {
                                 emit(layer, resolution, component, precinct, order);
@@ -822,7 +871,7 @@ fn packet_order(
                             for &y in &ys {
                                 for &x in &xs {
                                     for component in comps.clone() {
-                                        visit(&mut order, component, resolution, x, y);
+                                        walk_position(&mut order, component, resolution, x, y);
                                     }
                                 }
                             }
@@ -833,7 +882,7 @@ fn packet_order(
                             for &x in &xs {
                                 for component in comps.clone() {
                                     for resolution in resolutions.clone() {
-                                        visit(&mut order, component, resolution, x, y);
+                                        walk_position(&mut order, component, resolution, x, y);
                                     }
                                 }
                             }
@@ -844,7 +893,7 @@ fn packet_order(
                             for &y in &ys {
                                 for &x in &xs {
                                     for resolution in resolutions.clone() {
-                                        visit(&mut order, component, resolution, x, y);
+                                        walk_position(&mut order, component, resolution, x, y);
                                     }
                                 }
                             }
@@ -855,7 +904,10 @@ fn packet_order(
             _ => return Err("a JPEG 2000 progression order is invalid"),
         }
     }
-    Ok(order)
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(visited),
+    }
 }
 
 /// Check that every tile of `codestream` holds all of its packets.
@@ -1053,15 +1105,21 @@ pub(crate) fn packet_usage(codestream: &[u8]) -> Walk<Vec<(usize, usize)>> {
                 steps[component as usize],
             ));
         }
+        if tile.coding.layers == 0 {
+            return Err("a JPEG 2000 COD segment has no quality layers");
+        }
         let expected = precincts
             .checked_mul(u64::from(tile.coding.layers))
             .ok_or("a JPEG 2000 tile implies too many packets")?;
         let header_bytes = tile.packed.as_ref().map_or(tile.body.len(), Vec::len) as u64;
-        if expected > header_bytes || expected > MAX_PACKETS {
+        if precincts > MAX_PRECINCTS || expected > MAX_PACKETS {
+            return Err("a JPEG 2000 tile has too many precincts or packets");
+        }
+        if expected > header_bytes {
             return Err("a JPEG 2000 tile is missing packets");
         }
         let mut blocks = 0;
-        let mut tile_components = (0..components)
+        let (geometry, mut states): (Vec<TileComponent>, Vec<PrecinctStates>) = (0..components)
             .map(|component| {
                 tile_component(
                     tile.coding.style(component)?,
@@ -1070,44 +1128,40 @@ pub(crate) fn packet_usage(codestream: &[u8]) -> Walk<Vec<(usize, usize)>> {
                     &mut blocks,
                 )
             })
-            .collect::<Walk<Vec<_>>>()?;
+            .collect::<Walk<Vec<_>>>()?
+            .into_iter()
+            .unzip();
         // The structure must hold exactly the precincts that were counted.
-        let built: u64 = tile_components
+        let built: u64 = states
             .iter()
-            .flat_map(|component| &component.resolutions)
-            .map(|resolution| resolution.precincts.len() as u64)
+            .flatten()
+            .map(|resolution| resolution.len() as u64)
             .sum();
         if built != precincts {
             return Err("a JPEG 2000 tile's precinct grid is inconsistent");
         }
-        let order = packet_order(&tile.coding, &tile_components, bounds)?;
-        // POC ranges must cover every packet that the tile implies.
-        if order.len() as u64 != expected {
-            return Err("a JPEG 2000 tile is missing packets");
-        }
         let (mut body, mut header) = (0_usize, 0_usize);
-        for (layer, resolution, component, precinct) in order {
-            if tile.coding.sop && tile.body.get(body..body + 2) == Some(&[0xFF, 0x91]) {
+        let (sop, eph) = (tile.coding.sop, tile.coding.eph);
+        let tile_body = &tile.body;
+        let packed = tile.packed.as_deref();
+        let mut parse = |layer: u32, resolution: u32, component: u32, precinct: u64| -> Walk<()> {
+            if sop && tile_body.get(body..body + 2) == Some(&[0xFF, 0x91]) {
                 body += 6;
             }
-            let tile_component = &mut tile_components[component as usize];
-            let style = tile_component.style;
-            let precinct = tile_component.resolutions[resolution as usize]
-                .precincts
+            let style = geometry[component as usize].style;
+            let precinct = states[component as usize][resolution as usize]
                 .get_mut(precinct as usize)
                 .ok_or("a JPEG 2000 packet names a missing precinct")?;
-            let source: &[u8] = match &tile.packed {
+            let source: &[u8] = match packed {
                 Some(packed) => packed
                     .get(header..)
                     .ok_or("a JPEG 2000 tile is missing packets")?,
-                None => tile
-                    .body
+                None => tile_body
                     .get(body..)
                     .ok_or("a JPEG 2000 tile is missing packets")?,
             };
-            let (header_length, body_length) =
-                packet(source, layer, precinct, style, tile.coding.eph)?;
-            if tile.packed.is_some() {
+            let (header_length, body_length) = packet(source, layer, precinct, style, eph)?;
+            if packed.is_some() {
                 header += header_length;
             } else {
                 body += header_length;
@@ -1117,9 +1171,15 @@ pub(crate) fn packet_usage(codestream: &[u8]) -> Walk<Vec<(usize, usize)>> {
                     usize::try_from(body_length).map_err(|_| "a JPEG 2000 packet is too long")?,
                 )
                 .ok_or("a JPEG 2000 packet is too long")?;
-            if body > tile.body.len() {
+            if body > tile_body.len() {
                 return Err("a JPEG 2000 tile is missing packets");
             }
+            Ok(())
+        };
+        let visited = packet_order(&tile.coding, &geometry, bounds, expected, &mut parse)?;
+        // POC ranges must cover every packet that the tile implies.
+        if visited != expected {
+            return Err("a JPEG 2000 tile is missing packets");
         }
         usage.push((body, tile.body.len()));
     }

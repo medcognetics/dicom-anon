@@ -135,8 +135,10 @@ pub(crate) struct Censored {
     pub counts: CensorCounts,
     /// The new native Pixel Data when a region was censored.
     pub pixel_data: Option<InMemElement>,
-    /// A JPEG 2000 frame used the irreversible 9/7 wavelet, so the samples are lossy.
-    pub irreversible: bool,
+    /// The Lossy Image Compression Method that the codestreams themselves show, whatever
+    /// the transfer syntax says: `ISO_15444_1` for the JPEG 2000 9/7 wavelet, and
+    /// `ISO_10918_1` for DCT JPEG or lossless JPEG with a point transform.
+    pub lossy_method: Option<&'static str>,
 }
 
 struct Geometry {
@@ -349,13 +351,13 @@ fn geometry(object: &InMemDicomObject) -> Result<Geometry> {
     })
 }
 
-/// Decode every frame into one sample buffer, frame after frame. `irreversible` is set
-/// when a JPEG 2000 frame uses the irreversible 9/7 wavelet.
+/// Decode every frame into one sample buffer, frame after frame. `lossy_method` is set
+/// when a codestream shows lossy coding.
 fn decode_frames(
     object: &InMemDicomObject,
     transfer_syntax: &str,
     geometry: &Geometry,
-    irreversible: &mut bool,
+    lossy_method: &mut Option<&'static str>,
 ) -> Result<Vec<u16>> {
     let element = object
         .get(tags::PIXEL_DATA)
@@ -445,13 +447,18 @@ fn decode_frames(
             };
             let samples = if JPEG_2000.contains(&transfer_syntax) {
                 let frame = crate::codec::decode_jpeg2000(codestream, info)?;
-                *irreversible |= frame.irreversible;
+                if frame.irreversible {
+                    *lossy_method = Some("ISO_15444_1");
+                }
                 frame.samples
             } else if JPEG_LS.contains(&transfer_syntax) {
                 jpegls::decode(codestream, columns, rows)
                     .map(|(samples, _, _)| samples)
                     .map_err(|_| not_assessed("a JPEG-LS frame cannot be decoded"))?
             } else if JPEG.contains(&transfer_syntax) {
+                if crate::codec::jpeg_is_lossy(codestream) {
+                    *lossy_method = Some("ISO_10918_1");
+                }
                 crate::codec::decode_jpeg(codestream, info)?
             } else {
                 return Err(not_assessed("this transfer syntax is not supported"));
@@ -960,7 +967,7 @@ pub(crate) fn censor(
         return Ok(Censored {
             counts: CensorCounts::default(),
             pixel_data: None,
-            irreversible: false,
+            lossy_method: None,
         });
     }
     if object.get(tags::FLOAT_PIXEL_DATA).is_some()
@@ -969,8 +976,8 @@ pub(crate) fn censor(
         return Err(not_assessed("floating-point Pixel Data is not supported"));
     }
     let geometry = geometry(object)?;
-    let mut irreversible = false;
-    let mut samples = decode_frames(object, transfer_syntax, &geometry, &mut irreversible)?;
+    let mut lossy_method = None;
+    let mut samples = decode_frames(object, transfer_syntax, &geometry, &mut lossy_method)?;
     // A sample above Bits Stored is content that the detector would not see.
     let max_value = geometry.max_value();
     if samples.iter().any(|&value| value > max_value) {
@@ -993,7 +1000,7 @@ pub(crate) fn censor(
         return Ok(Censored {
             counts,
             pixel_data: None,
-            irreversible,
+            lossy_method,
         });
     }
     // The 16-bit output takes the decoded buffer without a copy.
@@ -1014,7 +1021,7 @@ pub(crate) fn censor(
     Ok(Censored {
         counts,
         pixel_data: Some(pixel_data),
-        irreversible,
+        lossy_method,
     })
 }
 

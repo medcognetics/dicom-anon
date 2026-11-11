@@ -219,8 +219,13 @@ pub fn walk_jpeg2000_codestream(codestream: &[u8]) -> Result<bool> {
     if tile_width == 0 || tile_height == 0 {
         return Err(not_assessed("invalid tile grid"));
     }
-    let tiles = width.saturating_sub(tile_x0).div_ceil(tile_width)
-        * height.saturating_sub(tile_y0).div_ceil(tile_height);
+    let tiles = width
+        .saturating_sub(tile_x0)
+        .div_ceil(tile_width)
+        .saturating_mul(height.saturating_sub(tile_y0).div_ceil(tile_height));
+    if tiles > MAX_JPEG2000_TILES {
+        return Err(not_assessed("a JPEG 2000 frame has too many tiles"));
+    }
     let irreversible = check_jpeg2000_tiles(codestream, tiles)?;
     crate::j2k_packets::check_packets(codestream).map_err(not_assessed)?;
     Ok(irreversible)
@@ -322,6 +327,41 @@ fn check_jpeg2000_header(codestream: &[u8], info: FrameInfo) -> Result<u64> {
 /// `rows * columns` samples with libjpeg-turbo's accurate integer IDCT.
 pub(crate) fn decode_jpeg(codestream: &[u8], info: FrameInfo) -> Result<Vec<u16>> {
     turbo::decode(codestream, info)
+}
+
+/// Whether a JPEG codestream holds lossy samples whatever its transfer syntax says: a
+/// DCT frame (SOF0 to SOF2), or a lossless frame (SOF3) with a nonzero point transform,
+/// which drops the low bits. Reads the marker segments up to the first scan header.
+pub(crate) fn jpeg_is_lossy(codestream: &[u8]) -> bool {
+    let mut position = 2;
+    let mut lossless = false;
+    while let (Some(&0xFF), Some(&marker)) =
+        (codestream.get(position), codestream.get(position + 1))
+    {
+        if marker == 0xFF {
+            position += 1;
+            continue;
+        }
+        let Some(length) = codestream
+            .get(position + 2..position + 4)
+            .map(|bytes| usize::from(u16::from_be_bytes([bytes[0], bytes[1]])))
+            .filter(|&length| length >= 2)
+        else {
+            return false;
+        };
+        let segment = codestream
+            .get(position + 4..position + 2 + length)
+            .unwrap_or(&[]);
+        match marker {
+            0xC0..=0xC2 => return true,
+            0xC3 => lossless = true,
+            // The last byte of a scan header holds Ah and Al; Al is the point transform.
+            0xDA => return lossless && segment.last().is_some_and(|&byte| byte & 0x0F != 0),
+            _ => {}
+        }
+        position += 2 + length;
+    }
+    false
 }
 
 /// The libjpeg-turbo FFI. This is the only `unsafe` code in the crate: libjpeg-turbo has
@@ -880,8 +920,44 @@ mod tests {
         // 2048 x 2048 with 1 x 1 precincts: about 4 million precincts, one data byte.
         let started = std::time::Instant::now();
         let error = jpeg2000_packet_usage(&header_only(2048, 2048, 0, 1, 0)).unwrap_err();
-        assert!(error.to_string().contains("missing packets"), "{error}");
+        assert!(error.to_string().contains("too many precincts"), "{error}");
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_header_whose_precincts_outnumber_its_data_fails_before_allocating() {
+        // 512 x 512 with 1 x 1 precincts: 262144 precincts, under the cap, one data byte.
+        let error = jpeg2000_packet_usage(&header_only(512, 512, 0, 1, 0)).unwrap_err();
+        assert!(error.to_string().contains("missing packets"), "{error}");
+    }
+
+    #[test]
+    fn zero_quality_layers_fail_closed() {
+        let error = jpeg2000_packet_usage(&header_only(512, 512, 0, 0, 0)).unwrap_err();
+        assert!(error.to_string().contains("no quality layers"), "{error}");
+    }
+
+    #[test]
+    fn lossy_jpeg_is_recognised_from_the_codestream() {
+        assert!(!jpeg_is_lossy(&lossless_stream(&LOSSLESS, 4, 4, 0)));
+        assert!(jpeg_is_lossy(&lossless_stream(&LOSSLESS, 4, 4, 1)));
+        let directory =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/jpeg12");
+        assert!(jpeg_is_lossy(
+            &std::fs::read(directory.join("sequential_37x23_q90.jpg")).unwrap()
+        ));
+    }
+
+    #[test]
+    fn the_walk_hook_bounds_the_tile_count() {
+        // u32::MAX x u32::MAX with 1 x 1 tiles.
+        let mut data = vec![0xFF, 0x4F, 0xFF, 0x51, 0x00, 41, 0, 0];
+        for value in [u32::MAX, u32::MAX, 0, 0, 1, 1, 0, 0] {
+            data.extend(value.to_be_bytes());
+        }
+        data.extend([0, 1, 11, 1, 1, 0xFF, 0xD9]);
+        let error = walk_jpeg2000_codestream(&data).unwrap_err();
+        assert!(error.to_string().contains("too many tiles"), "{error}");
     }
 
     #[test]
