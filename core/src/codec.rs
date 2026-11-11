@@ -338,9 +338,17 @@ pub(crate) fn jpeg_is_lossy(codestream: &[u8]) -> bool {
     while let (Some(&0xFF), Some(&marker)) =
         (codestream.get(position), codestream.get(position + 1))
     {
-        if marker == 0xFF {
-            position += 1;
-            continue;
+        match marker {
+            // Fill bytes, and markers without a segment (TEM, RSTn).
+            0xFF => {
+                position += 1;
+                continue;
+            }
+            0x01 | 0xD0..=0xD7 => {
+                position += 2;
+                continue;
+            }
+            _ => {}
         }
         let Some(length) = codestream
             .get(position + 2..position + 4)
@@ -353,8 +361,11 @@ pub(crate) fn jpeg_is_lossy(codestream: &[u8]) -> bool {
             .get(position + 4..position + 2 + length)
             .unwrap_or(&[]);
         match marker {
-            0xC0..=0xC2 => return true,
-            0xC3 => lossless = true,
+            // Lossless frames: Huffman SOF3 and SOF7, arithmetic SOF11 and SOF15.
+            0xC3 | 0xC7 | 0xCB | 0xCF => lossless = true,
+            // Every other SOFn is a DCT frame. DHT (C4), JPG (C8) and DAC (CC) share
+            // the range.
+            0xC0..=0xCF if ![0xC4, 0xC8, 0xCC].contains(&marker) => return true,
             // The last byte of a scan header holds Ah and Al; Al is the point transform.
             0xDA => return lossless && segment.last().is_some_and(|&byte| byte & 0x0F != 0),
             _ => {}
@@ -946,6 +957,50 @@ mod tests {
         assert!(jpeg_is_lossy(
             &std::fs::read(directory.join("sequential_37x23_q90.jpg")).unwrap()
         ));
+    }
+
+    #[test]
+    fn arithmetic_dct_and_standalone_markers_are_read() {
+        let mut stream = vec![0xFF, 0xD8, 0xFF, 0x01];
+        stream.extend([0xFF, 0xC9, 0x00, 0x0B, 12, 0, 1, 0, 1, 1, 1, 0x11, 0]);
+        assert!(jpeg_is_lossy(&stream));
+    }
+
+    #[test]
+    fn a_tile_grid_that_does_not_cover_the_image_origin_fails_closed() {
+        // Xsiz 1 with XTOsiz 2, and a first tile that ends before XOsiz.
+        for (width, x0, tile, tile_x0) in [(1_u32, 0_u32, 1_u32, 2_u32), (64, 32, 16, 0)] {
+            let mut data = vec![0xFF, 0x4F, 0xFF, 0x51, 0x00, 41, 0, 0];
+            for value in [width, 64, x0, 0, tile, 64, tile_x0, 0] {
+                data.extend(value.to_be_bytes());
+            }
+            data.extend([0, 1, 11, 1, 1, 0xFF, 0xD9]);
+            assert!(jpeg2000_packet_usage(&data).is_err());
+        }
+    }
+
+    #[test]
+    fn poc_segments_in_both_the_main_and_a_tile_header_fail_closed() {
+        let mut data = header_only(1, 1, 0, 1, 1);
+        // A tile POC after the main header's one, before SOD.
+        let sod = data
+            .windows(2)
+            .rposition(|pair| pair == [0xFF, 0x93])
+            .unwrap();
+        data.splice(sod..sod, [0xFF, 0x5F, 0x00, 0x09, 0, 0, 0, 1, 1, 1, 0]);
+        let sot = data
+            .windows(2)
+            .position(|pair| pair == [0xFF, 0x90])
+            .unwrap();
+        let length = (data.len() - 2 - sot) as u32;
+        data[sot + 6..sot + 10].copy_from_slice(&length.to_be_bytes());
+        let error = jpeg2000_packet_usage(&data).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("both the main and a tile header"),
+            "{error}"
+        );
     }
 
     #[test]

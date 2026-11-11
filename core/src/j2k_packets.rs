@@ -212,8 +212,13 @@ impl Coding {
                 );
             }
             0x5F => {
-                if tile && !self.tile_changes {
-                    self.changes.clear();
+                // T.800 says a tile's POC replaces the main header's; the pinned OpenJPEG
+                // appends it. The two orders can differ, so a codestream with both is not
+                // assessed.
+                if tile && !self.tile_changes && !self.changes.is_empty() {
+                    return Err("a JPEG 2000 codestream has POC segments in both the main and a tile header");
+                }
+                if tile {
                     self.tile_changes = true;
                 }
                 self.changes.extend(parse_poc(segment, components)?);
@@ -930,7 +935,17 @@ pub(crate) fn packet_usage(codestream: &[u8]) -> Walk<Vec<(usize, usize)>> {
     let (width, height, x0, y0) = (field(0)?, field(1)?, field(2)?, field(3)?);
     let (tile_width, tile_height, tile_x0, tile_y0) = (field(4)?, field(5)?, field(6)?, field(7)?);
     let components = u32::from(read_u16(siz, 34)?);
-    if tile_width == 0 || tile_height == 0 || components == 0 || x0 >= width || y0 >= height {
+    // T.800 A.5.1: the first tile starts at or before the image and covers its origin.
+    if tile_width == 0
+        || tile_height == 0
+        || components == 0
+        || x0 >= width
+        || y0 >= height
+        || tile_x0 > x0
+        || tile_y0 > y0
+        || tile_x0.saturating_add(tile_width) <= x0
+        || tile_y0.saturating_add(tile_height) <= y0
+    {
         return Err("a SIZ segment is invalid");
     }
     let steps: Vec<(u64, u64)> = (0..components as usize)
