@@ -117,7 +117,7 @@ fn parse_poc(segment: &[u8], components: u32) -> Walk<Vec<Change>> {
     if segment.is_empty() || !segment.len().is_multiple_of(size) {
         return Err("a POC segment is malformed");
     }
-    Ok(segment
+    let changes: Vec<Change> = segment
         .chunks_exact(size)
         .map(|entry| {
             let (component_start, rest) = if wide {
@@ -133,15 +133,9 @@ fn parse_poc(segment: &[u8], components: u32) -> Walk<Vec<Change>> {
             let (component_end, order) = if wide {
                 (u32::from(u16::from_be_bytes([rest[3], rest[4]])), rest[5])
             } else {
-                // CEpoc 0 means 256 when Csiz is at most 256 (T.800 Table A.32).
-                (
-                    if rest[3] == 0 {
-                        256
-                    } else {
-                        u32::from(rest[3])
-                    },
-                    rest[4],
-                )
+                // T.800 reads CEpoc 0 as 256, but the pinned OpenJPEG reads it as 0. The
+                // value is rejected below, so that the walk and the decoder agree.
+                (u32::from(rest[3]), rest[4])
             };
             Change {
                 resolution_start: u32::from(entry[0]),
@@ -152,7 +146,11 @@ fn parse_poc(segment: &[u8], components: u32) -> Walk<Vec<Change>> {
                 order,
             }
         })
-        .collect())
+        .collect();
+    if changes.iter().any(|change| change.component_end == 0) {
+        return Err("a JPEG 2000 POC entry has CEpoc 0, which decoders read differently");
+    }
+    Ok(changes)
 }
 
 /// The coding parameters of the main header, or of a tile after its header.
@@ -737,11 +735,14 @@ fn packet_order(
         return Err("a JPEG 2000 tile's precinct grid is inconsistent");
     }
     let mut seen = vec![false; expected as usize];
-    let mut visited = 0_u64;
-    let mut failure: Option<&'static str> = None;
+    // Shared with the loops below, which stop once a packet fails or every packet that
+    // the tile implies has been visited.
+    let visited = std::cell::Cell::new(0_u64);
+    let failure: std::cell::Cell<Option<&'static str>> = std::cell::Cell::new(None);
+    let stop = || failure.get().is_some() || visited.get() >= expected;
     let mut order = ();
     let mut emit = |layer: u32, resolution: u32, component: u32, precinct: u64, _: &mut ()| {
-        if failure.is_some() {
+        if failure.get().is_some() {
             return;
         }
         let index = (offsets[component as usize][resolution as usize] + precinct) * layer_count
@@ -749,16 +750,19 @@ fn packet_order(
         match seen.get_mut(index as usize) {
             Some(seen) if !*seen => {
                 *seen = true;
-                visited += 1;
+                visited.set(visited.get() + 1);
                 if let Err(error) = visit(layer, resolution, component, precinct) {
-                    failure = Some(error);
+                    failure.set(Some(error));
                 }
             }
             Some(_) => {}
-            None => failure = Some("a JPEG 2000 packet names a missing precinct"),
+            None => failure.set(Some("a JPEG 2000 packet names a missing precinct")),
         }
     };
     for change in changes {
+        if stop() {
+            break;
+        }
         let layers = change.layer_end.min(coding.layers);
         let resolutions = change.resolution_start..change.resolution_end.min(most_resolutions);
         let comps = change.component_start..change.component_end.min(component_count);
@@ -780,12 +784,18 @@ fn packet_order(
                 };
                 if change.order == 0 {
                     for layer in 0..layers {
+                        if stop() {
+                            break;
+                        }
                         for resolution in resolutions.clone() {
                             walk_precincts(layer, resolution, &mut order);
                         }
                     }
                 } else {
                     for resolution in resolutions.clone() {
+                        if stop() {
+                            break;
+                        }
                         for layer in 0..layers {
                             walk_precincts(layer, resolution, &mut order);
                         }
@@ -874,6 +884,9 @@ fn packet_order(
                     2 => {
                         for resolution in resolutions.clone() {
                             for &y in &ys {
+                                if stop() {
+                                    break;
+                                }
                                 for &x in &xs {
                                     for component in comps.clone() {
                                         walk_position(&mut order, component, resolution, x, y);
@@ -884,6 +897,9 @@ fn packet_order(
                     }
                     3 => {
                         for &y in &ys {
+                            if stop() {
+                                break;
+                            }
                             for &x in &xs {
                                 for component in comps.clone() {
                                     for resolution in resolutions.clone() {
@@ -896,6 +912,9 @@ fn packet_order(
                     _ => {
                         for component in comps.clone() {
                             for &y in &ys {
+                                if stop() {
+                                    break;
+                                }
                                 for &x in &xs {
                                     for resolution in resolutions.clone() {
                                         walk_position(&mut order, component, resolution, x, y);
@@ -909,9 +928,9 @@ fn packet_order(
             _ => return Err("a JPEG 2000 progression order is invalid"),
         }
     }
-    match failure {
+    match failure.get() {
         Some(error) => Err(error),
-        None => Ok(visited),
+        None => Ok(visited.get()),
     }
 }
 

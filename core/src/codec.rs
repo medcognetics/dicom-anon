@@ -980,6 +980,19 @@ mod tests {
     }
 
     #[test]
+    fn a_poc_entry_with_cepoc_0_fails_closed() {
+        let mut data = header_only(1, 1, 0, 1, 1);
+        // CEpoc is the sixth byte of the POC entry.
+        let poc = data
+            .windows(2)
+            .position(|pair| pair == [0xFF, 0x5F])
+            .unwrap();
+        data[poc + 4 + 5] = 0;
+        let error = jpeg2000_packet_usage(&data).unwrap_err();
+        assert!(error.to_string().contains("CEpoc 0"), "{error}");
+    }
+
+    #[test]
     fn poc_segments_in_both_the_main_and_a_tile_header_fail_closed() {
         let mut data = header_only(1, 1, 0, 1, 1);
         // A tile POC after the main header's one, before SOD.
