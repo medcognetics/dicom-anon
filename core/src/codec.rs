@@ -167,12 +167,19 @@ fn check_jpeg2000_tiles(codestream: &[u8], tiles: u64) -> Result<bool> {
         if tile >= tile_count {
             return Err(malformed());
         }
-        // TPsot is one byte, so a tile has at most 255 tile-parts.
+        // TPsot numbers the tile-parts of a tile from 0 in order, so a tile has at most
+        // 255. TNsot, where it is not 0, is the same in every tile-part of the tile.
+        if u16::from(sot[6]) != parts[tile] {
+            return Err(malformed());
+        }
         parts[tile] += 1;
         if parts[tile] > 255 {
             return Err(malformed());
         }
         if total != 0 {
+            if declared[tile] != 0 && declared[tile] != u16::from(total) {
+                return Err(malformed());
+            }
             declared[tile] = u16::from(total);
         }
         // The tile-part header, up to SOD.
@@ -333,6 +340,11 @@ pub(crate) fn decode_jpeg(codestream: &[u8], info: FrameInfo) -> Result<Vec<u16>
 /// DCT frame (SOF0 to SOF2), or a lossless frame (SOF3) with a nonzero point transform,
 /// which drops the low bits. Reads the marker segments up to the first scan header.
 pub(crate) fn jpeg_is_lossy(codestream: &[u8]) -> bool {
+    // A header that this parser cannot read counts as lossy, so that an output is never
+    // marked lossless on a guess.
+    if !codestream.starts_with(&[0xFF, 0xD8]) {
+        return true;
+    }
     let mut position = 2;
     let mut lossless = false;
     while let (Some(&0xFF), Some(&marker)) =
@@ -355,7 +367,7 @@ pub(crate) fn jpeg_is_lossy(codestream: &[u8]) -> bool {
             .map(|bytes| usize::from(u16::from_be_bytes([bytes[0], bytes[1]])))
             .filter(|&length| length >= 2)
         else {
-            return false;
+            return true;
         };
         let segment = codestream
             .get(position + 4..position + 2 + length)
@@ -372,7 +384,7 @@ pub(crate) fn jpeg_is_lossy(codestream: &[u8]) -> bool {
         }
         position += 2 + length;
     }
-    false
+    true
 }
 
 /// The libjpeg-turbo FFI. This is the only `unsafe` code in the crate: libjpeg-turbo has
@@ -866,11 +878,14 @@ mod tests {
         let mut data = vec![0xFF, 0x4F, 0xFF, 0x51, 0x00, 41];
         data.extend([0; 39]);
         data.extend([0xFF, 0x52, 0x00, 12, 0, 0, 0, 1, 0, 3, 4, 4, 0, transform]);
+        let mut counts = std::collections::HashMap::new();
         for &(tile, parts) in tiles {
+            let index: &mut u8 = counts.entry(tile).or_default();
             data.extend([0xFF, 0x90, 0x00, 10]);
             data.extend(tile.to_be_bytes());
             data.extend(16_u32.to_be_bytes());
-            data.extend([0, parts, 0xFF, 0x93, 0x12, 0x34]);
+            data.extend([*index, parts, 0xFF, 0x93, 0x12, 0x34]);
+            *index = index.wrapping_add(1);
         }
         data.extend([0xFF, 0xD9]);
         data
@@ -893,6 +908,13 @@ mod tests {
         let many: Vec<(u16, u8)> = vec![(0, 0); 256];
         assert!(check_jpeg2000_tiles(&skeleton(1, &many), 1).is_err());
         assert!(check_jpeg2000_tiles(&skeleton(1, &many[..255]), 1).is_ok());
+        // Tile-parts out of order, and tile-parts that disagree on TNsot.
+        let mut swapped = skeleton(1, &[(0, 2), (0, 2)]);
+        swapped[59 + 10] = 1;
+        assert!(check_jpeg2000_tiles(&swapped, 1).is_err());
+        let mut disagree = skeleton(1, &[(0, 2), (0, 2)]);
+        disagree[59 + 16 + 11] = 3;
+        assert!(check_jpeg2000_tiles(&disagree, 1).is_err());
         // An unknown transform value.
         assert!(check_jpeg2000_tiles(&skeleton(7, &[(0, 1)]), 1).is_err());
     }
@@ -977,6 +999,43 @@ mod tests {
             data.extend([0, 1, 11, 1, 1, 0xFF, 0xD9]);
             assert!(jpeg2000_packet_usage(&data).is_err());
         }
+    }
+
+    #[test]
+    fn htj2k_codestreams_fail_closed() {
+        let cod = |data: &[u8]| {
+            data.windows(2)
+                .position(|pair| pair == [0xFF, 0x52])
+                .unwrap()
+        };
+        // The HT code-block style bit, and the reserved bit 7.
+        for style in [0x40, 0x80] {
+            let mut data = header_only(1, 1, 0, 1, 0);
+            let at = cod(&data) + 12;
+            data[at] = style;
+            let error = jpeg2000_packet_usage(&data).unwrap_err();
+            assert!(error.to_string().contains("HTJ2K"), "{error}");
+        }
+        // Rsiz bit 14.
+        let mut data = header_only(1, 1, 0, 1, 0);
+        data[6] = 0x40;
+        assert!(jpeg2000_packet_usage(&data).is_err());
+        // A CAP segment.
+        let mut data = header_only(1, 1, 0, 1, 0);
+        data.splice(45..45, [0xFF, 0x50, 0x00, 0x06, 0x00, 0x02, 0x00, 0x00]);
+        let error = jpeg2000_packet_usage(&data).unwrap_err();
+        assert!(
+            error.to_string().contains("extended capabilities"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_jpeg_header_that_cannot_be_read_counts_as_lossy() {
+        assert!(jpeg_is_lossy(&[0xFF, 0xC3, 0x00, 0x0B]));
+        assert!(jpeg_is_lossy(&[0xFF, 0xD8, 0xFF, 0xC3, 0x00]));
+        assert!(jpeg_is_lossy(&[0xFF, 0xD8, 0xFF, 0xC3, 0x00, 0x01]));
+        assert!(jpeg_is_lossy(&[0xFF, 0xD8, 0x00]));
     }
 
     #[test]

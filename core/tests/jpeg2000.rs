@@ -716,3 +716,28 @@ fn a_poc_that_leaves_out_resolutions_fails_closed() {
     let error = anonymize(&object(with_poc, uids::JPEG2000_LOSSLESS, 12)).unwrap_err();
     assert!(error.to_string().contains("missing packets"), "{error}");
 }
+
+#[test]
+fn a_last_tile_part_with_psot_0_is_read_to_eoc_or_to_the_end() {
+    let codestream = encode(&frame(4095, 1800), 12, Config::default());
+    let sot = tile_part_starts(&codestream)[0];
+    let mut open = codestream.clone();
+    open[sot + 6..sot + 10].copy_from_slice(&0_u32.to_be_bytes());
+    let usage = dicom_anon::jpeg2000_packet_usage(&open).unwrap();
+    assert!(
+        usage.iter().all(|(used, available)| used == available),
+        "{usage:?}"
+    );
+    // Without EOC, the last bytes are packet data.
+    let mut without_eoc = open.clone();
+    let eoc = open
+        .windows(2)
+        .rposition(|pair| pair == [0xFF, 0xD9])
+        .unwrap();
+    without_eoc.truncate(eoc);
+    let usage = dicom_anon::jpeg2000_packet_usage(&without_eoc).unwrap();
+    assert!(
+        usage.iter().all(|(used, available)| used == available),
+        "{usage:?}"
+    );
+}

@@ -78,6 +78,11 @@ impl ComponentStyle {
         if levels > 32 || width > 8 || height > 8 || width + height > 8 {
             return Err("a coding style segment is invalid");
         }
+        // HTJ2K code-blocks (ITU-T T.814) split their passes into segments by other
+        // rules, and bit 7 is reserved, so the walk cannot check those packets.
+        if style & 0xC0 != 0 {
+            return Err("a JPEG 2000 codestream uses HTJ2K or reserved code-block styles");
+        }
         let precincts = if user_precincts {
             let sizes = data
                 .get(5..5 + usize::from(levels) + 1)
@@ -688,8 +693,6 @@ struct Tile {
     coding_read: bool,
 }
 
-/// The packet order of one tile, as (layer, resolution, component, precinct), with
-/// progression order changes (OpenJPEG `pi.c`).
 /// Visit the packets of one tile in order, as (layer, resolution, component, precinct),
 /// with progression order changes (OpenJPEG `pi.c`). Each packet is visited once, and
 /// `expected` is the number that the tile implies. Returns how many were visited.
@@ -954,6 +957,10 @@ pub(crate) fn packet_usage(codestream: &[u8]) -> Walk<Vec<(usize, usize)>> {
     let (width, height, x0, y0) = (field(0)?, field(1)?, field(2)?, field(3)?);
     let (tile_width, tile_height, tile_x0, tile_y0) = (field(4)?, field(5)?, field(6)?, field(7)?);
     let components = u32::from(read_u16(siz, 34)?);
+    // Rsiz bit 14 marks an HTJ2K codestream (ITU-T T.814).
+    if read_u16(siz, 0)? & 0x4000 != 0 {
+        return Err("a JPEG 2000 codestream uses HTJ2K");
+    }
     // T.800 A.5.1: the first tile starts at or before the image and covers its origin.
     if tile_width == 0
         || tile_height == 0
@@ -1021,6 +1028,10 @@ pub(crate) fn packet_usage(codestream: &[u8]) -> Walk<Vec<(usize, usize)>> {
         if marker == 0x90 {
             break;
         }
+        // CAP (ITU-T T.801 and T.814) declares extended capabilities, such as HTJ2K.
+        if marker == 0x50 {
+            return Err("a JPEG 2000 codestream declares extended capabilities");
+        }
         if marker == 0x60 {
             let (&index, data) = segment.split_first().ok_or("a PPM segment is truncated")?;
             ppm.push((index, data));
@@ -1076,8 +1087,17 @@ pub(crate) fn packet_usage(codestream: &[u8]) -> Walk<Vec<(usize, usize)>> {
             header = next;
         }
         tile.coding_read = true;
+        // Psot 0: the tile-part runs to EOC, or to the end of a codestream without one.
+        // A DICOM fragment may hold one pad byte after EOC.
         let end = if length == 0 {
-            codestream.len().saturating_sub(2).max(header + 2)
+            let trailer = if codestream.ends_with(&[0xFF, 0xD9]) {
+                2
+            } else if codestream.ends_with(&[0xFF, 0xD9, 0x00]) {
+                3
+            } else {
+                0
+            };
+            (codestream.len() - trailer).max(header + 2)
         } else {
             position
                 .checked_add(length)
