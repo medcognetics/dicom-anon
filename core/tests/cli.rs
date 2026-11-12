@@ -554,6 +554,10 @@ fn unsupported_pixel_option_is_rejected_before_processing() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported"));
 }
 
+const SHIPPED_REFERENCES_MAP: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../descriptor-maps/breast-imaging-references-ps3.16-2026d.json"
+);
 const SHIPPED_BREAST_MAP: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../descriptor-maps/breast-imaging-ps3.16-2026d.json"
@@ -715,6 +719,8 @@ fn shipped_breast_map_keeps_mg_and_dbt_code_sequences() {
         let source = breast_object(sop_class, view, modifier, region, in_frame_anatomy);
         let mut command = safe_harbor_command(&uid_map);
         command.arg("--descriptor-map").arg(SHIPPED_BREAST_MAP);
+        // Two maps load together: the CLI rejects a conflict between them.
+        command.arg("--descriptor-map").arg(SHIPPED_REFERENCES_MAP);
         for tag in CODE_TAGS {
             command.args(["--fail-on-unmapped", tag]);
         }
@@ -821,6 +827,76 @@ fn unlisted_code_is_counted_and_fails_closed_when_requested() {
 }
 
 #[test]
+fn fail_on_unmapped_sequence_counts_misses_outside_its_scope() {
+    let directory = tempfile::tempdir().unwrap();
+    let uid_map = directory.path().join("uid-map.json");
+    write_breast_uid_map(&uid_map);
+    // The unlisted code sits under View Modifier Code Sequence inside View Code Sequence.
+    let source = encode(breast_object(
+        uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION,
+        ("R-10242", "SRT", "cranio-caudal"),
+        ("SYNTH-UNLISTED", "SRT", "Synthetic unlisted modifier"),
+        ("T-04000", "SRT", "Breast"),
+        false,
+    ));
+    let run = |scope: &str| {
+        let mut command = safe_harbor_command(&uid_map);
+        command
+            .arg("--descriptor-map")
+            .arg(SHIPPED_BREAST_MAP)
+            .args(["--fail-on-unmapped", "00080100"])
+            .args(["--fail-on-unmapped-sequence", scope]);
+        run_with_stdin(&mut command, &source)
+    };
+
+    // Partial View Code Sequence is not on the path, so the miss is counted only.
+    let outside = run("00281352");
+    assert_eq!(
+        outside.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&outside.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&outside.stderr).unwrap();
+    assert_eq!(report["unmapped_dummy_replacements"]["00080100"], 1);
+
+    // Two scopes, one of them on the path, still stop the run.
+    let mut both = safe_harbor_command(&uid_map);
+    both.arg("--descriptor-map")
+        .arg(SHIPPED_BREAST_MAP)
+        .args(["--fail-on-unmapped", "00080100"])
+        .args(["--fail-on-unmapped-sequence", "00281352"])
+        .args(["--fail-on-unmapped-sequence", "00540220"]);
+    assert_eq!(run_with_stdin(&mut both, &source).status.code(), Some(2));
+
+    for scope in ["00540220", "00540222"] {
+        let inside = run(scope);
+        assert_eq!(inside.status.code(), Some(2), "{scope}");
+        let stderr = String::from_utf8_lossy(&inside.stderr);
+        assert!(
+            stderr.contains("(0054,0220)[0]/(0054,0222)[0]/(0008,0100)"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("SYNTH-UNLISTED"), "{stderr}");
+    }
+}
+
+#[test]
+fn fail_on_unmapped_sequence_rejects_a_tag_that_is_not_a_sequence() {
+    let output = run_with_stdin(
+        Command::new(env!("CARGO_BIN_EXE_dicom-anonymize"))
+            .args(["-", "--key-env", KEY_ENV])
+            .args(["--fail-on-unmapped", "00080100"])
+            .args(["--fail-on-unmapped-sequence", "00080100"])
+            .env(KEY_ENV, KEY),
+        &source_bytes(),
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("not a sequence in the standard data dictionary"));
+}
+
+#[test]
 fn fail_on_unmapped_rejects_malformed_tags() {
     let output = Command::new(env!("CARGO_BIN_EXE_dicom-anonymize"))
         .args(["-", "--fail-on-unmapped", "(0008,0100)"])
@@ -843,6 +919,16 @@ fn validator_rejects_the_anonymize_only_fail_on_unmapped_option() {
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("--fail-on-unmapped"));
+
+    let scoped = run_with_stdin(
+        Command::new(env!("CARGO_BIN_EXE_dicom-validate")).args([
+            "-",
+            "--fail-on-unmapped-sequence",
+            "00540220",
+        ]),
+        &source_bytes(),
+    );
+    assert_eq!(scoped.status.code(), Some(2));
 }
 
 const SENTINEL_SOURCE_UID: &str = "2.25.271828182845904523536028747135266249";
