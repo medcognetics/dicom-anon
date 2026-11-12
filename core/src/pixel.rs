@@ -1,6 +1,6 @@
 //! Fail-closed pixel-risk gates and codestream metadata-segment removal.
 //!
-//! The tool does not decode or inspect pixel samples. These checks control only
+//! These checks do not decode pixel samples; `pixel_text` does. These checks control only
 //! the declared Burned In Annotation value, the SOP Class, JPEG 2000 comment (COM)
 //! marker segments, and JPEG and JPEG-LS comment (COM) and application (APPn)
 //! marker segments. These segments can carry text outside the image samples.
