@@ -1,6 +1,7 @@
 //! Core de-identification engine.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use dicom_core::header::Header;
 use dicom_core::value::{DataSetSequence, Value};
@@ -135,10 +136,48 @@ impl AnonymizationReport {
     }
 }
 
+/// One de-identified instance from [`Anonymizer::anonymize_study`].
+#[derive(Debug, Clone)]
+pub struct StudyInstanceOutput {
+    /// De-identified object.
+    pub output: DefaultDicomObject,
+    /// Anonymization report for this instance.
+    pub report: AnonymizationReport,
+    /// Source-aware validation report for this instance. It is always conformant.
+    pub validation: crate::ValidationReport,
+}
+
+/// Result of [`Anonymizer::anonymize_study`].
+///
+/// `Debug` omits the UID map because it contains source UIDs.
+#[derive(Clone)]
+pub struct StudyOutput {
+    /// Outputs in the same order as the source instances.
+    pub instances: Vec<StudyInstanceOutput>,
+    /// Complete original-to-replacement UID map for the study. It is
+    /// re-identification material; never send it with the outputs.
+    pub uid_map: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for StudyOutput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StudyOutput")
+            .field("instances", &self.instances)
+            .field(
+                "uid_map",
+                &format_args!("<{} entries redacted>", self.uid_map.len()),
+            )
+            .finish()
+    }
+}
+
 /// Reusable deterministic de-identifier.
 #[derive(Clone, Debug)]
 pub struct Anonymizer {
     options: Options,
+    /// Parsed `fail_on_unmapped_sequences`.
+    guard_scope: BTreeSet<Tag>,
 }
 
 impl Anonymizer {
@@ -156,7 +195,11 @@ impl Anonymizer {
         {
             return Err(Error::SafeHarborPatientScopeRequired);
         }
-        Ok(Self { options })
+        let guard_scope = options.profile.fail_on_unmapped_scope()?;
+        Ok(Self {
+            options,
+            guard_scope,
+        })
     }
 
     /// De-identify a parsed DICOM object without modifying the source.
@@ -199,6 +242,96 @@ impl Anonymizer {
         let resolver = UidResolver::generate(source, self.options.profile.uid_mappings.clone())?;
         let (output, report, uids) = self.anonymize_with(source, resolver)?;
         Ok((output, report, uids.into_map()))
+    }
+
+    /// De-identify every instance of one study under the Safe Harbor metadata policy.
+    ///
+    /// One UID map is threaded through the instances in order: it starts from
+    /// `options.profile.uid_mappings`, and each missing replacement is drawn from the
+    /// operating-system CSPRNG as in [`Self::anonymize_with_generated_uid_map`]. Every
+    /// output is then checked with source-aware validation against the complete map.
+    ///
+    /// Every instance must have the Study Instance UID, Patient ID, and Issuer of
+    /// Patient ID of instance 0.
+    ///
+    /// The call fails as a whole. When any instance fails a gate, a transformation,
+    /// or validation, the error names only the instance index and attribute paths,
+    /// and no output is returned. The returned map is re-identification material;
+    /// keep it under the custody rules in the security documentation.
+    pub fn anonymize_study(&self, sources: &[DefaultDicomObject]) -> Result<StudyOutput> {
+        if self.options.profile.policy != DeidentificationPolicy::SafeHarborMetadata {
+            return Err(Error::UidMapGenerationRequiresSafeHarbor);
+        }
+        if sources.is_empty() {
+            return Err(Error::EmptyStudy);
+        }
+        // One patient scope and UID map must never link instances of different studies
+        // or patients. The error names only the index, never the differing values.
+        let identity = |object: &DefaultDicomObject| {
+            [
+                tags::STUDY_INSTANCE_UID,
+                tags::PATIENT_ID,
+                tags::ISSUER_OF_PATIENT_ID,
+            ]
+            // An absent and a zero-length value are the same unspecified value.
+            .map(|tag| element_text(object, tag).filter(|value| !value.is_empty()))
+        };
+        if let Some(index) = sources
+            .iter()
+            .position(|source| identity(source)[0].is_none())
+        {
+            return Err(Error::StudyInstanceUidMissing { index });
+        }
+        let first = identity(&sources[0]);
+        if let Some(index) = sources.iter().position(|source| identity(source) != first) {
+            return Err(Error::StudyMismatch { index });
+        }
+        let instance_error = |index: usize| {
+            move |error: Error| Error::StudyInstance {
+                index,
+                // Parser and encoder messages can echo source values, such as an
+                // unrecognized transfer syntax, so keep only the error kind.
+                source: Box::new(match error {
+                    Error::Read(_) => Error::Read("the instance could not be parsed".to_owned()),
+                    Error::Write(_) => Error::Write("the instance could not be encoded".to_owned()),
+                    other => other,
+                }),
+            }
+        };
+
+        let mut uid_map = self.options.profile.uid_mappings.clone();
+        let mut outputs = Vec::with_capacity(sources.len());
+        for (index, source) in sources.iter().enumerate() {
+            let resolver = UidResolver::generate(source, uid_map).map_err(instance_error(index))?;
+            let (output, report, uids) = self
+                .anonymize_with(source, resolver)
+                .map_err(instance_error(index))?;
+            uid_map = uids.into_map();
+            outputs.push((output, report));
+        }
+
+        let mut validation_options = self.options.clone();
+        validation_options.profile.uid_mappings = uid_map.clone();
+        let mut instances = Vec::with_capacity(outputs.len());
+        for (index, (source, (output, report))) in sources.iter().zip(outputs).enumerate() {
+            let validation =
+                crate::validate_source_object(source, &output, validation_options.clone())
+                    .map_err(instance_error(index))?;
+            if !validation.conformant {
+                let errors = validation
+                    .findings
+                    .iter()
+                    .filter(|finding| finding.severity == crate::Severity::Error)
+                    .count();
+                return Err(Error::StudyValidation { index, errors });
+            }
+            instances.push(StudyInstanceOutput {
+                output,
+                report,
+                validation,
+            });
+        }
+        Ok(StudyOutput { instances, uid_map })
     }
 
     fn anonymize_with(
@@ -244,6 +377,8 @@ impl Anonymizer {
             date_shift_days,
             time_shift_hours: i32::from(time_shift_hours),
             path: String::new(),
+            in_guard_scope: self.guard_scope.is_empty(),
+            guard_scope: &self.guard_scope,
             uids: &uids,
         };
 
@@ -736,7 +871,7 @@ impl Anonymizer {
         report: &mut AnonymizationReport,
     ) -> Result<()> {
         let key = format!("{:04X}{:04X}", tag.0, tag.1);
-        if self.options.profile.fail_on_unmapped.contains(&key) {
+        if context.in_guard_scope && self.options.profile.fail_on_unmapped.contains(&key) {
             return Err(Error::UnmappedDummyReplacement {
                 tag: format_tag(tag),
                 path: context.element_path(tag),
@@ -760,6 +895,11 @@ struct Context<'a> {
     time_shift_hours: i32,
     /// Path of the enclosing sequence item; empty at the top level.
     path: String,
+    /// Whether the fail-on-unmapped guard applies here: everywhere without a scope,
+    /// and otherwise inside a listed sequence, at any depth below it.
+    in_guard_scope: bool,
+    /// The sequences that set `in_guard_scope`.
+    guard_scope: &'a BTreeSet<Tag>,
     /// UID resolution state shared by every item of one object.
     uids: &'a RefCell<UidResolver>,
 }
@@ -771,6 +911,8 @@ impl<'a> Context<'a> {
             date_shift_days: self.date_shift_days,
             time_shift_hours: self.time_shift_hours,
             path: format!("{}[{index}]", self.element_path(tag)),
+            in_guard_scope: self.in_guard_scope || self.guard_scope.contains(&tag),
+            guard_scope: self.guard_scope,
             uids: self.uids,
         }
     }
@@ -1266,6 +1408,16 @@ mod tests {
     }
 
     #[test]
+    fn a_scope_without_guarded_tags_is_refused() {
+        let mut options = Options::new(SecretKey::new(KEY).unwrap());
+        options
+            .profile
+            .fail_on_unmapped_sequences
+            .insert("00540220".to_owned());
+        assert!(Anonymizer::new(options).is_err());
+    }
+
+    #[test]
     fn modifies_times_without_disrupting_paired_timestamp_intervals() {
         let mut first = test_object("PATIENT-1", "20200101", "1.2.3.1");
         first.put_str(tags::STUDY_TIME, VR::TM, "230000");
@@ -1565,6 +1717,8 @@ mod tests {
             date_shift_days: 1,
             time_shift_hours: 1,
             path: String::new(),
+            in_guard_scope: anonymizer.guard_scope.is_empty(),
+            guard_scope: &anonymizer.guard_scope,
             uids: &uids,
         };
         let mut report = AnonymizationReport::new(

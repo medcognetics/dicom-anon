@@ -93,7 +93,7 @@ The table below lists the attributes in mammography and breast tomosynthesis obj
 
 Code Value, Coding Scheme Designator, and Code Meaning are changed in every code sequence that is kept, which includes View Code Sequence `(0054,0220)`, View Modifier Code Sequence `(0054,0222)`, and Anatomic Region Sequence `(0008,2218)`, also when they are nested in functional group sequences.
 
-#### Shipped breast-imaging descriptor map
+#### Shipped breast-imaging descriptor maps
 
 `descriptor-maps/breast-imaging-ps3.16-2026d.json` keeps the standard coded values of these DICOM PS3.16 2026d context groups:
 
@@ -102,9 +102,19 @@ Code Value, Coding Scheme Designator, and Code Meaning are changed in every code
 - CID 4015 View Modifier for Mammography;
 - the Breast row of CID 4031 Common Anatomic Region.
 
-Each entry maps a value to itself. The map contains the SCT Code Value, the SRT value from the SNOMED-RT ID column of the same row, the exact Code Meaning text, and the designators `DCM`, `SCT`, and `SRT`. No row of these context groups uses the DCM scheme in 2026d. `tools/generate_breast_descriptor_map.py` regenerates the file and fails if the published standard is not the 2026d edition. Do not edit the file by hand.
+Each entry maps a value to itself. The map contains the SCT Code Value, the SRT value from the SNOMED-RT ID column of the same row, the exact Code Meaning text, and the designators `DCM`, `SCT`, and `SRT`. No row of these context groups uses the DCM scheme in 2026d.
 
-A descriptor-map entry applies to its tag at every nesting level. Thus a value in the shipped map is also kept when it occurs in a different code sequence. All values in the map are standard terminology, not identifiers. A Code Meaning from an earlier edition of the standard, for example a different capitalization, does not match the map. Add such values in a separate reviewed map. Device attributes such as Manufacturer are not in the shipped map, because their values are site-specific. Review and add them in a separate map.
+`descriptor-maps/breast-imaging-references-ps3.16-2026d.json` keeps the standard coded values of the other code sequences that MG and DBT objects often contain:
+
+| Sequence | DICOM PS3.16 2026d context group | Codes |
+|---|---|---|
+| Partial View Code Sequence `(0028,1352)` | CID 4005 Partial View Section for Mammography | Seven SCT codes and their SRT values |
+| Purpose of Reference Code Sequence `(0040,A170)`, in every context where it occurs: Source Image, Referenced Image, Related Series and Contributing Equipment Sequences, and others | Every context group whose title names a Purpose of Reference: CID 7004, 7005, 7006, 7009, 7013, 7019, 7022, 7060, 7062, 7201, 7202, 7205, 7210, 7215, 7221 and 7222. CID 7003 applies to report references and is left out. | All codes |
+| Derivation Code Sequence `(0008,9215)` | CID 7203 Image Derivation | All DCM codes |
+
+Load both maps to keep these sequences. The maps are not exhaustive: with `--fail-on-unmapped`, any other kept code sequence that holds a code outside the maps, such as a local Procedure Code, also stops the run. Each entry maps a value to itself. `tools/generate_breast_descriptor_map.py` regenerates both files and fails if the published standard is not the 2026d edition. Do not edit the files by hand.
+
+A descriptor-map entry applies to its tag at every nesting level. Thus a value in a shipped map is also kept when it occurs in a different code sequence. All values in the maps are standard terminology, not identifiers. A Code Meaning from an earlier edition of the standard, for example a different capitalization, does not match the maps. Add such values in a separate reviewed map. Device attributes such as Manufacturer are not in the shipped maps, because their values are site-specific. Review and add them in a separate map.
 
 #### Detection and fail-closed control
 
@@ -122,12 +132,14 @@ Use `dummy_replacements` to detect a change to coded content in these sequences.
 
 The guard applies only to anonymization. `dicom-validate` rejects `--fail-on-unmapped`. Library and binding validation ignore `fail_on_unmapped`, because a dummy value in a candidate does not show whether a descriptor-map miss or a profile requirement produced it.
 
-The descriptor map and the guard apply to a tag at every nesting level, not to a sequence path. Thus `--fail-on-unmapped 00080100` also stops the run for any other kept code sequence whose codes are not in a map. MG and DBT objects often contain such sequences, for example Purpose of Reference Code Sequence `(0040,A170)` in Source Image Sequence `(0008,2112)`, Derivation Code Sequence `(0008,9215)`, and Partial View Code Sequence `(0028,1352)`. The shipped map does not contain these codes.
+The descriptor map applies to a tag at every nesting level. Without a scope, so does the guard. Thus `--fail-on-unmapped 00080100` also stops the run for any other kept code sequence whose codes are not in a map. MG and DBT objects often contain such sequences, for example Purpose of Reference Code Sequence `(0040,A170)` in Source Image Sequence `(0008,2112)`, Derivation Code Sequence `(0008,9215)`, and Partial View Code Sequence `(0028,1352)`. The breast-imaging map does not contain these codes, so load the references map with it.
+
+`--fail-on-unmapped-sequence TAG`, or the `fail_on_unmapped_sequences` configuration field, scopes the guard to sequences. With a scope, a guarded tag stops the run only inside a listed sequence, at any depth below it. A miss elsewhere is counted in `unmapped_dummy_replacements`, gets its dummy value, and does not stop the run. For example, list View Code Sequence `(0054,0220)`, View Modifier Code Sequence `(0054,0222)`, Anatomic Region Sequence `(0008,2218)`, Partial View Code Sequence `(0028,1352)`, Derivation Code Sequence `(0008,9215)` and Purpose of Reference Code Sequence `(0040,A170)`. Then a site-local code in Procedure Code Sequence is counted and does not stop the run. A scope with no `fail_on_unmapped` tag is a configuration error. Validation ignores the scope, as it ignores the guard.
 
 For an inference pipeline:
 
-1. Run Safe Harbor anonymization with the shipped map and without the guard on a representative synthetic or approved sample. Read `unmapped_dummy_replacements` in the reports.
-2. For each other code sequence that the sample contains, add a reviewed map with the standard codes of its context group.
+1. Run Safe Harbor anonymization with the shipped maps and without the guard on a representative synthetic or approved sample. Read `unmapped_dummy_replacements` in the reports.
+2. For each code sequence that the sample contains and the shipped maps do not cover, add a reviewed map with the standard codes of its context group.
 3. Then use `--fail-on-unmapped` for `00080100`, `00080102`, and `00080104`. Add a reviewed map and `--fail-on-unmapped` entries for the device attributes that the model uses.
 
 ## Inserted attributes
@@ -154,6 +166,14 @@ The `core/tests/mammography` suite generates synthetic Digital Mammography X-Ray
 - In Safe Harbor mode, every nested DA, DT, and TM value is generalized to year level, and Patient Age `092Y` becomes `090Y`.
 - The Source Image Sequence, Dimension Organization UID, and File Meta SOP Instance UID stay consistent with the output instances.
 - Source-aware validation passes through the library and through `dicom-validate`.
+
+The suite also builds vendor-shaped variants of each object for Hologic, GE, Siemens, and Fujifilm, plus a Digital Mammography X-Ray Image Storage - For Processing object. Each variant carries the vendor's Manufacturer, Manufacturer's Model Name, Software Versions, and Acquisition Device Processing Description, and private blocks under the vendor's private creator at the root and as a nested private sequence. The tomosynthesis variants also carry a vendor private block in every per-frame and shared functional group item. The variants are synthetic: they follow the published conformance statements in shape, but they contain no vendor data. With the `safe-harbor-metadata` policy, the shipped breast descriptor map, the Burned In Annotation gate, and a SOP Class allowlist of the three image classes, the suite checks that:
+
+- source-aware validation passes;
+- no odd-group element remains at any depth;
+- Manufacturer and Manufacturer's Model Name are replaced;
+- the SOP Class, view and laterality attributes, the Basic Offset Table, and the Pixel Data fragments do not change;
+- removing the SOP Class from the allowlist, or setting Burned In Annotation to `YES` or removing it, makes the anonymizer fail with no output.
 
 In Safe Harbor mode, the View Code Sequence code values are replaced with `ANONYMIZED` at this revision. Issue #20 tracks this behavior.
 
