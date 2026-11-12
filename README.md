@@ -10,7 +10,7 @@ Under `safe-harbor-metadata`, a heuristic detector finds burned-in text in the p
 
 ## Install and build
 
-The workspace requires Rust 1.88 or newer. The Python binding supports Python 3.10 or newer, and the Node.js binding supports Node.js 22 or newer. PDF support also requires Tesseract 5, Leptonica, and the development headers needed by the `leptess` crate. On Debian or Ubuntu:
+The workspace requires Rust 1.88 or newer, a C compiler and CMake, which build the bundled OpenJPEG and libjpeg-turbo decoders. The Python binding supports Python 3.10 or newer, and the Node.js binding supports Node.js 22 or newer. PDF support also requires Tesseract 5, Leptonica, and the development headers needed by the `leptess` crate. On Debian or Ubuntu:
 
 ```console
 sudo apt-get install libleptonica-dev libtesseract-dev tesseract-ocr-eng

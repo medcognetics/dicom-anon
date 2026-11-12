@@ -19,16 +19,21 @@ dicom-core.workspace = true
 dicom-dictionary-std.workspace = true
 dicom-object.workspace = true
 getrandom.workspace = true
-jpeg-decoder.workspace = true
-pure_jpeg2k.workspace = true
+openjpeg.workspace = true
+openjpeg-sys.workspace = true
 pure_jpegls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
+turbojpeg-sys.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# Independent decoder for the differential tests of the OpenJPEG path, and an encoder.
+pure_jpeg2k.workspace = true
+jpeg-decoder.workspace = true
+image.workspace = true
 criterion.workspace = true
 jpeg-encoder.workspace = true
 pure_jpegli.workspace = true

@@ -1,6 +1,7 @@
 .PHONY: check ci ci-minimum format lint python-quality test coverage docs node-dependencies \
 		binding-types test-python test-node test-ci audit deprecations release release-assets bench \
-		report-integration report-integration-coverage report-cuda-integration
+		report-integration report-integration-coverage report-cuda-integration codec-pins \
+		codec-pins-latest test-jpeg2000-conformance
 
 CI_UV_RUN = uv run --project tools/ci --frozen
 ACTIONLINT ?= actionlint
@@ -14,7 +15,8 @@ REPORT_INTEGRATION_MIN_LINE_COVERAGE := 84
 
 check: format lint test docs binding-types
 
-ci: format lint python-quality docs binding-types test-python test-node test-ci coverage
+ci: format lint python-quality docs binding-types test-python test-node test-ci coverage \
+	codec-pins test-jpeg2000-conformance
 
 ci-minimum: test test-python test-node
 
@@ -57,9 +59,24 @@ test-node: node-dependencies
 	cd bindings/node && npm run build:debug
 	node tests/test_node_binding.js
 
+# The codec crates must match medcognetics/dicom-preprocessing (#47).
+codec-pins:
+	$(CI_UV_RUN) python scripts/check_codec_pins.py
+
+# Nightly only: compare with the current dicom-preprocessing master.
+codec-pins-latest:
+	$(CI_UV_RUN) python scripts/check_codec_pins.py --ref master
+
+# ITU-T T.803 class 1 conformance of the JPEG 2000 decoder. The data is fetched, pinned by
+# SHA-256, because its license does not allow it in this repository.
+JPEG2000_CONFORMANCE_DIR ?= target/jpeg2000-conformance
+test-jpeg2000-conformance:
+	scripts/fetch-jpeg2000-conformance.sh $(JPEG2000_CONFORMANCE_DIR)
+	DICOM_ANON_J2K_CONFORMANCE=$(abspath $(JPEG2000_CONFORMANCE_DIR)) cargo test --locked -p dicom-anon --test jpeg2000_conformance
+
 test-ci:
 	$(ACTIONLINT) -config-file .github/actionlint.yaml
-	PYTHONPATH=. $(CI_UV_RUN) pytest -q tests/test_ci.py tests/test_ci_reporting.py tests/test_release.py
+	PYTHONPATH=. $(CI_UV_RUN) pytest -q tests/test_ci.py tests/test_ci_reporting.py tests/test_release.py tests/test_codec_pins.py
 
 audit:
 	$(CI_UV_RUN) python tools/ci/security_audit.py

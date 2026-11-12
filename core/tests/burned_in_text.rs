@@ -806,16 +806,21 @@ fn lossless_jpeg(mut codestream: Vec<u8>) -> DefaultDicomObject {
     )
 }
 
-fn assert_fails_with(source: &DefaultDicomObject, reason: &str) {
+/// The object fails closed: libjpeg-turbo stops on the corrupt or inconsistent stream, or
+/// a decoded sample lies outside Bits Stored. `what` names the case for the message.
+fn assert_fails_with(source: &DefaultDicomObject, what: &str) {
     let error = Anonymizer::new(options(BurnedInText::Auto))
         .unwrap()
         .anonymize_with_generated_uid_map(source)
         .unwrap_err();
-    assert!(error.to_string().contains(reason), "{error}");
+    assert!(
+        matches!(error, Error::PixelTextNotAssessed(_)),
+        "{what}: {error}"
+    );
 }
 
 #[test]
-fn lossless_jpeg_with_a_restart_interval_fails_closed() {
+fn a_restart_interval_without_restart_markers_fails_closed() {
     let mut encoded = Vec::new();
     jpegli::encode(&frame(), COLUMNS as u32, ROWS as u32, &mut encoded).unwrap();
     // A DRI segment with a restart interval of 4096 after SOI, then two stray bytes,
@@ -827,7 +832,7 @@ fn lossless_jpeg_with_a_restart_interval_fails_closed() {
 }
 
 #[test]
-fn lossless_jpeg_with_a_point_transform_fails_closed() {
+fn a_point_transform_that_the_data_was_not_coded_with_fails_closed() {
     let mut encoded = Vec::new();
     jpegli::encode(&frame(), COLUMNS as u32, ROWS as u32, &mut encoded).unwrap();
     // Set Al, the point transform, in the last byte of the scan header.
@@ -972,7 +977,7 @@ fn text_over_tissue_is_left_and_counted_with_leave_and_validates() {
 }
 
 #[test]
-fn a_lossless_jpeg_with_another_predictor_fails_closed() {
+fn an_invalid_lossless_predictor_fails_closed() {
     let mut encoded = Vec::new();
     jpegli::encode(&frame(), COLUMNS as u32, ROWS as u32, &mut encoded).unwrap();
     let sos = encoded

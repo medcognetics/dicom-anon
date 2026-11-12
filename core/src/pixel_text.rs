@@ -135,6 +135,10 @@ pub(crate) struct Censored {
     pub counts: CensorCounts,
     /// The new native Pixel Data when a region was censored.
     pub pixel_data: Option<InMemElement>,
+    /// The Lossy Image Compression Method that the codestreams themselves show, whatever
+    /// the transfer syntax says: `ISO_15444_1` for the JPEG 2000 9/7 wavelet, and
+    /// `ISO_10918_1` for DCT JPEG or lossless JPEG with a point transform.
+    pub lossy_method: Option<&'static str>,
 }
 
 struct Geometry {
@@ -347,11 +351,13 @@ fn geometry(object: &InMemDicomObject) -> Result<Geometry> {
     })
 }
 
-/// Decode every frame into one sample buffer, frame after frame.
+/// Decode every frame into one sample buffer, frame after frame. `lossy_method` is set
+/// when a codestream shows lossy coding.
 fn decode_frames(
     object: &InMemDicomObject,
     transfer_syntax: &str,
     geometry: &Geometry,
+    lossy_method: &mut Option<&'static str>,
 ) -> Result<Vec<u16>> {
     let element = object
         .get(tags::PIXEL_DATA)
@@ -433,16 +439,27 @@ fn decode_frames(
             } else {
                 &codestream[..]
             };
+            let info = crate::codec::FrameInfo {
+                rows: geometry.rows,
+                columns: geometry.columns,
+                bits_allocated: geometry.bits_allocated,
+                bits_stored: geometry.bits_stored,
+            };
             let samples = if JPEG_2000.contains(&transfer_syntax) {
-                jpeg2k::decode(codestream, columns, rows)
-                    .map(|(samples, _, _)| samples)
-                    .map_err(|_| not_assessed("a JPEG 2000 frame cannot be decoded"))?
+                let frame = crate::codec::decode_jpeg2000(codestream, info)?;
+                if frame.irreversible {
+                    *lossy_method = Some("ISO_15444_1");
+                }
+                frame.samples
             } else if JPEG_LS.contains(&transfer_syntax) {
                 jpegls::decode(codestream, columns, rows)
                     .map(|(samples, _, _)| samples)
                     .map_err(|_| not_assessed("a JPEG-LS frame cannot be decoded"))?
             } else if JPEG.contains(&transfer_syntax) {
-                decode_jpeg(codestream, geometry)?
+                if crate::codec::jpeg_is_lossy(codestream) {
+                    *lossy_method = Some("ISO_10918_1");
+                }
+                crate::codec::decode_jpeg(codestream, info)?
             } else {
                 return Err(not_assessed("this transfer syntax is not supported"));
             };
@@ -461,106 +478,6 @@ fn decode_frames(
         decoded.extend_from_slice(&frame);
     }
     Ok(decoded)
-}
-
-/// Why the pinned decoder cannot decode a lossless (SOF3) JPEG codestream correctly, if
-/// it cannot: it does not reset the predictor at restart markers, and it predicts from
-/// samples that it has already shifted back by a nonzero point transform. Reads every
-/// marker segment up to the end of the first scan header, and skips stray bytes between
-/// segments as the decoder does.
-fn unsupported_lossless_jpeg(codestream: &[u8]) -> Option<&'static str> {
-    let (mut lossless, mut restarts) = (false, false);
-    let mut index = 2;
-    while index + 1 < codestream.len() {
-        if codestream[index] != 0xFF {
-            index += 1;
-            continue;
-        }
-        let marker = codestream[index + 1];
-        if marker == 0xFF || marker == 0x00 || (0xD0..=0xD8).contains(&marker) || marker == 0x01 {
-            index += if marker == 0xFF { 1 } else { 2 };
-            continue;
-        }
-        if marker == 0xD9 || index + 4 > codestream.len() {
-            break;
-        }
-        let length = usize::from(u16::from_be_bytes([
-            codestream[index + 2],
-            codestream[index + 3],
-        ]));
-        if length < 2 || index + 2 + length > codestream.len() {
-            return Some("a JPEG marker segment has an invalid length");
-        }
-        let segment = &codestream[index + 4..index + 2 + length];
-        match marker {
-            0xC3 => lossless = true,
-            // Each DRI replaces the interval, as in the decoder.
-            0xDD => restarts = segment.iter().take(2).any(|&byte| byte != 0),
-            0xDA => {
-                // The last byte of a scan header holds Ah and Al; in a lossless scan, Al is
-                // the point transform.
-                let transform = segment.last().is_some_and(|&byte| byte & 0x0F != 0);
-                // Ns, then Ns pairs of selectors, then Ss: in a lossless scan, the predictor.
-                let components = usize::from(segment.first().copied().unwrap_or(0));
-                let predictor = segment.get(1 + 2 * components).copied().unwrap_or(0);
-                if lossless && (components != 1 || !(1..=7).contains(&predictor)) {
-                    return Some(
-                        "lossless JPEG with more than one component or another predictor is not supported",
-                    );
-                }
-                if lossless && restarts {
-                    return Some("lossless JPEG with a restart interval is not supported");
-                }
-                if lossless && transform {
-                    return Some("lossless JPEG with a point transform is not supported");
-                }
-                // Skip the entropy-coded data to the next marker: the decoder reads later
-                // scans too.
-                index += 2 + length;
-                while index + 1 < codestream.len()
-                    && !(codestream[index] == 0xFF
-                        && codestream[index + 1] != 0x00
-                        && !(0xD0..=0xD7).contains(&codestream[index + 1]))
-                {
-                    index += 1;
-                }
-                continue;
-            }
-            _ => {}
-        }
-        index += 2 + length;
-    }
-    // The decoder reports a codestream without a valid scan.
-    None
-}
-
-fn decode_jpeg(codestream: &[u8], geometry: &Geometry) -> Result<Vec<u16>> {
-    if let Some(reason) = unsupported_lossless_jpeg(codestream) {
-        return Err(not_assessed(reason));
-    }
-    let mut decoder = jpeg_decoder::Decoder::new(codestream);
-    // Check the frame size before decoding, so that a header cannot force a large decode.
-    decoder
-        .read_info()
-        .map_err(|_| not_assessed("a JPEG frame cannot be decoded"))?;
-    let info = decoder
-        .info()
-        .ok_or_else(|| not_assessed("a JPEG frame has no header"))?;
-    if usize::from(info.width) != geometry.columns || usize::from(info.height) != geometry.rows {
-        return Err(not_assessed("a JPEG frame does not match Rows and Columns"));
-    }
-    let pixels = decoder
-        .decode()
-        .map_err(|_| not_assessed("a JPEG frame cannot be decoded"))?;
-    match info.pixel_format {
-        jpeg_decoder::PixelFormat::L8 => Ok(pixels.into_iter().map(u16::from).collect()),
-        jpeg_decoder::PixelFormat::L16 => Ok(pixels
-            .chunks_exact(2)
-            // jpeg-decoder returns 16-bit samples in native byte order.
-            .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
-            .collect()),
-        _ => Err(not_assessed("a JPEG frame is not grayscale")),
-    }
 }
 
 /// A connected component of text-level pixels.
@@ -1050,6 +967,7 @@ pub(crate) fn censor(
         return Ok(Censored {
             counts: CensorCounts::default(),
             pixel_data: None,
+            lossy_method: None,
         });
     }
     if object.get(tags::FLOAT_PIXEL_DATA).is_some()
@@ -1058,7 +976,8 @@ pub(crate) fn censor(
         return Err(not_assessed("floating-point Pixel Data is not supported"));
     }
     let geometry = geometry(object)?;
-    let mut samples = decode_frames(object, transfer_syntax, &geometry)?;
+    let mut lossy_method = None;
+    let mut samples = decode_frames(object, transfer_syntax, &geometry, &mut lossy_method)?;
     // A sample above Bits Stored is content that the detector would not see.
     let max_value = geometry.max_value();
     if samples.iter().any(|&value| value > max_value) {
@@ -1081,6 +1000,7 @@ pub(crate) fn censor(
         return Ok(Censored {
             counts,
             pixel_data: None,
+            lossy_method,
         });
     }
     // The 16-bit output takes the decoded buffer without a copy.
@@ -1101,6 +1021,7 @@ pub(crate) fn censor(
     Ok(Censored {
         counts,
         pixel_data: Some(pixel_data),
+        lossy_method,
     })
 }
 
@@ -1583,61 +1504,6 @@ mod tests {
         assert_eq!((regions, pixels), (0, 0));
         assert!(left > 0);
         assert_eq!(samples, original);
-    }
-
-    #[test]
-    fn the_lossless_jpeg_pre_scan_never_panics() {
-        // Deterministic pseudo-random codestreams, most with JPEG-like markers.
-        let mut state = 0x2545_f491_4f6c_dd1d_u64;
-        let mut next = || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state
-        };
-        for _ in 0..20_000 {
-            let length = (next() % 64) as usize;
-            let mut codestream = vec![0xFF, 0xD8];
-            for _ in 0..length {
-                let value = next();
-                codestream.push(if value % 3 == 0 {
-                    0xFF
-                } else {
-                    (value >> 8) as u8
-                });
-            }
-            let _ = unsupported_lossless_jpeg(&codestream);
-        }
-    }
-
-    #[test]
-    fn the_pre_scan_follows_the_last_restart_interval_and_every_scan() {
-        let sof3 = [0xFF, 0xC3, 0x00, 0x02];
-        // Ns = 1, one selector pair, predictor 1, Se, then Ah and Al.
-        let sos = |al: u8| [0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x01, 0x00, al];
-        let dri = |interval: u8| [0xFF, 0xDD, 0x00, 0x04, 0x00, interval];
-        let stream = |parts: &[&[u8]]| {
-            let mut codestream = vec![0xFF, 0xD8];
-            for part in parts {
-                codestream.extend(*part);
-            }
-            codestream
-        };
-        // A later DRI of 0 turns restarts off.
-        assert_eq!(
-            unsupported_lossless_jpeg(&stream(&[&sof3, &dri(4), &dri(0), &sos(0), &[1, 2]])),
-            None
-        );
-        // A second scan with a restart interval or a point transform is found.
-        assert!(unsupported_lossless_jpeg(&stream(&[
-            &sof3,
-            &sos(0),
-            &[1, 2, 0xFF, 0x00, 3],
-            &dri(4),
-            &sos(0),
-        ]))
-        .is_some());
-        assert!(unsupported_lossless_jpeg(&stream(&[&sof3, &sos(0), &[1, 2], &sos(1)])).is_some());
     }
 
     #[test]

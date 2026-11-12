@@ -64,6 +64,17 @@ Do not include the key itself in those records. Use a non-secret key identifier 
 
 A passing `safe-harbor-metadata` report covers only metadata processed under the supplied configuration. Pixel inspection beyond the heuristic burned-in text check, the declared-attribute gates and the codestream segment removal, external mapping provenance and controls, re-identification-code safeguards, and the covered entity's “actual knowledge” determination remain outside the tool. The report does not claim HIPAA compliance.
 
+## Native code
+
+The burned-in text check decodes untrusted Pixel Data with two C libraries, built from source by their `-sys` crates and linked statically. No system library is used ([#47](https://github.com/medcognetics/dicom-anon/issues/47)). Record both as SOUP (IEC 62304 7.1.3).
+
+| SOUP | Version | Crate | License | Use |
+|---|---|---|---|---|
+| OpenJPEG | 2.5.3 | `openjpeg-sys` 1.0.12, through `jpeg2k` 0.10.1 | BSD-2-Clause | JPEG 2000 decoding, strict mode |
+| libjpeg-turbo | 3.1.0 | `turbojpeg-sys` 1.2.0 | BSD-3-Clause, IJG, zlib | JPEG decoding, 8 and 12 bit and lossless |
+
+The versions match medcognetics/dicom-preprocessing (`make codec-pins`). Both libraries have a history of memory-safety CVEs. `cargo audit` covers RustSec advisories for the crates but not every upstream C CVE, so each release review also checks the OpenJPEG and libjpeg-turbo security advisories for the pinned versions and records the result in `docs/known-anomalies.md`. The libjpeg-turbo calls are the only `unsafe` Rust in `dicom-anon` (`core/src/codec.rs`, `#![deny(unsafe_code)]` elsewhere). The decoders run in-process, so a crash in one stops the caller; mutation tests in `core/tests/jpeg2000.rs` and `core/src/codec.rs` exercise them with corrupted input. Building them needs a C compiler and CMake.
+
 ## Dependency audit
 
 `make audit` runs cargo-audit, npm audit, pip-audit, zizmor, and an action-pin validator. It writes the complete scanner outputs, tool versions, advisory revisions, audited lockfiles, aggregate status, and enforcement policy to `target/ci-reports/security/`. Every scanner runs before policy enforcement. The command succeeds when every scanner is `clean` or `warnings`. Cargo-audit results containing only unmaintained advisories and zizmor results containing only Low-confidence findings receive the `warnings` status. Vulnerabilities, other cargo-audit warning classes, Medium- or High-confidence zizmor findings, npm or pip findings, unpinned actions, scanner errors, database or network errors, and unparseable or structurally invalid output remain blocking. The command prints a summary with each scanner status, the advisory or rule identifiers of each finding, and the cause of each incomplete scan. For each incomplete scan, the summary also shows the last 20 lines of scanner standard error, with a maximum of 2,048 characters. The summary replaces the `GH_TOKEN` and `GITHUB_TOKEN` values with `***`. The scheduled workflow shows this summary in the job log and step summary and does not upload report files.

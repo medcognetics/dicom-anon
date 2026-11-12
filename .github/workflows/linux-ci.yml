@@ -48,6 +48,7 @@ jobs:
         run: |
           if ! command -v cc >/dev/null ||
             ! command -v clang >/dev/null ||
+            ! command -v cmake >/dev/null ||
             ! command -v curl >/dev/null ||
             ! command -v git >/dev/null ||
             ! command -v pkg-config >/dev/null ||
@@ -57,6 +58,7 @@ jobs:
               build-essential \
               ca-certificates \
               clang \
+              cmake \
               curl \
               git \
               libclang-dev \
@@ -150,6 +152,7 @@ jobs:
         run: |
           if ! command -v cc >/dev/null ||
             ! command -v clang >/dev/null ||
+            ! command -v cmake >/dev/null ||
             ! command -v curl >/dev/null ||
             ! command -v git >/dev/null ||
             ! command -v pkg-config >/dev/null ||
@@ -159,6 +162,7 @@ jobs:
               build-essential \
               ca-certificates \
               clang \
+              cmake \
               curl \
               git \
               libclang-dev \

@@ -472,7 +472,12 @@ impl Anonymizer {
                 .get(tags::LOSSY_IMAGE_COMPRESSION)
                 .and_then(|element| element.to_str().ok())
                 .is_some_and(|value| !value.trim().is_empty());
-            let method = pixel_text::lossy_method(source_transfer_syntax, source_has_value);
+            // A codestream that shows lossy coding (JPEG 2000 9/7, DCT JPEG, or lossless
+            // JPEG with a point transform) is lossy whatever its transfer syntax says.
+            let method = censored
+                .as_ref()
+                .and_then(|censored| censored.lossy_method)
+                .or_else(|| pixel_text::lossy_method(source_transfer_syntax, source_has_value));
             if let Some(method) = method {
                 // A value that already records lossy compression, possibly with earlier
                 // generations in its values, is kept with its Method.
