@@ -40,4 +40,8 @@ This is the first tagged release. Version 0.1.0 was not tagged or released.
 - Planar Configuration `(0028,0006)` is removed from images with one sample per pixel under every policy ([#40](https://github.com/medcognetics/dicom-anon/issues/40)). This changes output bytes for such inputs. Source-aware validation of an output that an earlier build made from such an input reports a mismatch for `(0028,0006)`.
 - The workspace release profile no longer strips symbols, so a source build of the Python or Node.js binding loads on macOS ([#41](https://github.com/medcognetics/dicom-anon/issues/41)). The release workflow still strips the published Linux binaries and wheel.
 
+### Fixed
+
+- A wholly zero-length DA, DT, or TM value no longer makes de-identification fail with `invalid DA value`. A zero-length value that the profile keeps or shifts stays zero length. A value that the profile replaces with a dummy (`D`) or removes (`X`) is still replaced or removed, as in the `dicom` preset. A paired date and time where one side is empty no longer fails ([#38](https://github.com/medcognetics/dicom-anon/issues/38)). Output for input that already succeeded does not change.
+
 [0.2.0]: https://github.com/medcognetics/dicom-anon/releases/tag/v0.2.0
