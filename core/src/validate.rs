@@ -148,6 +148,8 @@ pub fn validate_object_with_options(
     validate_dataset(object, "root", &options.profile, &mut report)?;
 
     if object.get(tags::PIXEL_DATA).is_some() {
+        // A candidate alone does not show whether its pixels were checked, so the
+        // source comparison is the only place that can report the check.
         push_finding(
             &mut report,
             Severity::Warning,
@@ -791,12 +793,27 @@ fn format_tag(tag: Tag) -> String {
 
 fn profile_name(profile: &ProfileConfiguration) -> String {
     // The fail-on-unmapped guard does not change the output, so it does not
-    // change the profile name.
+    // change the profile name. Nor does a burned-in text setting that censors exactly
+    // when the preset does.
     let is_preset = |preset: ProfileConfiguration| {
+        let burned_in_text = if profile.censors_burned_in_text() == preset.censors_burned_in_text()
+        {
+            profile.burned_in_text
+        } else {
+            preset.burned_in_text
+        };
+        // `text_over_tissue` has no effect when nothing is censored.
+        let text_over_tissue = if profile.censors_burned_in_text() {
+            preset.text_over_tissue
+        } else {
+            profile.text_over_tissue
+        };
         *profile
             == ProfileConfiguration {
                 fail_on_unmapped: profile.fail_on_unmapped.clone(),
                 fail_on_unmapped_sequences: profile.fail_on_unmapped_sequences.clone(),
+                burned_in_text,
+                text_over_tissue,
                 ..preset
             }
     };
@@ -945,7 +962,7 @@ pub fn validate_source_object(
         profile: anonymization_options.profile.clone(),
     };
     let anonymizer = Anonymizer::new(anonymization_options)?;
-    let (expected, _) = anonymizer.anonymize(source)?;
+    let (expected, expected_report) = anonymizer.anonymize(source)?;
     let mut expected_bytes = Vec::new();
     crate::write_dicom(&expected, &mut expected_bytes)?;
     let expected = read_dicom(&expected_bytes[..])?;
@@ -957,6 +974,41 @@ pub fn validate_source_object(
     report
         .findings
         .retain(|finding| finding.code != "source_not_compared");
+    if validation_options.profile.censors_burned_in_text() {
+        // The expected output was built with the check, so a match shows that it ran. The
+        // pixels stay unassessed: the heuristic can miss text, so the code is kept.
+        for finding in &mut report.findings {
+            if finding.code == "pixel_data_not_assessed" {
+                finding.message = "pixel data was checked for burned-in text by a heuristic detector that can miss text; the Clean Pixel Data Option is not claimed".to_owned();
+            }
+        }
+    }
+    // Text that the check left in place matches the expected output, so it is reported
+    // here: the output can keep identifying text.
+    let counts = expected_report.burned_in_text;
+    for (count, code, message) in [
+        (
+            counts.regions_left_over_tissue,
+            "burned_in_text_left_over_tissue",
+            "text over tissue was left in the pixels because text_over_tissue is leave",
+        ),
+        (
+            counts.regions_left_in_place,
+            "burned_in_text_left_in_place",
+            "short text-like regions that could not be censored were left in the pixels",
+        ),
+    ] {
+        if count > 0 {
+            push_finding(
+                &mut report,
+                Severity::Warning,
+                code,
+                Some(tags::PIXEL_DATA),
+                "root",
+                &format!("{message} ({count})"),
+            );
+        }
+    }
     compare_datasets(&expected, &normalized_candidate, "root", &mut report);
     report.findings.sort_by(|left, right| {
         (&left.path, &left.tag, &left.code).cmp(&(&right.path, &right.tag, &right.code))
@@ -1063,6 +1115,17 @@ mod tests {
         let mut profile = ProfileConfiguration::dicom_extended();
         profile.fail_on_unmapped.insert("00080100".to_owned());
         assert_eq!(profile_name(&profile), PROFILE_NAME);
+    }
+
+    #[test]
+    fn a_burned_in_text_setting_that_does_not_censor_keeps_the_dicom_profile_name() {
+        let mut profile = ProfileConfiguration::dicom_extended();
+        profile.burned_in_text = crate::BurnedInText::Off;
+        assert_eq!(profile_name(&profile), PROFILE_NAME);
+        profile.text_over_tissue = crate::TextOverTissue::Leave;
+        assert_eq!(profile_name(&profile), PROFILE_NAME);
+        profile.burned_in_text = crate::BurnedInText::Censor;
+        assert_ne!(profile_name(&profile), PROFILE_NAME);
     }
 
     fn source() -> DefaultDicomObject {

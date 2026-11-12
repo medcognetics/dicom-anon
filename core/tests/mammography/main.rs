@@ -12,8 +12,8 @@ use std::process::Command;
 
 use dicom_anon::cli_common::{ProfileArgs, ProfilePreset};
 use dicom_anon::{
-    read_dicom, validate_source_object, write_dicom, Anonymizer, DefaultDicomObject, Options,
-    ProfileConfiguration, SecretKey,
+    read_dicom, validate_source_object, write_dicom, Anonymizer, BurnedInText, DefaultDicomObject,
+    Options, ProfileConfiguration, SecretKey,
 };
 use dicom_core::header::Header;
 use dicom_core::value::{DataSetSequence, Value};
@@ -91,6 +91,9 @@ impl Policy {
                         .fail_on_unmapped
                         .extend(FAIL_ON_UNMAPPED_CODE_TAGS.map(String::from));
                 }
+                // These fixtures test metadata. Their placeholder codestreams cannot be
+                // decoded, so the burned-in text check would fail closed on them.
+                profile.burned_in_text = BurnedInText::Off;
                 profile
             }
         };
@@ -121,6 +124,8 @@ fn breast_map() -> BTreeMap<String, BTreeMap<String, String>> {
         uid_map: None,
         require_no_burned_in_annotation: false,
         allow_sop_class: Vec::new(),
+        burned_in_text: BurnedInText::default(),
+        text_over_tissue: Default::default(),
     }
     .load()
     .unwrap()
@@ -911,6 +916,8 @@ fn command_line_source_aware_validation_passes() {
                     uid_map_path.to_str().unwrap(),
                     "--patient-scope",
                     PATIENT_SCOPE,
+                    "--burned-in-text",
+                    "off",
                 ]);
             }
             let mut fail_on_unmapped = Vec::new();

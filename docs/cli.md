@@ -61,6 +61,8 @@ Anonymization and validation share these profile arguments:
 | `--safe-private-allowlist PATH` | Load a JSON array of `{ "creator": STRING, "element_offset": INTEGER }`. |
 | `--uid-map PATH` | Load a JSON object from original UID to replacement UID. Required for Safe Harbor anonymization unless `--generate-uid-map` assigns the missing entries. |
 | `--require-no-burned-in-annotation` | Fail unless Burned In Annotation `(0028,0301)` is exactly `NO`. A `YES`, empty, or absent value fails. |
+| `--burned-in-text MODE` | `auto` (default), `censor` or `off`. `auto` censors burned-in text under `safe-harbor-metadata` and does nothing under the other policies. `censor` fails closed when a frame cannot be decoded or when text lies over tissue. See [Conformance and scope](conformance.md#burned-in-text). |
+| `--text-over-tissue MODE` | `fail` (default) or `leave`. `leave` keeps text over tissue that cannot be censored and counts it in `regions_left_over_tissue`. It is a temporary relief for false positives; the output can keep identifying text. |
 | `--allow-sop-class UID` | Permit only the given SOP Class UID; repeat for multiple SOP Classes. An absent or other SOP Class UID fails, and so does a Media Storage SOP Class UID `(0002,0002)` that differs from it. |
 
 The presets enable these options before applying `--enable-option` and `--disable-option`:

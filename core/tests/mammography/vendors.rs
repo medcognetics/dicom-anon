@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 
 use dicom_anon::{
-    validate_source_object, write_dicom, Anonymizer, DefaultDicomObject, Options,
+    validate_source_object, write_dicom, Anonymizer, BurnedInText, DefaultDicomObject, Options,
     ProfileConfiguration, SecretKey,
 };
 use dicom_core::header::Header;
@@ -213,6 +213,9 @@ fn pipeline_options() -> Options {
     profile.uid_mappings = uid_map();
     profile.descriptor_mappings = breast_map();
     profile.require_no_burned_in_annotation = true;
+    // These fixtures test metadata. Their placeholder codestreams cannot be decoded,
+    // so the burned-in text check would fail closed on them.
+    profile.burned_in_text = BurnedInText::Off;
     profile.sop_class_allowlist = [
         fixtures::MG_FOR_PRESENTATION,
         fixtures::MG_FOR_PROCESSING,
