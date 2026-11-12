@@ -153,22 +153,28 @@ def test_every_job_runs_on_a_hosted_runner() -> None:
 def test_ci_jobs_use_a_pinned_ci_container() -> None:
     for workflow_name in ("linux-ci.yml", "nightly.yml"):
         workflow = read_workflow(workflow_name)
-        prerequisite_step = workflow.partition(
-            "      - name: Install container prerequisites\n"
-        )[2].partition("\n      - name:")[0]
+        # Every job in the container installs the same packages, so a job added later,
+        # such as the report job, cannot miss one (cmake for the native codecs).
+        prerequisite_steps = [
+            step.partition("\n      - name:")[0]
+            for step in workflow.split(
+                "      - name: Install container prerequisites\n"
+            )[1:]
+        ]
 
         assert f"image: {CI_CONTAINER_IMAGE}" in workflow
         assert "shell: bash" in workflow
-        assert prerequisite_step
-        assert "apt-get update" in prerequisite_step
-        assert "pkg-config --exists lept tesseract" in prerequisite_step
-        assert "sudo" not in prerequisite_step
-        for package in CI_CONTAINER_PACKAGES:
-            assert re.search(
-                rf"^[ \t]+{re.escape(package)}(?:[ \t]+\\)?[ \t]*$",
-                prerequisite_step,
-                re.MULTILINE,
-            )
+        assert prerequisite_steps
+        for prerequisite_step in prerequisite_steps:
+            assert "apt-get update" in prerequisite_step
+            assert "pkg-config --exists lept tesseract" in prerequisite_step
+            assert "sudo" not in prerequisite_step
+            for package in CI_CONTAINER_PACKAGES:
+                assert re.search(
+                    rf"^[ \t]+{re.escape(package)}(?:[ \t]+\\)?[ \t]*$",
+                    prerequisite_step,
+                    re.MULTILINE,
+                ), f"{workflow_name}: {package}"
 
 
 def test_scheduled_workflow_contracts() -> None:
