@@ -13,7 +13,7 @@ This workspace implements deterministic, configurable DICOM metadata de-identifi
 - `tools/generate_profile.py`: reproducible edition-checked profile generator
 - `core/src/pixel.rs`: Burned In Annotation and SOP Class gates, JPEG 2000 comment removal, and JPEG and JPEG-LS comment and application segment removal
 - `core/src/pixel_text.rs`: burned-in text detection and censoring under `burned_in_text` ([#47](https://github.com/medcognetics/dicom-anon/issues/47)); `core/tests/burned_in_text.rs` covers it with synthetic MG and DBT objects
-- `tools/generate_breast_descriptor_map.py`: edition-checked generator for the shipped PS3.16 breast-imaging descriptor map
+- `tools/generate_breast_descriptor_map.py`: edition-checked generator for the shipped PS3.16 breast-imaging descriptor maps
 - `descriptor-maps/`: reviewed, versioned descriptor maps; regenerate rather than edit by hand
 - `core/src/pseudonym.rs`: keyed patient and UID transformations
 - `core/src/uid_map.rs`: UID resolution with attribute paths, required-UID listing, and random Safe Harbor map generation
