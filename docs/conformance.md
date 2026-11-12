@@ -38,7 +38,7 @@ Group `0004` attributes are removed because this tool does not create or update 
 
 ## Temporal behavior
 
-Normal DICOM Modified Dates mode applies stable patient-scoped whole-day and whole-hour offsets. The same key and patient scope preserve longitudinal ordering. Known DA/TM pairs carry midnight rollover into the paired DA. A multiplicity mismatch fails closed. Full Dates keeps temporal values byte-for-value and emits `UNMODIFIED`; disabling both temporal options applies the Basic Profile and emits `REMOVED`.
+Normal DICOM Modified Dates mode applies stable patient-scoped whole-day and whole-hour offsets. The same key and patient scope preserve longitudinal ordering. Known DA/TM pairs carry midnight rollover into the paired DA; when either value of a pair is zero length, the other is shifted alone. A multiplicity mismatch fails closed. A wholly zero-length DA, DT, or TM value that the profile keeps, shifts, or generalizes stays zero length, at any nesting level. A dummy (`D`) action still writes a dummy value, and a remove (`X`) action still removes it. An empty component inside a multi-valued value that the profile shifts or generalizes still fails closed; a kept value, as under Retain Full Dates, is copied unchanged. Full Dates keeps temporal values byte-for-value and emits `UNMODIFIED`; disabling both temporal options applies the Basic Profile and emits `REMOVED`.
 
 Safe Harbor metadata mode uses the DICOM Modified Dates option as a year-aggregation mechanism:
 
