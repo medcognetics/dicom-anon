@@ -63,6 +63,52 @@ fn anonymize_with_generated_uid_map(
     Ok((PyBytes::new(py, &bytes).unbind(), report, uid_map))
 }
 
+/// `(output_bytes, report_jsons, uid_map_json, validation_jsons)`.
+type StudyTuple = (Vec<Py<PyBytes>>, Vec<String>, String, Vec<String>);
+
+/// De-identify every instance of one study under Safe Harbor with one generated UID map.
+///
+/// Returns `(output_bytes, report_jsons, uid_map_json, validation_jsons)`, each list in
+/// input order. The call fails as a whole when any instance fails a gate, a
+/// transformation, or source-aware validation; the error names only the instance index.
+#[pyfunction]
+#[pyo3(signature = (instances, key, patient_scope, configuration_json=None))]
+fn anonymize_study(
+    py: Python<'_>,
+    instances: Vec<Vec<u8>>,
+    key: &[u8],
+    patient_scope: &str,
+    configuration_json: Option<&str>,
+) -> PyResult<StudyTuple> {
+    let anonymizer = anonymizer(key, Some(patient_scope), configuration_json)?;
+    let sources = instances
+        .iter()
+        .enumerate()
+        .map(|(index, data)| {
+            read_dicom(Cursor::new(data))
+                // The parser error can echo source values, such as an unknown transfer syntax.
+                .map_err(|_| {
+                    value_error(format!(
+                        "study instance {index}: not a readable DICOM Part 10 object"
+                    ))
+                })
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    let study = anonymizer.anonymize_study(&sources).map_err(value_error)?;
+    let mut outputs = Vec::with_capacity(study.instances.len());
+    let mut reports = Vec::with_capacity(study.instances.len());
+    let mut validations = Vec::with_capacity(study.instances.len());
+    for instance in &study.instances {
+        let mut bytes = Vec::new();
+        write_dicom(&instance.output, &mut bytes).map_err(value_error)?;
+        outputs.push(PyBytes::new(py, &bytes).unbind());
+        reports.push(serde_json::to_string(&instance.report).map_err(value_error)?);
+        validations.push(serde_json::to_string(&instance.validation).map_err(value_error)?);
+    }
+    let uid_map = serde_json::to_string(&study.uid_map).map_err(value_error)?;
+    Ok((outputs, reports, uid_map, validations))
+}
+
 /// Validate DICOM Part 10 bytes and return `(conformant, report_json)`.
 #[pyfunction]
 #[pyo3(signature = (data, configuration_json=None))]
@@ -107,6 +153,7 @@ fn dicom_anon_python(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(anonymize, module)?)?;
     module.add_function(wrap_pyfunction!(required_uids, module)?)?;
     module.add_function(wrap_pyfunction!(anonymize_with_generated_uid_map, module)?)?;
+    module.add_function(wrap_pyfunction!(anonymize_study, module)?)?;
     module.add_function(wrap_pyfunction!(validate, module)?)?;
     module.add_function(wrap_pyfunction!(validate_with_source, module)?)?;
     Ok(())
