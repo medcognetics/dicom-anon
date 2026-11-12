@@ -91,7 +91,7 @@ The table below lists the attributes in mammography and breast tomosynthesis obj
 | Window Center & Width Explanation | `(0028,1055)` | LO | The names of the VOI windows are lost. The window values are kept. |
 | LUT Explanation | `(0028,3003)` | LO | The name of the VOI LUT is lost. The LUT data is kept. |
 
-Code Value, Coding Scheme Designator, and Code Meaning are changed in every code sequence that is kept, which includes View Code Sequence `(0054,0220)`, View Modifier Code Sequence `(0054,0222)`, and Anatomic Region Sequence `(0008,2218)`, also when they are nested in functional group sequences.
+Without an exact descriptor-map entry, Code Value, Coding Scheme Designator, and Code Meaning are changed in every code sequence that is kept, which includes View Code Sequence `(0054,0220)`, View Modifier Code Sequence `(0054,0222)`, and Anatomic Region Sequence `(0008,2218)`, also when they are nested in functional group sequences.
 
 #### Shipped breast-imaging descriptor maps
 
@@ -158,7 +158,7 @@ The validator is a confidentiality-policy validator, not a complete SOP Class or
 
 ## Verified mammography object types
 
-The `core/tests/mammography` suite generates synthetic Digital Mammography X-Ray Image Storage - For Presentation, Breast Tomosynthesis Image Storage with two frames and functional groups, and a synthesized 2D image that references the tomosynthesis instance. All three use JPEG 2000 Lossless encapsulated Pixel Data. The suite processes each object with the `dicom`, `dicom-extended`, and `safe-harbor-metadata` policies. It checks metadata only:
+The `core/tests/mammography` suite generates synthetic Digital Mammography X-Ray Image Storage - For Presentation, Breast Tomosynthesis Image Storage with two frames and functional groups, and a synthesized 2D image that references the tomosynthesis instance. All three use JPEG 2000 Lossless encapsulated Pixel Data. The suite processes each object with the `dicom`, `dicom-extended`, and `safe-harbor-metadata` policies, and with `safe-harbor-metadata` plus the shipped breast-imaging descriptor map. It checks metadata only:
 
 - No placeholder identifier or source UID remains in File Meta Information or in any nested item.
 - Transfer Syntax UID, Image Pixel module attributes, the Basic Offset Table, and the Pixel Data fragments do not change.
@@ -167,6 +167,8 @@ The `core/tests/mammography` suite generates synthetic Digital Mammography X-Ray
 - The Source Image Sequence, Dimension Organization UID, and File Meta SOP Instance UID stay consistent with the output instances.
 - Source-aware validation passes through the library and through `dicom-validate`.
 
+Each fixture also goes through `safe-harbor-metadata` with the shipped breast-imaging descriptor map (`descriptor-maps/breast-imaging-ps3.16-2026d.json`). With that map, View Code Sequence is unchanged and source-aware validation passes, both through the library and through `dicom-validate --descriptor-map`. Without a descriptor map, Safe Harbor mode replaces the View Code Sequence code values with `ANONYMIZED`, as [Text attributes outside Table E.1-1](#text-attributes-outside-table-e1-1) describes. A mammography inference pipeline that needs the coded view must load the breast map.
+
 The suite also builds vendor-shaped variants of each object for Hologic, GE, Siemens, and Fujifilm, plus a Digital Mammography X-Ray Image Storage - For Processing object. Each variant carries the vendor's Manufacturer, Manufacturer's Model Name, Software Versions, and Acquisition Device Processing Description, and private blocks under the vendor's private creator at the root and as a nested private sequence. The tomosynthesis variants also carry a vendor private block in every per-frame and shared functional group item. The variants are synthetic: they follow the published conformance statements in shape, but they contain no vendor data. With the `safe-harbor-metadata` policy, the shipped breast descriptor map, the Burned In Annotation gate, and a SOP Class allowlist of the three image classes, the suite checks that:
 
 - source-aware validation passes;
@@ -174,8 +176,6 @@ The suite also builds vendor-shaped variants of each object for Hologic, GE, Sie
 - Manufacturer and Manufacturer's Model Name are replaced;
 - the SOP Class, view and laterality attributes, the Basic Offset Table, and the Pixel Data fragments do not change;
 - removing the SOP Class from the allowlist, or setting Burned In Annotation to `YES` or removing it, makes the anonymizer fail with no output.
-
-In Safe Harbor mode, the View Code Sequence code values are replaced with `ANONYMIZED` at this revision. Issue #20 tracks this behavior.
 
 ## Burned-in text
 
