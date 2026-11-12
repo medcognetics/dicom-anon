@@ -13,7 +13,7 @@ mod temporal;
 mod uid_map;
 mod validate;
 
-pub use anonymize::{AnonymizationReport, Anonymizer, Options};
+pub use anonymize::{AnonymizationReport, Anonymizer, Options, StudyInstanceOutput, StudyOutput};
 pub use error::{Error, Result};
 pub use io::{anonymize_file, anonymize_reader, read_dicom, write_dicom};
 pub use pixel_text::{BurnedInText, CensorCounts, TextOverTissue};
