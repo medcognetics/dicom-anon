@@ -60,7 +60,7 @@ For metadata the tool controls, the policy removes or safely replaces the Safe H
 
 The exact Safe Harbor responsibilities outside this result are:
 
-- Pixel samples, recognizable visual features, burned-in annotations, and identifying graphics encoded only in unsupported pixel formats are not inspected. The optional gates in [Pixel and disclosure limits](#pixel-and-disclosure-limits) reject input by declared attributes; they do not inspect pixels.
+- Recognizable visual features are not inspected. Burned-in text is censored by a heuristic detector under `safe-harbor-metadata` (see [Burned-in text](#burned-in-text)), and that detector can miss text. The optional gates in [Pixel and disclosure limits](#pixel-and-disclosure-limits) reject input by declared attributes.
 - The caller controls whether descriptor outputs, safe-private entries, the independently assigned patient scope, and replacement UID assignments contain or encode PHI.
 - The covered entity must satisfy the Safe Harbor re-identification-code controls and must not disclose the key or mapping mechanism.
 - The covered entity retains the required “actual knowledge” assessment that remaining information could not identify an individual.
@@ -177,9 +177,57 @@ The suite also builds vendor-shaped variants of each object for Hologic, GE, Sie
 
 In Safe Harbor mode, the View Code Sequence code values are replaced with `ANONYMIZED` at this revision. Issue #20 tracks this behavior.
 
+## Burned-in text
+
+Burned-in text in the pixel samples is an identifier under Safe Harbor. The anonymizer finds it with a deterministic heuristic and censors it. It runs on the CPU and uses no system libraries.
+
+**When it runs.** `burned_in_text` (configuration) and `--burned-in-text` (CLI) take `auto`, `censor` or `off`. `auto` is the default: it means `censor` under `safe-harbor-metadata` and `off` under the other policies. The report gives `burned_in_text_censoring`, and, in `burned_in_text`, the frames assessed and the regions and pixels censored. It holds no pixel values and no text. An explicit `off` therefore shows in every report.
+
+**Detection.** Each frame is decoded in turn: every frame of a multi-frame object. Text is taken to be bright on a dark background, after MONOCHROME1 is inverted.
+1. Pixels in the top 20 % of the frame's range form 8-connected components.
+2. A component counts as a glyph when it is 5 to 160 pixels high (at most a quarter of the frame height) and at most three times as wide as it is high, holds at least 6 pixels, and fills 8 % to 90 % of its bounding box.
+3. Glyphs of similar height whose centers align and whose gaps are at most twice their height form a text line.
+4. A line of two or more glyphs is text, and so is a lone glyph at least 9 pixels high, such as a laterality marker.
+
+**Censoring.** Each text line has a bounding box with a margin of a quarter of the glyph height and at least 2 pixels. Lines whose boxes overlap, such as the stacked lines of a header, form one region with one box. The line's glyphs are overwritten with the frame's darkest value. So is every text mark that lies in the rows of the glyphs and does not touch the box edge: a bright component (top 20 % of the range) of at least 3 pixels, no thicker than a third of the glyph height (at least 3 pixels), and no longer than 1.2 glyph heights. Such marks are punctuation, the dot of an `i` and solid strokes such as `I`, `1` or `-`. This happens only when every other pixel in the box is background. The anonymizer does not write background pixels, so it writes only the text pixels. Censoring applies to names and to valid laterality or view markers alike. Image Laterality is kept in the header. View Code Sequence keeps its codes only when a verified descriptor map keeps them, such as the breast imaging map; otherwise they become `ANONYMIZED`, and the output can lose both the header view and the burned-in view marker.
+
+**Text over tissue.** By default, text over tissue fails closed as stated below. `text_over_tissue` = `leave` (CLI `--text-over-tissue leave`) keeps such text in the output and counts it in `regions_left_over_tissue`. The report records the configured choice in `text_over_tissue`; it applies only when `burned_in_text_censoring` is true. A region that holds text over tissue is left whole, including stacked lines of it that lie on the background. Source-aware validation reports `burned_in_text_left_over_tissue` and `burned_in_text_left_in_place` warnings when text was left in the pixels. It is a temporary relief for false positives: the output can then keep identifying text, and Safe Harbor for the pixel data cannot be claimed for it.
+
+**Tissue.** A frame has a background only when its darkest value is at most 5 % of its brightest. A background pixel has exactly the frame's darkest value, because any brighter pixel can be faint tissue. It must also be in a dark region that reaches the frame border, outside the imaged anatomy, or in a dark region that lies strictly inside the box, such as the hole of an `O`. So text in a dark box over tissue, or a bright structure in a dark patch inside tissue, is not written. Inside a padded box, any other pixel that is not text stops the write. That includes faint tissue, a noisy background, a bright structure that is not a text mark or that extends out of the box, and the anti-aliased edge of a glyph, which cannot be told apart from tissue next to it. Such a box is not censored:
+- a region over tissue fails closed with the error `burned-in text over tissue in frame N`, and the anonymizer writes no output, when its lines of two or more glyphs hold three or more glyphs together. Lone glyphs do not count: a region with one two-glyph line and any number of lone glyphs of at least 9 pixels, or with only lone glyphs, is left in place and counted in `regions_left_in_place`;
+- a region of one or two glyphs with tissue in its box, such as a calcification or a marker against the skin line, is left alone and counted in `regions_left_in_place`. A marker there is not censored.
+
+**Output.** When nothing is censored, Pixel Data and the transfer syntax are copied unchanged. When a region is censored, the anonymizer writes the decoded and censored samples as native Pixel Data in Explicit VR Little Endian. No lossy step is applied. Odd-length 8-bit data gets one padding byte. It removes Encapsulated Pixel Data Value Total Length and the Extended Offset Table. Burned In Annotation `(0028,0301)` keeps its source value, because censoring does not show that no text remains. Lossy Image Compression `(0028,2110)` becomes `01` for a lossy JPEG `.50` or `.51` source (Method `ISO_10918_1` when absent) and for a JPEG-LS near-lossless `.81` source (Method `ISO_14495_1`), with Lossy Image Compression Ratio from the native and encapsulated sizes when absent. JPEG 2000 `.91` keeps a source value. When the source has none, it becomes `01` with Method `ISO_15444_1`, because a reversible codestream can still be lossy when its coding passes are truncated.
+
+**Fail closed.** These cases stop the run with the error `pixel data was not assessed for burned-in text: <reason>`, and no output is written:
+- a transfer syntax other than native little endian, JPEG 2000 `.90` and `.91`, JPEG-LS or JPEG `.50`, `.51`, `.57` and `.70`;
+- a frame that the pinned decoders cannot decode, or a lossless JPEG frame with a restart interval, a nonzero point transform, more than one component or a predictor other than 1 to 7, which the pinned JPEG decoder does not decode correctly;
+- color or signed samples, MONOCHROME2 with Presentation LUT Shape `INVERSE`, MONOCHROME1 with `IDENTITY`, a Presentation, Modality or Variable Modality LUT Sequence, a decreasing VOI or Pixel Intensity Relationship LUT, or a Rescale Slope that is not positive, also in the shared or per-frame functional groups;
+- a frame with more than 2^20 bright components or dark regions, or more than 256 text-like lines (4096 open during grouping);
+- a sample size other than 8 or 16 bits;
+- multi-frame encapsulated data without one fragment per frame;
+- native Pixel Data whose length does not match its geometry, more than 2^26 samples in a frame, or more than 2^30 decoded samples;
+- an unreadable Samples per Pixel or Pixel Representation, an invalid Bits Stored (empty, unreadable, 0, or more than Bits Allocated), a High Bit other than Bits Stored - 1, or a sample above Bits Stored;
+- Float or Double Float Pixel Data.
+
+The codestream and frame-layout checks in the next section also run when an object is censored.
+
+The pinned decoders accept less than the transfer syntaxes allow, and every other codestream fails closed. The JPEG 2000 decoder accepts only unsigned 16-bit precision (so 12-bit JPEG 2000 fails closed), one component, one tile, one quality layer, LRCP progression, the reversible 5/3 transform without quantization, and no precinct, SOP, EPH or code-block style flags. So JPEG 2000 with the irreversible 9/7 transform always fails closed. The decoder accepts truncated coding passes, so a decoded reversible codestream is not proof of lossless samples. The JPEG decoder accepts 8-bit lossy JPEG and 2- to 16-bit lossless JPEG, so 12-bit `.51` fails closed. A deployment that receives such objects must negotiate a native or supported transfer syntax, or expect them to fail closed. A line of three or more glyphs of anti-aliased text, or of text in lossy JPEG with ringing around its edges, also fails closed, because its edge pixels are neither background nor glyph. A line of one or two such glyphs is left in place without an error. Measure the failure rate on an approved sample before deployment. The JPEG decoder uses its scalar inverse DCT, so lossy JPEG samples do not depend on the host CPU.
+
+**Limits: this check can miss text.**
+- Text that is not bright on the background, or not in the top 20 % of the range: low-contrast, dark or semi-transparent text.
+- Text in a line of one or two glyphs whose box holds anything other than background and text, such as tissue, a noisy background, anti-aliased edges or JPEG ringing. It is left in place without an error, for example initials or an age, and counted in `regions_left_in_place`. This is a residual risk: the output can keep a short identifier. Measure the count on an approved sample, and decide whether to accept or quarantine such outputs.
+- Text whose glyphs are smaller than 5 pixels, larger than the size limits, rotated, curved, outlined, connected into one component, or spaced more than twice their height apart.
+- Text in an overlay (60xx,3000), a presentation state, or another object. These are outside the pixel samples.
+- Identifying graphics that are not text, such as a face, a barcode or a logo.
+
+It can also censor non-text, such as a ruler or a scale bar, on the background. A bright structure in a dark patch of the frame's exact darkest value that reaches the frame border, even through a narrow channel, counts as being outside the anatomy and can be censored. Tissue in MG and DBT For Presentation images is not stored at that value, so this needs a dark channel through tissue.
+
+The detector is a mitigation, not proof that no identifier remains. A later release adds a pinned text-detection model, run on the CPU, to improve recall.
+
 ## Pixel and disclosure limits
 
-The tool does not decode pixel samples and does not claim the Clean Pixel Data Option. The validator emits the warning `pixel_data_not_assessed` when Pixel Data is present. DICOM PS3.15 notes that applying an attribute confidentiality profile does not guarantee that the complete information object is de-identified.
+The tool does not claim the Clean Pixel Data Option. Under `safe-harbor-metadata` it decodes pixel samples to censor burned-in text, as [Burned-in text](#burned-in-text) describes. The validator emits the warning `pixel_data_not_assessed` when Pixel Data is present. Source-aware validation with the check on keeps this code and states that a heuristic check ran, because the expected output was built with the check and the heuristic can miss text. Candidate-only validation cannot tell whether the check ran. DICOM PS3.15 notes that applying an attribute confidentiality profile does not guarantee that the complete information object is de-identified.
 
 The tool controls these pixel risks:
 

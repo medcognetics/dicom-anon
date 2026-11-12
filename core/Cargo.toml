@@ -19,6 +19,9 @@ dicom-core.workspace = true
 dicom-dictionary-std.workspace = true
 dicom-object.workspace = true
 getrandom.workspace = true
+jpeg-decoder.workspace = true
+pure_jpeg2k.workspace = true
+pure_jpegls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
@@ -27,11 +30,8 @@ zeroize.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
-jpeg-decoder.workspace = true
 jpeg-encoder.workspace = true
-pure_jpeg2k.workspace = true
 pure_jpegli.workspace = true
-pure_jpegls.workspace = true
 
 [[bin]]
 name = "dicom-anonymize"

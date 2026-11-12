@@ -11,6 +11,7 @@ use dicom_dictionary_std::{tags, StandardDataDictionary};
 use dicom_object::mem::InMemDicomObject;
 use serde::{Deserialize, Serialize};
 
+use crate::pixel_text::{BurnedInText, TextOverTissue};
 use crate::{Error, Result};
 
 /// Human-readable name of the default extended DICOM profile.
@@ -165,6 +166,14 @@ pub struct ProfileConfiguration {
     /// not fail. Validation ignores this field.
     #[serde(default)]
     pub fail_on_unmapped_sequences: BTreeSet<String>,
+    /// Burned-in text in the pixel samples. `auto` censors under `safe-harbor-metadata`
+    /// and does nothing under the other policies.
+    #[serde(default)]
+    pub burned_in_text: BurnedInText,
+    /// Text over tissue that the check cannot censor: `fail` (the default) writes no
+    /// output, and `leave` keeps the text and counts it. `leave` is a temporary relief.
+    #[serde(default)]
+    pub text_over_tissue: TextOverTissue,
 }
 
 impl Default for ProfileConfiguration {
@@ -187,6 +196,8 @@ impl ProfileConfiguration {
             sop_class_allowlist: BTreeSet::new(),
             fail_on_unmapped: BTreeSet::new(),
             fail_on_unmapped_sequences: BTreeSet::new(),
+            burned_in_text: BurnedInText::Auto,
+            text_over_tissue: TextOverTissue::Fail,
         }
     }
 
@@ -214,6 +225,16 @@ impl ProfileConfiguration {
             .into_iter()
             .collect(),
             ..Self::dicom()
+        }
+    }
+
+    /// Whether burned-in text is censored, after `auto` is resolved for the policy.
+    #[must_use]
+    pub fn censors_burned_in_text(&self) -> bool {
+        match self.burned_in_text {
+            BurnedInText::Censor => true,
+            BurnedInText::Off => false,
+            BurnedInText::Auto => self.policy == DeidentificationPolicy::SafeHarborMetadata,
         }
     }
 

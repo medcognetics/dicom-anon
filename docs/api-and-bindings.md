@@ -139,6 +139,8 @@ configuration_json = json.dumps({
     "safe_private_allowlist": [],
     "uid_mappings": {},
     "require_no_burned_in_annotation": False,
+    "burned_in_text": "auto",
+    "text_over_tissue": "fail",
     "sop_class_allowlist": [],
     "fail_on_unmapped": [],
     "fail_on_unmapped_sequences": [],
@@ -151,7 +153,7 @@ exact, exact_json = dicom_anon_python.validate_with_source(
 )
 ```
 
-The configuration JSON above is the explicit form of the `dicom-extended` preset. `fail_on_unmapped` lists canonical eight-digit tags that must not get a dummy value because no `descriptor_mappings` entry matched; a match is an error during anonymization. `fail_on_unmapped_sequences` optionally lists the canonical tags of the sequences that the guard applies in, at any depth below them; a miss elsewhere is only counted. Validation ignores the field. To use a shipped versioned descriptor map, copy its `mappings` member into `descriptor_mappings`. The report JSON includes the per-tag `dummy_replacements` and `unmapped_dummy_replacements` counts. Omitting `configuration_json` selects the same options. Use `"policy": "dicom"` with an empty `options` array for the option-free Basic Profile. Set `require_no_burned_in_annotation` to `true` to reject input unless Burned In Annotation is `NO`. Put SOP Class UIDs in `sop_class_allowlist` to reject other SOP Classes; an empty list permits all SOP Classes. Both fields are optional and default to off. The same fields apply to the Rust `ProfileConfiguration` and to the Node.js binding. The function signatures do not change.
+The configuration JSON above is the explicit form of the `dicom-extended` preset. `fail_on_unmapped` lists canonical eight-digit tags that must not get a dummy value because no `descriptor_mappings` entry matched; a match is an error during anonymization. `fail_on_unmapped_sequences` optionally lists the canonical tags of the sequences that the guard applies in, at any depth below them; a miss elsewhere is only counted. Validation ignores the field. To use a shipped versioned descriptor map, copy its `mappings` member into `descriptor_mappings`. The report JSON includes the per-tag `dummy_replacements` and `unmapped_dummy_replacements` counts. Omitting `configuration_json` selects the same options. Use `"policy": "dicom"` with an empty `options` array for the option-free Basic Profile. Set `require_no_burned_in_annotation` to `true` to reject input unless Burned In Annotation is `NO`. Put SOP Class UIDs in `sop_class_allowlist` to reject other SOP Classes; an empty list permits all SOP Classes. Both fields are optional and default to off. `burned_in_text` is `auto` (the default), `censor` or `off`: `auto` censors burned-in text under `safe-harbor-metadata`. `text_over_tissue` is `fail` (the default) or `leave`: `leave` keeps text over tissue that cannot be censored, as a temporary relief, and counts it in `regions_left_over_tissue`. The report JSON gives `burned_in_text_censoring` and the counts in `burned_in_text`. The same fields apply to the Rust `ProfileConfiguration` and to the Node.js binding. The function signatures do not change.
 
 `anonymize_study(instances, key, patient_scope, configuration_json)` takes a list of instance bytes and returns `(output_bytes_list, report_jsons, uid_map_json, validation_jsons)`, each list in input order. It requires the Safe Harbor policy and a patient scope. An instance that cannot be parsed fails with a `ValueError` that names only its index; the parser message is left out because it can echo source values.
 
