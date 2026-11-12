@@ -192,3 +192,41 @@ def test_python_binding_accepts_pixel_gate_configuration() -> None:
             _pixel_gate_configuration("1.2.840.10008.5.1.4.1.1.1.2"),
         )
     assert "SOP Class allowlist" not in str(unreadable.value)
+
+
+def _scoped_guard_configuration(tags: list[str], sequences: list[str]) -> str:
+    return json.dumps(
+        {
+            "policy": "dicom",
+            "options": ["clean-descriptors"],
+            "fail_on_unmapped": tags,
+            "fail_on_unmapped_sequences": sequences,
+        }
+    )
+
+
+def test_python_binding_validates_the_fail_on_unmapped_sequence_scope() -> None:
+    key = b"0" * 32
+    with pytest.raises(ValueError) as malformed:
+        dicom_anon_python.anonymize(
+            INVALID_DICOM,
+            key,
+            None,
+            _scoped_guard_configuration(["00080100"], ["(0054,0220)"]),
+        )
+    assert "sequence tags" in str(malformed.value)
+
+    with pytest.raises(ValueError) as unguarded:
+        dicom_anon_python.anonymize(
+            INVALID_DICOM, key, None, _scoped_guard_configuration([], ["00540220"])
+        )
+    assert "need at least one" in str(unguarded.value)
+
+    with pytest.raises(ValueError) as unreadable:
+        dicom_anon_python.anonymize(
+            INVALID_DICOM,
+            key,
+            None,
+            _scoped_guard_configuration(["00080100"], ["00540220"]),
+        )
+    assert "sequence" not in str(unreadable.value)

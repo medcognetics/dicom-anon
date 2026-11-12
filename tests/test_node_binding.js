@@ -150,3 +150,20 @@ assert.throws(
     ),
   (error) => error instanceof Error && !error.message.includes('SOP Class allowlist'),
 )
+
+const scopedGuardConfiguration = (tags, sequences) =>
+  JSON.stringify({
+    policy: 'dicom',
+    options: ['clean-descriptors'],
+    fail_on_unmapped: tags,
+    fail_on_unmapped_sequences: sequences,
+  })
+
+assert.throws(
+  () => binding.anonymize(INVALID_DICOM, KEY, null, scopedGuardConfiguration(['00080100'], ['(0054,0220)'])),
+  (error) => error instanceof Error && error.message.includes('sequence tags'),
+)
+assert.throws(
+  () => binding.anonymize(INVALID_DICOM, KEY, null, scopedGuardConfiguration([], ['00540220'])),
+  (error) => error instanceof Error && error.message.includes('need at least one'),
+)

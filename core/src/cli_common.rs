@@ -46,6 +46,9 @@ pub struct ProfileArgs {
     /// Fail when a cleaned attribute with this tag (eight hexadecimal digits) has no descriptor-map entry; repeat as needed.
     #[arg(long, value_name = "TAG", value_parser = parse_tag)]
     pub fail_on_unmapped: Vec<String>,
+    /// Apply --fail-on-unmapped only inside this sequence (eight hexadecimal digits), at any depth below it; repeat as needed. Misses elsewhere are counted only.
+    #[arg(long, value_name = "TAG", value_parser = parse_tag)]
+    pub fail_on_unmapped_sequence: Vec<String>,
     /// JSON safe-private creator and element-offset allowlist.
     #[arg(long, value_name = "PATH")]
     pub safe_private_allowlist: Option<PathBuf>,
@@ -88,6 +91,9 @@ impl ProfileArgs {
         profile
             .fail_on_unmapped
             .extend(self.fail_on_unmapped.iter().cloned());
+        profile
+            .fail_on_unmapped_sequences
+            .extend(self.fail_on_unmapped_sequence.iter().cloned());
         if let Some(path) = &self.safe_private_allowlist {
             let values: Vec<SafePrivateElement> = read_json(path, "safe-private allowlist")?;
             profile.safe_private_allowlist = values.into_iter().collect();
@@ -323,6 +329,7 @@ mod tests {
             disable_option: Vec::new(),
             descriptor_map,
             fail_on_unmapped: vec!["00080100".to_owned()],
+            fail_on_unmapped_sequence: vec!["00540220".to_owned()],
             safe_private_allowlist: None,
             uid_map: None,
             require_no_burned_in_annotation: false,
@@ -353,6 +360,7 @@ mod tests {
             Some("SYNTHVENDOR")
         );
         assert!(profile.fail_on_unmapped.contains("00080100"));
+        assert!(profile.fail_on_unmapped_sequences.contains("00540220"));
         for (tag, values) in &profile.descriptor_mappings {
             for (source, output) in values {
                 assert_eq!(source, output, "{tag}");
