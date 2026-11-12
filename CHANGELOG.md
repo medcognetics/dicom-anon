@@ -27,6 +27,7 @@ This is the first tagged release. Version 0.1.0 was not tagged or released.
 - A second shipped descriptor map ([#48](https://github.com/medcognetics/dicom-anon/issues/48)): `descriptor-maps/breast-imaging-references-ps3.16-2026d.json` keeps the PS3.16 2026d codes for Partial View, every Purpose of Reference context except report references, and Image Derivation.
 - Mammography, breast tomosynthesis, synthesized 2D, and JPEG 2000 conformance fixtures in CI ([#21](https://github.com/medcognetics/dicom-anon/issues/21)).
 - Study-level Safe Harbor API ([#34](https://github.com/medcognetics/dicom-anon/issues/34)): `Anonymizer::anonymize_study`, Python `anonymize_study`, and Node.js `anonymizeStudy` de-identify all instances of a study with one generated UID map, run source-aware validation on each output, reject instances of a different study or patient, and fail as a whole with errors that name only the instance index and attribute paths.
+- Synthetic Hologic, GE, Siemens, and Fujifilm variants of the mammography fixtures, with For Processing objects, vendor private blocks at the root and in a nested sequence, and, for tomosynthesis, in every functional group item, run through the Safe Harbor pipeline with the breast map and both pixel-risk gates ([#33](https://github.com/medcognetics/dicom-anon/issues/33)).
 
 ### Changed
 
