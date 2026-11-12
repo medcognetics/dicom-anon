@@ -30,6 +30,19 @@ pub struct GeneratedUidMapResult {
     pub uid_map_json: String,
 }
 
+/// Result returned by `anonymizeStudy`.
+#[napi(object)]
+pub struct StudyResult {
+    /// Complete DICOM Part 10 outputs, in input order.
+    pub data: Vec<Buffer>,
+    /// Serialized `AnonymizationReport` for each output.
+    pub report_jsons: Vec<String>,
+    /// Complete source-to-replacement UID map for the study. Keep it under re-identification custody.
+    pub uid_map_json: String,
+    /// Serialized source-aware `ValidationReport` for each output.
+    pub validation_jsons: Vec<String>,
+}
+
 /// Result returned by `validate`.
 #[napi(object)]
 pub struct ValidateResult {
@@ -90,6 +103,50 @@ pub fn anonymize_with_generated_uid_map(
         report_json: serde_json::to_string(&report).map_err(napi_error)?,
         uid_map_json: serde_json::to_string(&uid_map).map_err(napi_error)?,
     })
+}
+
+/// De-identify every instance of one study under Safe Harbor with one generated UID map.
+/// Fails as a whole when any instance fails; the error names only the instance index.
+#[napi]
+pub fn anonymize_study(
+    instances: Vec<Buffer>,
+    key: Buffer,
+    patient_scope: String,
+    configuration_json: Option<String>,
+) -> Result<StudyResult> {
+    let anonymizer = anonymizer(&key, Some(patient_scope), configuration_json)?;
+    let sources = instances
+        .iter()
+        .enumerate()
+        .map(|(index, data)| {
+            read_dicom(Cursor::new(data.as_ref()))
+                // The parser error can echo source values, such as an unknown transfer syntax.
+                .map_err(|_| {
+                    napi_error(format!(
+                        "study instance {index}: not a readable DICOM Part 10 object"
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let study = anonymizer.anonymize_study(&sources).map_err(napi_error)?;
+    let mut result = StudyResult {
+        data: Vec::with_capacity(study.instances.len()),
+        report_jsons: Vec::with_capacity(study.instances.len()),
+        uid_map_json: serde_json::to_string(&study.uid_map).map_err(napi_error)?,
+        validation_jsons: Vec::with_capacity(study.instances.len()),
+    };
+    for instance in &study.instances {
+        let mut bytes = Vec::new();
+        write_dicom(&instance.output, &mut bytes).map_err(napi_error)?;
+        result.data.push(bytes.into());
+        result
+            .report_jsons
+            .push(serde_json::to_string(&instance.report).map_err(napi_error)?);
+        result
+            .validation_jsons
+            .push(serde_json::to_string(&instance.validation).map_err(napi_error)?);
+    }
+    Ok(result)
 }
 
 /// Validate DICOM Part 10 bytes.

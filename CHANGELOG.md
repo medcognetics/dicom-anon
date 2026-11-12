@@ -28,6 +28,8 @@ This is the first tagged release. Version 0.1.0 was not tagged or released.
 - `dicom-validate` reports `encapsulated_total_length_mismatch` when Encapsulated Pixel Data Value Total Length `(7FE0,0003)` does not match the fragments ([#31](https://github.com/medcognetics/dicom-anon/pull/31)).
 - A second shipped descriptor map ([#48](https://github.com/medcognetics/dicom-anon/issues/48)): `descriptor-maps/breast-imaging-references-ps3.16-2026d.json` keeps the PS3.16 2026d codes for Partial View, every Purpose of Reference context except report references, and Image Derivation.
 - Mammography, breast tomosynthesis, synthesized 2D, and JPEG 2000 conformance fixtures in CI ([#21](https://github.com/medcognetics/dicom-anon/issues/21)).
+- Study-level Safe Harbor API ([#34](https://github.com/medcognetics/dicom-anon/issues/34)): `Anonymizer::anonymize_study`, Python `anonymize_study`, and Node.js `anonymizeStudy` de-identify all instances of a study with one generated UID map, run source-aware validation on each output, reject instances of a different study or patient, and fail as a whole with errors that name only the instance index and attribute paths.
+- Synthetic Hologic, GE, Siemens, and Fujifilm variants of the mammography fixtures, with For Processing objects, vendor private blocks at the root and in a nested sequence, and, for tomosynthesis, in every functional group item, run through the Safe Harbor pipeline with the breast map and both pixel-risk gates ([#33](https://github.com/medcognetics/dicom-anon/issues/33)).
 
 ### Changed
 
@@ -35,5 +37,6 @@ This is the first tagged release. Version 0.1.0 was not tagged or released.
 - JPEG 2000, JPEG, and JPEG-LS Pixel Data that contains comment or application segments changes bytes: the segments are removed, and scan data and decoded samples do not change.
 - The anonymizer uses less peak memory when it rewrites encapsulated Pixel Data ([#31](https://github.com/medcognetics/dicom-anon/pull/31)).
 - The Cargo `repository` field and the README badge identify `medcognetics/dicom-anon`.
+- The workspace release profile no longer strips symbols, so a source build of the Python or Node.js binding loads on macOS ([#41](https://github.com/medcognetics/dicom-anon/issues/41)). The release workflow still strips the published Linux binaries and wheel.
 
 [0.2.0]: https://github.com/medcognetics/dicom-anon/releases/tag/v0.2.0

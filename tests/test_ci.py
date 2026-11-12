@@ -113,7 +113,7 @@ def test_linux_ci_contract() -> None:
     assert "timeout-minutes: 30" in workflow
     assert "timeout-minutes: 5" in workflow
     assert "make ${{ matrix.make_target }}" in workflow
-    assert "needs: supported-versions" in workflow
+    assert "needs: [supported-versions, report-cpu]" in workflow
     assert "if: always()" in workflow
 
 
@@ -122,6 +122,7 @@ def test_linux_ci_runs_every_pull_request_on_hosted_runners() -> None:
 
     assert job_runners(workflow) == {
         "supported-versions": HOSTED_RUNNER,
+        "report-cpu": HOSTED_RUNNER,
         "required": HOSTED_RUNNER,
     }
     # Fork pull requests run too: hosted runners are ephemeral, and the jobs have a
@@ -388,3 +389,43 @@ def test_node_lock_uses_patched_js_yaml() -> None:
     )
 
     assert js_yaml_version >= MINIMUM_SAFE_JS_YAML_VERSION
+
+
+def test_linux_ci_runs_cpu_report_integration_with_pinned_assets() -> None:
+    workflow = read_workflow("linux-ci.yml")
+    job = workflow.partition("  report-cpu:\n")[2].partition("\n  required:\n")[0]
+
+    assert "name: Linux / Report CPU integration" in job
+    assert "run: make report-integration" in job
+    assert "model install --backend cpu" in job
+    # The bundle path, cache key, and library name follow the installer pins.
+    installer = (REPOSITORY_ROOT / "report" / "src" / "install.rs").read_text(
+        encoding="utf-8"
+    )
+    pins = {
+        name: re.search(rf'pub const {name}: &str = "([^"]+)";', installer)[1]  # type: ignore[index]
+        for name in (
+            "PRIVACY_FILTER_REVISION",
+            "ONNX_RUNTIME_VERSION",
+            "PDFIUM_REVISION",
+        )
+    }
+    revision, ort, pdfium = (
+        pins["PRIVACY_FILTER_REVISION"],
+        pins["ONNX_RUNTIME_VERSION"],
+        pins["PDFIUM_REVISION"],
+    )
+    assert f"privacy-filter-{revision}-ort-{ort}-cpu" in job
+    assert (
+        f"key: report-cpu-assets-privacy-filter-{revision}-ort-{ort}-pdfium-{pdfium}-"
+        "${{ hashFiles('report/src/install.rs') }}" in job
+    )
+    assert f"libonnxruntime.so.{ort}" in job
+    assert "key: ${{ steps.report-assets.outputs.cache-primary-key }}" in job
+    # The bundle is saved only after the integration tests pass.
+    assert job.index("run: make report-integration") < job.index("actions/cache/save@")
+    # Only master runs write the asset cache; everything else only restores it.
+    assert "actions/cache/restore@" in job and "actions/cache/save@" in job
+    assert "if: github.ref == 'refs/heads/master' &&" in job
+    # The Required check also waits for this job.
+    assert "REPORT_CPU_RESULT: ${{ needs.report-cpu.result }}" in workflow
