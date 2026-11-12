@@ -554,6 +554,10 @@ fn unsupported_pixel_option_is_rejected_before_processing() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported"));
 }
 
+const SHIPPED_REFERENCES_MAP: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../descriptor-maps/breast-imaging-references-ps3.16-2026d.json"
+);
 const SHIPPED_BREAST_MAP: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../descriptor-maps/breast-imaging-ps3.16-2026d.json"
@@ -715,6 +719,8 @@ fn shipped_breast_map_keeps_mg_and_dbt_code_sequences() {
         let source = breast_object(sop_class, view, modifier, region, in_frame_anatomy);
         let mut command = safe_harbor_command(&uid_map);
         command.arg("--descriptor-map").arg(SHIPPED_BREAST_MAP);
+        // Two maps load together: the CLI rejects a conflict between them.
+        command.arg("--descriptor-map").arg(SHIPPED_REFERENCES_MAP);
         for tag in CODE_TAGS {
             command.args(["--fail-on-unmapped", tag]);
         }
