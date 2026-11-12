@@ -167,15 +167,14 @@ fn check_jpeg2000_tiles(codestream: &[u8], tiles: u64) -> Result<bool> {
         if tile >= tile_count {
             return Err(malformed());
         }
-        // TPsot numbers the tile-parts of a tile from 0 in order, so a tile has at most
-        // 255. TNsot, where it is not 0, is the same in every tile-part of the tile.
-        if u16::from(sot[6]) != parts[tile] {
+        // TPsot numbers the tile-parts of a tile from 0 in order and is at most 254
+        // (T.800 A.4.2). TNsot, where it is not 0, is the same in every tile-part of the
+        // tile. The packet walk joins tile-part bodies in codestream order, so it relies
+        // on this check.
+        if sot[6] == 255 || u16::from(sot[6]) != parts[tile] {
             return Err(malformed());
         }
         parts[tile] += 1;
-        if parts[tile] > 255 {
-            return Err(malformed());
-        }
         if total != 0 {
             if declared[tile] != 0 && declared[tile] != u16::from(total) {
                 return Err(malformed());
@@ -189,7 +188,15 @@ fn check_jpeg2000_tiles(codestream: &[u8], tiles: u64) -> Result<bool> {
             header = next;
         }
         // Psot 0 means the tile-part runs to the end of the codestream.
+        // Psot 0 is allowed only in the last tile-part, which runs to EOC. Coded data
+        // holds no marker above FF8F, so a later SOT shows that it is not the last.
         if length == 0 {
+            if codestream[header..]
+                .windows(2)
+                .any(|pair| pair == [0xFF, 0x90])
+            {
+                return Err(malformed());
+            }
             break;
         }
         position = position.checked_add(length).ok_or_else(malformed)?;
@@ -378,8 +385,9 @@ pub(crate) fn jpeg_is_lossy(codestream: &[u8]) -> bool {
             // Every other SOFn is a DCT frame. DHT (C4), JPG (C8) and DAC (CC) share
             // the range.
             0xC0..=0xCF if ![0xC4, 0xC8, 0xCC].contains(&marker) => return true,
-            // The last byte of a scan header holds Ah and Al; Al is the point transform.
-            0xDA => return lossless && segment.last().is_some_and(|&byte| byte & 0x0F != 0),
+            // The last byte of a scan header holds Ah and Al; Al is the point transform. A
+            // scan without a frame, or a scan header that is cut short, counts as lossy.
+            0xDA => return !lossless || segment.last().is_none_or(|&byte| byte & 0x0F != 0),
             _ => {}
         }
         position += 2 + length;
@@ -915,6 +923,10 @@ mod tests {
         let mut disagree = skeleton(1, &[(0, 2), (0, 2)]);
         disagree[59 + 16 + 11] = 3;
         assert!(check_jpeg2000_tiles(&disagree, 1).is_err());
+        // Psot 0 in a tile-part that is not the last.
+        let mut open = skeleton(1, &[(0, 2), (0, 2)]);
+        open[59 + 6..59 + 10].copy_from_slice(&0_u32.to_be_bytes());
+        assert!(check_jpeg2000_tiles(&open, 1).is_err());
         // An unknown transform value.
         assert!(check_jpeg2000_tiles(&skeleton(7, &[(0, 1)]), 1).is_err());
     }
@@ -1036,6 +1048,17 @@ mod tests {
         assert!(jpeg_is_lossy(&[0xFF, 0xD8, 0xFF, 0xC3, 0x00]));
         assert!(jpeg_is_lossy(&[0xFF, 0xD8, 0xFF, 0xC3, 0x00, 0x01]));
         assert!(jpeg_is_lossy(&[0xFF, 0xD8, 0x00]));
+        // A scan without a frame header, and a lossless scan header that is cut short.
+        assert!(jpeg_is_lossy(&[
+            0xFF, 0xD8, 0xFF, 0xDA, 0x00, 0x08, 1, 1, 0
+        ]));
+        let mut cut = lossless_stream(&LOSSLESS, 4, 4, 0);
+        let sos = cut
+            .windows(2)
+            .position(|pair| pair == [0xFF, 0xDA])
+            .unwrap();
+        cut.truncate(sos + 5);
+        assert!(jpeg_is_lossy(&cut));
     }
 
     #[test]

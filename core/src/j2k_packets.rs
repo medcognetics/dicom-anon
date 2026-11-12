@@ -1028,7 +1028,9 @@ pub(crate) fn packet_usage(codestream: &[u8]) -> Walk<Vec<(usize, usize)>> {
         if marker == 0x90 {
             break;
         }
-        // CAP (ITU-T T.801 and T.814) declares extended capabilities, such as HTJ2K.
+        // CAP (ITU-T T.801 and T.814) declares extended capabilities, such as HTJ2K. Any
+        // CAP fails closed: Part 1 codestreams do not need one, and the walk reads Part 1
+        // coding only.
         if marker == 0x50 {
             return Err("a JPEG 2000 codestream declares extended capabilities");
         }
