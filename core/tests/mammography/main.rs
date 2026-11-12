@@ -5,6 +5,7 @@
 //! breast-imaging descriptor map. The checks cover metadata only; Pixel Data stays unassessed.
 
 mod fixtures;
+mod vendors;
 
 use std::collections::BTreeMap;
 use std::process::Command;
@@ -15,8 +16,8 @@ use dicom_anon::{
     ProfileConfiguration, SecretKey,
 };
 use dicom_core::header::Header;
-use dicom_core::value::Value;
-use dicom_core::{Tag, VR};
+use dicom_core::value::{DataSetSequence, Value};
+use dicom_core::{DataElement, Tag, VR};
 use dicom_dictionary_std::tags;
 use dicom_object::mem::{InMemDicomObject, InMemElement};
 
@@ -115,6 +116,7 @@ fn breast_map() -> BTreeMap<String, BTreeMap<String, String>> {
         disable_option: Vec::new(),
         descriptor_map: vec![SHIPPED_BREAST_MAP.into()],
         fail_on_unmapped: Vec::new(),
+        fail_on_unmapped_sequence: Vec::new(),
         safe_private_allowlist: None,
         uid_map: None,
         require_no_burned_in_annotation: false,
@@ -436,6 +438,244 @@ fn view_code_sequence_is_kept_except_in_safe_harbor_without_the_breast_map() {
     }
 }
 
+/// Load shipped descriptor maps from `descriptor-maps/` into one mapping.
+fn shipped_maps(files: &[&str]) -> BTreeMap<String, BTreeMap<String, String>> {
+    let mut merged: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    for file in files {
+        let path = format!("{}/../descriptor-maps/{file}", env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        let document: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let mappings: BTreeMap<String, BTreeMap<String, String>> =
+            serde_json::from_value(document["mappings"].clone()).unwrap();
+        for (tag, values) in mappings {
+            let entry = merged.entry(tag).or_default();
+            for (source, output) in values {
+                // The CLI rejects a conflict between maps, so a shipped pair must not have one.
+                let previous = entry.insert(source.clone(), output.clone());
+                assert!(previous.is_none_or(|value| value == output), "{source}");
+            }
+        }
+    }
+    merged
+}
+
+const VIEW_MAP: &str = "breast-imaging-ps3.16-2026d.json";
+const REFERENCES_MAP: &str = "breast-imaging-references-ps3.16-2026d.json";
+const CODE_TAGS: [&str; 3] = ["00080100", "00080102", "00080104"];
+
+/// Options that stop on any code without a map entry.
+fn guarded_options(files: &[&str]) -> Options {
+    let mut options = Policy::SafeHarbor.options();
+    options.profile.descriptor_mappings = shipped_maps(files);
+    options.profile.fail_on_unmapped = CODE_TAGS.iter().map(ToString::to_string).collect();
+    options
+}
+
+fn code_item(value: &str, scheme: &str, meaning: &str) -> InMemDicomObject {
+    let mut item = InMemDicomObject::new_empty();
+    item.put_str(tags::CODE_VALUE, VR::SH, value);
+    item.put_str(tags::CODING_SCHEME_DESIGNATOR, VR::SH, scheme);
+    item.put_str(tags::CODE_MEANING, VR::LO, meaning);
+    item
+}
+
+fn code_sequence(tag: Tag, items: Vec<InMemDicomObject>) -> InMemElement {
+    DataElement::new(tag, VR::SQ, DataSetSequence::from(items))
+}
+
+/// One code from each of the other MG and DBT code sequences, added to a fixture.
+fn with_reference_codes(source: &DefaultDicomObject) -> DefaultDicomObject {
+    let mut object = source.clone();
+    object.put(code_sequence(
+        tags::PARTIAL_VIEW_CODE_SEQUENCE,
+        vec![code_item("255549009", "SCT", "Anterior")],
+    ));
+    object.put(code_sequence(
+        tags::DERIVATION_CODE_SEQUENCE,
+        vec![code_item(
+            "113091",
+            "DCM",
+            "Spatially-related frames extracted from the volume",
+        )],
+    ));
+    let mut source_image = InMemDicomObject::new_empty();
+    source_image.put_str(
+        tags::REFERENCED_SOP_CLASS_UID,
+        VR::UI,
+        "1.2.840.10008.5.1.4.1.1.1.2",
+    );
+    source_image.put_str(tags::REFERENCED_SOP_INSTANCE_UID, VR::UI, SOURCE_UIDS[0]);
+    source_image.put(code_sequence(
+        tags::PURPOSE_OF_REFERENCE_CODE_SEQUENCE,
+        vec![code_item(
+            "121322",
+            "DCM",
+            "Source image for image processing operation",
+        )],
+    ));
+    object.put(code_sequence(
+        tags::SOURCE_IMAGE_SEQUENCE,
+        vec![source_image],
+    ));
+    // Purpose of Reference codes also occur in Referenced Image Sequence (CID 7201),
+    // Contributing Equipment Sequence (CID 7005) and Related Series Sequence (CID 7210).
+    for (sequence, value, meaning) in [
+        (
+            tags::REFERENCED_IMAGE_SEQUENCE,
+            "121313",
+            "Other partial views",
+        ),
+        (
+            tags::CONTRIBUTING_EQUIPMENT_SEQUENCE,
+            "109104",
+            "De-identifying Equipment",
+        ),
+        (
+            tags::RELATED_SERIES_SEQUENCE,
+            "121327",
+            "Full fidelity image",
+        ),
+    ] {
+        let mut parent = InMemDicomObject::new_empty();
+        if sequence == tags::REFERENCED_IMAGE_SEQUENCE {
+            parent.put_str(
+                tags::REFERENCED_SOP_CLASS_UID,
+                VR::UI,
+                "1.2.840.10008.5.1.4.1.1.1.2",
+            );
+            parent.put_str(tags::REFERENCED_SOP_INSTANCE_UID, VR::UI, SOURCE_UIDS[1]);
+        }
+        parent.put(code_sequence(
+            tags::PURPOSE_OF_REFERENCE_CODE_SEQUENCE,
+            vec![code_item(value, "DCM", meaning)],
+        ));
+        object.put(code_sequence(sequence, vec![parent]));
+    }
+    round_trip(&object)
+}
+
+fn assert_code(item: &InMemDicomObject, value: &str, scheme: &str, meaning: &str, context: &str) {
+    assert_eq!(
+        text(item, tags::CODE_VALUE).as_deref(),
+        Some(value),
+        "{context}"
+    );
+    assert_eq!(
+        text(item, tags::CODING_SCHEME_DESIGNATOR).as_deref(),
+        Some(scheme),
+        "{context}"
+    );
+    assert_eq!(
+        text(item, tags::CODE_MEANING).as_deref(),
+        Some(meaning),
+        "{context}"
+    );
+}
+
+#[test]
+fn shipped_maps_keep_the_other_code_sequences_under_safe_harbor() {
+    let fixtures = Fixtures::new();
+    for (name, fixture) in fixtures.named() {
+        let source = with_reference_codes(&round_trip(fixture));
+        let (output, report) = Anonymizer::new(guarded_options(&[VIEW_MAP, REFERENCES_MAP]))
+            .unwrap()
+            .anonymize(&source)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        for tag in CODE_TAGS {
+            assert!(
+                !report.unmapped_dummy_replacements.contains_key(tag),
+                "{name}: {tag}"
+            );
+        }
+        let output = round_trip(&output);
+        assert_code(
+            item(&output, tags::PARTIAL_VIEW_CODE_SEQUENCE, 0),
+            "255549009",
+            "SCT",
+            "Anterior",
+            name,
+        );
+        assert_code(
+            item(&output, tags::DERIVATION_CODE_SEQUENCE, 0),
+            "113091",
+            "DCM",
+            "Spatially-related frames extracted from the volume",
+            name,
+        );
+        assert_code(
+            item(
+                item(&output, tags::SOURCE_IMAGE_SEQUENCE, 0),
+                tags::PURPOSE_OF_REFERENCE_CODE_SEQUENCE,
+                0,
+            ),
+            "121322",
+            "DCM",
+            "Source image for image processing operation",
+            name,
+        );
+        for (sequence, value, meaning) in [
+            (
+                tags::REFERENCED_IMAGE_SEQUENCE,
+                "121313",
+                "Other partial views",
+            ),
+            (
+                tags::CONTRIBUTING_EQUIPMENT_SEQUENCE,
+                "109104",
+                "De-identifying Equipment",
+            ),
+            (
+                tags::RELATED_SERIES_SEQUENCE,
+                "121327",
+                "Full fidelity image",
+            ),
+        ] {
+            assert_code(
+                item(
+                    item(&output, sequence, 0),
+                    tags::PURPOSE_OF_REFERENCE_CODE_SEQUENCE,
+                    0,
+                ),
+                value,
+                "DCM",
+                meaning,
+                name,
+            );
+        }
+        // The other shipped map keeps the fixture's View Code unchanged.
+        assert_eq!(
+            item(&output, tags::VIEW_CODE_SEQUENCE, 0),
+            item(&source, tags::VIEW_CODE_SEQUENCE, 0),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn view_map_alone_stops_on_the_other_code_sequences() {
+    let source = with_reference_codes(&round_trip(&Fixtures::new().named()[0].1.clone()));
+    let result = Anonymizer::new(guarded_options(&[VIEW_MAP]))
+        .unwrap()
+        .anonymize(&source);
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("no descriptor-map entry"), "{error}");
+}
+
+#[test]
+fn an_unknown_code_still_stops_with_both_maps() {
+    let mut source = with_reference_codes(&round_trip(&Fixtures::new().named()[0].1.clone()));
+    source.put(code_sequence(
+        tags::DERIVATION_CODE_SEQUENCE,
+        vec![code_item("LOCAL-1", "99LOCAL", "Site specific derivation")],
+    ));
+    let result = Anonymizer::new(guarded_options(&[VIEW_MAP, REFERENCES_MAP]))
+        .unwrap()
+        .anonymize(&round_trip(&source));
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("(0008,9215)[0]/(0008,0100)"), "{error}");
+    assert!(!error.contains("LOCAL-1"), "{error}");
+}
+
 #[test]
 fn safe_harbor_generalizes_temporal_values_at_every_depth_and_caps_age() {
     for (name, policy, source, output) in cases() {
@@ -717,4 +957,216 @@ fn command_line_source_aware_validation_passes() {
             assert_eq!(report["validation_mode"], "source_comparison", "{context}");
         }
     }
+}
+
+fn safe_harbor_without_uid_map() -> Options {
+    let mut options = Policy::SafeHarbor.options();
+    options.profile.uid_mappings.clear();
+    options
+}
+
+#[test]
+fn study_api_threads_one_generated_uid_map_through_all_instances() {
+    let fixtures = Fixtures::new();
+    let sources = [
+        &fixtures.mammogram,
+        &fixtures.tomosynthesis,
+        &fixtures.synthesized,
+    ]
+    .map(round_trip);
+    let study = Anonymizer::new(safe_harbor_without_uid_map())
+        .unwrap()
+        .anonymize_study(&sources)
+        .unwrap();
+    assert_eq!(study.instances.len(), 3);
+
+    // Instance-level and shared UIDs are mapped, and no source UID survives in any output.
+    for uid in [
+        fixtures::STUDY,
+        fixtures::SOP_MG,
+        fixtures::SOP_DBT,
+        fixtures::SOP_SYNTHESIZED,
+        fixtures::FRAME_OF_REFERENCE,
+    ] {
+        assert!(study.uid_map.contains_key(uid), "{uid} is not mapped");
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for replacement in study.uid_map.values() {
+        assert!(seen.insert(replacement), "duplicate replacement UID");
+        assert!(replacement.starts_with("2.25."), "{replacement}");
+    }
+    for instance in &study.instances {
+        assert!(instance.validation.conformant);
+        visit(&instance.output, 0, &mut |element, _| {
+            if let Ok(value) = element.to_str() {
+                assert!(!source_uid_in(&value), "source UID in {}", element.tag());
+            }
+        });
+    }
+
+    // The synthesized view still references the tomosynthesis output, and the study,
+    // patient token, and frame of reference agree across instances.
+    let [mammogram, dbt, synthesized] = [0, 1, 2].map(|index| &study.instances[index].output);
+    let source_image = item(synthesized, tags::SOURCE_IMAGE_SEQUENCE, 0);
+    assert_eq!(
+        text(source_image, tags::REFERENCED_SOP_INSTANCE_UID),
+        text(dbt, tags::SOP_INSTANCE_UID)
+    );
+    for tag in [tags::STUDY_INSTANCE_UID, tags::CLINICAL_TRIAL_SUBJECT_ID] {
+        let value = text(dbt, tag);
+        assert!(
+            value.as_deref().is_some_and(|value| !value.is_empty()),
+            "{tag}"
+        );
+        assert_eq!(text(mammogram, tag), value, "{tag}");
+        assert_eq!(text(synthesized, tag), value, "{tag}");
+    }
+    assert_eq!(
+        text(synthesized, tags::FRAME_OF_REFERENCE_UID),
+        text(dbt, tags::FRAME_OF_REFERENCE_UID)
+    );
+
+    // The debug form never prints the map.
+    let debug = format!("{study:?}");
+    for uid in SOURCE_UIDS {
+        assert!(!debug.contains(uid));
+    }
+}
+
+#[test]
+fn study_api_keeps_supplied_mappings() {
+    let fixtures = Fixtures::new();
+    let sources = [round_trip(&fixtures.mammogram)];
+    let mut options = safe_harbor_without_uid_map();
+    options
+        .profile
+        .uid_mappings
+        .insert(fixtures::SOP_MG.to_owned(), "2.25.42".to_owned());
+    let study = Anonymizer::new(options)
+        .unwrap()
+        .anonymize_study(&sources)
+        .unwrap();
+    assert_eq!(study.uid_map[fixtures::SOP_MG], "2.25.42");
+    assert_eq!(
+        text(&study.instances[0].output, tags::SOP_INSTANCE_UID).as_deref(),
+        Some("2.25.42")
+    );
+}
+
+#[test]
+fn study_api_fails_as_a_whole_and_names_only_the_instance() {
+    let fixtures = Fixtures::new();
+    let sources = [&fixtures.mammogram, &fixtures.tomosynthesis].map(round_trip);
+    let mut options = safe_harbor_without_uid_map();
+    options
+        .profile
+        .sop_class_allowlist
+        .insert(fixtures::MG_FOR_PRESENTATION.to_owned());
+    let error = Anonymizer::new(options)
+        .unwrap()
+        .anonymize_study(&sources)
+        .unwrap_err();
+    match &error {
+        dicom_anon::Error::StudyInstance { index, .. } => assert_eq!(*index, 1),
+        other => panic!("unexpected error: {other}"),
+    }
+    let message = error.to_string();
+    for uid in SOURCE_UIDS {
+        assert!(!message.contains(uid), "{message}");
+    }
+
+    assert!(matches!(
+        Anonymizer::new(safe_harbor_without_uid_map())
+            .unwrap()
+            .anonymize_study(&[]),
+        Err(dicom_anon::Error::EmptyStudy)
+    ));
+    assert!(matches!(
+        Anonymizer::new(Policy::DicomExtended.options())
+            .unwrap()
+            .anonymize_study(&sources),
+        Err(dicom_anon::Error::UidMapGenerationRequiresSafeHarbor)
+    ));
+}
+
+#[test]
+fn study_api_rejects_instances_of_another_study_or_patient() {
+    let fixtures = Fixtures::new();
+    let anonymizer = Anonymizer::new(safe_harbor_without_uid_map()).unwrap();
+    for (tag, value) in [
+        (tags::STUDY_INSTANCE_UID, "1.2.826.0.1.3680043.10.1.999"),
+        (tags::PATIENT_ID, "OTHER-PATIENT-ID"),
+        (tags::ISSUER_OF_PATIENT_ID, "OTHER-ISSUER"),
+    ] {
+        let mut other = round_trip(&fixtures.tomosynthesis);
+        other.put(InMemElement::new(tag, VR::LO, Value::from(value)));
+        let sources = [round_trip(&fixtures.mammogram), other];
+        let error = anonymizer.anonymize_study(&sources).unwrap_err();
+        assert!(
+            matches!(error, dicom_anon::Error::StudyMismatch { index: 1 }),
+            "{tag}: {error}"
+        );
+        assert!(!error.to_string().contains(value), "{tag}: {error}");
+    }
+}
+
+#[test]
+fn study_api_treats_absent_and_empty_identity_values_alike() {
+    let fixtures = Fixtures::new();
+    let mut with_empty_issuer = round_trip(&fixtures.tomosynthesis);
+    with_empty_issuer.put(InMemElement::new(
+        tags::ISSUER_OF_PATIENT_ID,
+        VR::LO,
+        Value::from(""),
+    ));
+    let mut without_issuer = round_trip(&fixtures.mammogram);
+    without_issuer.remove_element(tags::ISSUER_OF_PATIENT_ID);
+    let study = Anonymizer::new(safe_harbor_without_uid_map())
+        .unwrap()
+        .anonymize_study(&[without_issuer, with_empty_issuer]);
+    assert!(study.is_ok(), "{:?}", study.err());
+}
+
+#[test]
+fn study_api_requires_a_study_instance_uid() {
+    let fixtures = Fixtures::new();
+    let sources = [&fixtures.mammogram, &fixtures.tomosynthesis].map(|fixture| {
+        let mut source = round_trip(fixture);
+        source.remove_element(tags::STUDY_INSTANCE_UID);
+        source
+    });
+    let error = Anonymizer::new(safe_harbor_without_uid_map())
+        .unwrap()
+        .anonymize_study(&sources)
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            dicom_anon::Error::StudyInstanceUidMissing { index: 0 }
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn study_api_errors_never_echo_the_transfer_syntax() {
+    const SECRET: &str = "MRN-SECRET-12345678";
+    let fixtures = Fixtures::new();
+    let source = round_trip(&fixtures.mammogram);
+    let sop_class = source.meta().media_storage_sop_class_uid().to_owned();
+    let sop_instance = source.meta().media_storage_sop_instance_uid().to_owned();
+    let tampered = source
+        .into_inner()
+        .with_meta(
+            dicom_object::FileMetaTableBuilder::new()
+                .transfer_syntax(SECRET)
+                .media_storage_sop_class_uid(sop_class)
+                .media_storage_sop_instance_uid(sop_instance),
+        )
+        .unwrap();
+    let error = Anonymizer::new(safe_harbor_without_uid_map())
+        .unwrap()
+        .anonymize_study(&[tampered])
+        .unwrap_err();
+    assert!(!error.to_string().contains(SECRET), "{error}");
 }
