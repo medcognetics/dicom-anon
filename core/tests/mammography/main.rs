@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 use std::process::Command;
 
 use dicom_anon::{
-    read_dicom, validate_source_object, write_dicom, Anonymizer, DefaultDicomObject, Options,
-    ProfileConfiguration, SecretKey,
+    read_dicom, validate_source_object, write_dicom, Anonymizer, BurnedInText, DefaultDicomObject,
+    Options, ProfileConfiguration, SecretKey,
 };
 use dicom_core::header::Header;
 use dicom_core::value::{DataSetSequence, Value};
@@ -52,6 +52,9 @@ impl Policy {
                 options.patient_scope = Some(PATIENT_SCOPE.to_owned());
                 let mut profile = ProfileConfiguration::safe_harbor();
                 profile.uid_mappings = uid_map();
+                // These fixtures test metadata. Their placeholder codestreams cannot be
+                // decoded, so the burned-in text check would fail closed on them.
+                profile.burned_in_text = BurnedInText::Off;
                 profile
             }
         };
@@ -853,6 +856,8 @@ fn command_line_source_aware_validation_passes() {
                     uid_map_path.to_str().unwrap(),
                     "--patient-scope",
                     PATIENT_SCOPE,
+                    "--burned-in-text",
+                    "off",
                 ]);
             }
             let anonymized = Command::new(env!("CARGO_BIN_EXE_dicom-anonymize"))

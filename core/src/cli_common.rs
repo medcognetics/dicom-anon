@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
 
-use crate::{DicomOption, ProfileConfiguration, SafePrivateElement, SecretKey};
+use crate::{
+    BurnedInText, DicomOption, ProfileConfiguration, SafePrivateElement, SecretKey, TextOverTissue,
+};
 
 /// `--version` text: crate version and the source commit recorded at build time.
 pub const LONG_VERSION: &str = concat!(
@@ -61,6 +63,12 @@ pub struct ProfileArgs {
     /// Permit only this SOP Class UID; repeat as needed. Other SOP Classes fail.
     #[arg(long, value_name = "UID")]
     pub allow_sop_class: Vec<String>,
+    /// Burned-in text in the pixel samples: `auto` censors it under safe-harbor-metadata.
+    #[arg(long, value_enum, default_value_t = BurnedInText::Auto)]
+    pub burned_in_text: BurnedInText,
+    /// Text over tissue that cannot be censored: `fail`, or `leave` it and count it.
+    #[arg(long, value_enum, default_value_t = TextOverTissue::Fail)]
+    pub text_over_tissue: TextOverTissue,
 }
 
 impl ProfileArgs {
@@ -102,6 +110,8 @@ impl ProfileArgs {
             profile.uid_mappings = read_json(path, "UID map")?;
         }
         profile.require_no_burned_in_annotation |= self.require_no_burned_in_annotation;
+        profile.burned_in_text = self.burned_in_text;
+        profile.text_over_tissue = self.text_over_tissue;
         profile
             .sop_class_allowlist
             .extend(self.allow_sop_class.iter().cloned());
@@ -334,6 +344,8 @@ mod tests {
             uid_map: None,
             require_no_burned_in_annotation: false,
             allow_sop_class: Vec::new(),
+            burned_in_text: BurnedInText::Auto,
+            text_over_tissue: TextOverTissue::Fail,
         }
     }
 
