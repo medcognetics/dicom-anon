@@ -1,6 +1,7 @@
 //! Core de-identification engine.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use dicom_core::header::Header;
 use dicom_core::value::{DataSetSequence, Value};
@@ -139,6 +140,8 @@ impl AnonymizationReport {
 #[derive(Clone, Debug)]
 pub struct Anonymizer {
     options: Options,
+    /// Parsed `fail_on_unmapped_sequences`.
+    guard_scope: BTreeSet<Tag>,
 }
 
 impl Anonymizer {
@@ -156,7 +159,11 @@ impl Anonymizer {
         {
             return Err(Error::SafeHarborPatientScopeRequired);
         }
-        Ok(Self { options })
+        let guard_scope = options.profile.fail_on_unmapped_scope()?;
+        Ok(Self {
+            options,
+            guard_scope,
+        })
     }
 
     /// De-identify a parsed DICOM object without modifying the source.
@@ -244,6 +251,8 @@ impl Anonymizer {
             date_shift_days,
             time_shift_hours: i32::from(time_shift_hours),
             path: String::new(),
+            in_guard_scope: self.guard_scope.is_empty(),
+            guard_scope: &self.guard_scope,
             uids: &uids,
         };
 
@@ -733,7 +742,7 @@ impl Anonymizer {
         report: &mut AnonymizationReport,
     ) -> Result<()> {
         let key = format!("{:04X}{:04X}", tag.0, tag.1);
-        if self.options.profile.fail_on_unmapped.contains(&key) {
+        if context.in_guard_scope && self.options.profile.fail_on_unmapped.contains(&key) {
             return Err(Error::UnmappedDummyReplacement {
                 tag: format_tag(tag),
                 path: context.element_path(tag),
@@ -757,6 +766,11 @@ struct Context<'a> {
     time_shift_hours: i32,
     /// Path of the enclosing sequence item; empty at the top level.
     path: String,
+    /// Whether the fail-on-unmapped guard applies here: everywhere without a scope,
+    /// and otherwise inside a listed sequence, at any depth below it.
+    in_guard_scope: bool,
+    /// The sequences that set `in_guard_scope`.
+    guard_scope: &'a BTreeSet<Tag>,
     /// UID resolution state shared by every item of one object.
     uids: &'a RefCell<UidResolver>,
 }
@@ -768,6 +782,8 @@ impl<'a> Context<'a> {
             date_shift_days: self.date_shift_days,
             time_shift_hours: self.time_shift_hours,
             path: format!("{}[{index}]", self.element_path(tag)),
+            in_guard_scope: self.in_guard_scope || self.guard_scope.contains(&tag),
+            guard_scope: self.guard_scope,
             uids: self.uids,
         }
     }
@@ -1263,6 +1279,16 @@ mod tests {
     }
 
     #[test]
+    fn a_scope_without_guarded_tags_is_refused() {
+        let mut options = Options::new(SecretKey::new(KEY).unwrap());
+        options
+            .profile
+            .fail_on_unmapped_sequences
+            .insert("00540220".to_owned());
+        assert!(Anonymizer::new(options).is_err());
+    }
+
+    #[test]
     fn modifies_times_without_disrupting_paired_timestamp_intervals() {
         let mut first = test_object("PATIENT-1", "20200101", "1.2.3.1");
         first.put_str(tags::STUDY_TIME, VR::TM, "230000");
@@ -1562,6 +1588,8 @@ mod tests {
             date_shift_days: 1,
             time_shift_hours: 1,
             path: String::new(),
+            in_guard_scope: anonymizer.guard_scope.is_empty(),
+            guard_scope: &anonymizer.guard_scope,
             uids: &uids,
         };
         let mut report = AnonymizationReport::new(

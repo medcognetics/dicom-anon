@@ -57,6 +57,7 @@ Anonymization and validation share these profile arguments:
 | `--disable-option OPTION` | Disable an option enabled by the selected preset; repeat for multiple options. |
 | `--descriptor-map PATH` | Load a descriptor map. Repeat to merge maps; two maps that give different outputs for the same tag and source value cause an error. |
 | `--fail-on-unmapped TAG` | Fail when a cleaned attribute with this tag gets a dummy value because no descriptor-map entry matched. Dummy values that the profile requires do not fail; see [Conformance and scope](conformance.md#detection-and-fail-closed-control). `dicom-validate` rejects this option with exit status 2. `TAG` is eight hexadecimal digits, for example `00080100`. Repeat for multiple tags. |
+| `--fail-on-unmapped-sequence TAG` | Apply `--fail-on-unmapped` only inside this sequence, at any depth below it. Repeat as needed. A miss elsewhere is counted in `unmapped_dummy_replacements` and does not fail. Requires at least one `--fail-on-unmapped`. `dicom-validate` rejects it. |
 | `--safe-private-allowlist PATH` | Load a JSON array of `{ "creator": STRING, "element_offset": INTEGER }`. |
 | `--uid-map PATH` | Load a JSON object from original UID to replacement UID. Required for Safe Harbor anonymization unless `--generate-uid-map` assigns the missing entries. |
 | `--require-no-burned-in-annotation` | Fail unless Burned In Annotation `(0028,0301)` is exactly `NO`. A `YES`, empty, or absent value fails. |
@@ -140,7 +141,7 @@ A descriptor map is a JSON object keyed by canonical eight-digit tag, then exact
 }
 ```
 
-`descriptor-maps/breast-imaging-ps3.16-2026d.json` is a reviewed versioned map for the mammography view, view modifier, and breast anatomic region codes. [Conformance and scope](conformance.md#text-attributes-outside-table-e1-1) gives its contents and the attributes that Safe Harbor mode changes. The guard applies to a tag at every nesting level. Before you enable it, add reviewed maps for the other code sequences that your objects contain, such as Purpose of Reference Code Sequence; [Conformance and scope](conformance.md#detection-and-fail-closed-control) gives the procedure. For a mammography inference pipeline:
+`descriptor-maps/breast-imaging-ps3.16-2026d.json` is a reviewed versioned map for the mammography view, view modifier, and breast anatomic region codes. `descriptor-maps/breast-imaging-references-ps3.16-2026d.json` covers the Partial View, every Purpose of Reference context except report references, and Image Derivation codes. [Conformance and scope](conformance.md#text-attributes-outside-table-e1-1) gives their contents and the attributes that Safe Harbor mode changes. The guard applies to a tag at every nesting level. Before you enable it, add reviewed maps for any code sequence that your objects contain and these maps do not cover; [Conformance and scope](conformance.md#detection-and-fail-closed-control) gives the procedure. For a mammography inference pipeline:
 
 ```console
 dicom-anonymize input.dcm output.dcm \
@@ -149,6 +150,7 @@ dicom-anonymize input.dcm output.dcm \
   --uid-map uid-map.json \
   --key-file deidentification.key \
   --descriptor-map descriptor-maps/breast-imaging-ps3.16-2026d.json \
+  --descriptor-map descriptor-maps/breast-imaging-references-ps3.16-2026d.json \
   --fail-on-unmapped 00080100 \
   --fail-on-unmapped 00080102 \
   --fail-on-unmapped 00080104

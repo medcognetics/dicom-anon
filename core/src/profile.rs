@@ -3,10 +3,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use clap::ValueEnum;
+use dicom_core::dictionary::{DataDictionary, DataDictionaryEntry};
 use dicom_core::header::Header;
 use dicom_core::value::Value;
-use dicom_core::Tag;
-use dicom_dictionary_std::tags;
+use dicom_core::{Tag, VR};
+use dicom_dictionary_std::{tags, StandardDataDictionary};
 use dicom_object::mem::InMemDicomObject;
 use serde::{Deserialize, Serialize};
 
@@ -156,6 +157,14 @@ pub struct ProfileConfiguration {
     /// replaces as a whole. Validation ignores this field.
     #[serde(default)]
     pub fail_on_unmapped: BTreeSet<String>,
+    /// Canonical hexadecimal tags of the sequences that the guard applies in.
+    ///
+    /// Empty: `fail_on_unmapped` applies at every nesting level. Otherwise a
+    /// guarded tag fails only inside one of these sequences, at any depth below
+    /// it. A miss elsewhere is counted in `unmapped_dummy_replacements` and does
+    /// not fail. Validation ignores this field.
+    #[serde(default)]
+    pub fail_on_unmapped_sequences: BTreeSet<String>,
 }
 
 impl Default for ProfileConfiguration {
@@ -177,6 +186,7 @@ impl ProfileConfiguration {
             require_no_burned_in_annotation: false,
             sop_class_allowlist: BTreeSet::new(),
             fail_on_unmapped: BTreeSet::new(),
+            fail_on_unmapped_sequences: BTreeSet::new(),
         }
     }
 
@@ -266,6 +276,16 @@ impl ProfileConfiguration {
         if !self.fail_on_unmapped.iter().all(|tag| canonical_tag(tag)) {
             return Err(Error::InvalidProfileConfiguration(
                 "fail-on-unmapped tags must be eight uppercase hexadecimal digits".to_owned(),
+            ));
+        }
+        if !self
+            .fail_on_unmapped_sequences
+            .iter()
+            .all(|tag| canonical_tag(tag))
+        {
+            return Err(Error::InvalidProfileConfiguration(
+                "fail-on-unmapped sequence tags must be eight uppercase hexadecimal digits"
+                    .to_owned(),
             ));
         }
         if self
@@ -660,6 +680,40 @@ pub(crate) fn profile_option_action(tag: Tag, option: DicomOption) -> Option<Pro
 #[must_use]
 pub(crate) fn profile_basic_action(tag: Tag) -> Option<ProfileAction> {
     raw_profile_rule(tag).map(|rule| rule.basic_action)
+}
+
+impl ProfileConfiguration {
+    /// The sequences that scope the fail-on-unmapped guard, checked for anonymization.
+    ///
+    /// Validation ignores the guard, so `validate` checks only the tag format. A scope
+    /// that guards nothing would fail open, so it is refused: a scope without
+    /// guarded tags, or a tag that the standard dictionary does not list as a sequence.
+    pub(crate) fn fail_on_unmapped_scope(&self) -> Result<BTreeSet<Tag>> {
+        if !self.fail_on_unmapped_sequences.is_empty() && self.fail_on_unmapped.is_empty() {
+            return Err(Error::InvalidProfileConfiguration(
+                "fail-on-unmapped sequences need at least one fail-on-unmapped tag".to_owned(),
+            ));
+        }
+        self.fail_on_unmapped_sequences
+            .iter()
+            .map(|text| {
+                let tag = Tag(
+                    u16::from_str_radix(&text[..4], 16).unwrap_or(0),
+                    u16::from_str_radix(&text[4..], 16).unwrap_or(0),
+                );
+                let sequence = StandardDataDictionary
+                    .by_tag(tag)
+                    .is_some_and(|entry| entry.vr().relaxed() == VR::SQ);
+                if sequence {
+                    Ok(tag)
+                } else {
+                    Err(Error::InvalidProfileConfiguration(format!(
+                        "fail-on-unmapped sequence {text} is not a sequence in the standard data dictionary"
+                    )))
+                }
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
