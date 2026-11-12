@@ -18,6 +18,7 @@ pub const JPEG_2000_LOSSLESS: &str = uids::JPEG2000_LOSSLESS;
 pub const MG_FOR_PRESENTATION: &str =
     uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION;
 pub const BREAST_TOMOSYNTHESIS: &str = uids::BREAST_TOMOSYNTHESIS_IMAGE_STORAGE;
+pub const MG_FOR_PROCESSING: &str = uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PROCESSING;
 
 pub const STUDY: &str = "2.25.210984244814974183529861740079675587945";
 pub const SERIES_MG: &str = "2.25.201833201629288074079120896699571356319";
@@ -510,7 +511,7 @@ fn sequence(tag: Tag, items: Vec<InMemDicomObject>) -> DataElement<InMemDicomObj
     DataElement::new(tag, VR::SQ, DataSetSequence::from(items))
 }
 
-fn finish(object: InMemDicomObject, sop_class: &str, sop_instance: &str) -> DefaultDicomObject {
+pub fn finish(object: InMemDicomObject, sop_class: &str, sop_instance: &str) -> DefaultDicomObject {
     object
         .with_meta(
             FileMetaTableBuilder::new()
