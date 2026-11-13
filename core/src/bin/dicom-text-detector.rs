@@ -36,8 +36,7 @@ enum Command {
 fn main() -> ExitCode {
     let args = Args::parse();
     let result = match &args.command {
-        Command::Install { dir } => dicom_anon::install_text_detector(dir)
-            .and_then(|()| dicom_anon::check_text_detector(dir)),
+        Command::Install { dir } => dicom_anon::install_text_detector(dir),
         Command::Check { dir } => dicom_anon::check_text_detector(dir),
     };
     match result {

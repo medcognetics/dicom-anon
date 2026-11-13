@@ -659,6 +659,14 @@ fn normalized_path(path: &Path) -> Result<PathBuf, String> {
 }
 
 fn validate_dicom_options(args: &AnonymizeArgs) -> Result<(), String> {
+    // report-anon initializes ONNX Runtime for its own model, and a process loads one
+    // runtime library, so the text detector cannot run beside it.
+    if args.profile.burned_in_text_detector.uses_model() {
+        return Err(
+            "--burned-in-text-detector model or both is not available in report-anon; anonymize the DICOM inputs with dicom-anonymize"
+                .to_owned(),
+        );
+    }
     if !args.dicom.is_empty() {
         return Ok(());
     }
@@ -676,7 +684,8 @@ fn validate_dicom_options(args: &AnonymizeArgs) -> Result<(), String> {
         allow_sop_class,
         burned_in_text,
         text_over_tissue,
-        burned_in_text_detector,
+        // Refused above for any input.
+        burned_in_text_detector: _,
         text_detector_dir,
     } = &args.profile;
     let option = if !matches!(policy, ProfilePreset::DicomExtended) {
@@ -703,8 +712,6 @@ fn validate_dicom_options(args: &AnonymizeArgs) -> Result<(), String> {
         Some("--burned-in-text")
     } else if *text_over_tissue != dicom_anon::TextOverTissue::Fail {
         Some("--text-over-tissue")
-    } else if *burned_in_text_detector != dicom_anon::TextDetector::Heuristic {
-        Some("--burned-in-text-detector")
     } else if text_detector_dir.is_some() {
         Some("--text-detector-dir")
     } else {

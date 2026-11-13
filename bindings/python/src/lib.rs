@@ -151,11 +151,8 @@ fn validate_with_source(
 /// Download the pinned text detector into `path`, which must not exist, and check it.
 #[pyfunction]
 fn install_text_detector(py: Python<'_>, path: std::path::PathBuf) -> PyResult<()> {
-    py.detach(|| {
-        dicom_anon::install_text_detector(&path)
-            .and_then(|()| dicom_anon::check_text_detector(&path))
-    })
-    .map_err(value_error)
+    py.detach(|| dicom_anon::install_text_detector(&path))
+        .map_err(value_error)
 }
 
 /// Check the text detector installed in `path` against its pinned SHA-256 values.

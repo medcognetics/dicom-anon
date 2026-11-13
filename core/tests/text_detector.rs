@@ -371,7 +371,7 @@ fn text_over_tissue_found_by_the_model_fails_closed() {
 }
 
 #[test]
-fn text_in_one_frame_of_several_is_found_through_the_projection() {
+fn text_in_one_frame_of_several_is_found() {
     let dir = require_detector!();
     let (blank, with_text) = (blank_frame(), frame(true));
     let output = samples(&run(
@@ -411,6 +411,11 @@ fn source_aware_validation_passes_with_the_model() {
     validation.profile.uid_mappings = uid_map;
     let report = validate_source_object(&source, &output, validation).unwrap();
     assert!(report.conformant, "{:?}", report.findings);
+    assert!(report
+        .findings
+        .iter()
+        .any(|finding| finding.code == "pixel_data_not_assessed"
+            && finding.message.contains("pinned text-detection model")));
 }
 
 #[test]
@@ -441,4 +446,38 @@ fn a_changed_model_file_fails_closed() {
     .anonymize_with_generated_uid_map(&object(&[frame(false)]))
     .unwrap_err();
     assert!(error.to_string().contains("pinned SHA-256"), "{error}");
+}
+
+#[test]
+fn text_that_moves_between_frames_is_censored_in_each() {
+    let dir = require_detector!();
+    let frames: Vec<Vec<u16>> = (0..6)
+        .map(|shift| {
+            let mut samples = blank_frame();
+            draw(&mut samples, 20, 20 + shift, "DOE JANE", true);
+            samples
+        })
+        .collect();
+    let output = samples(&run(TextDetector::Model, &dir, &frames));
+    for (index, source) in frames.iter().enumerate() {
+        let frame_samples = ROWS * COLUMNS;
+        assert_censored(
+            source,
+            &output[index * frame_samples..(index + 1) * frame_samples],
+        );
+    }
+}
+
+#[test]
+fn uid_listing_does_not_need_the_detector() {
+    let empty = tempfile::tempdir().unwrap();
+    let anonymizer = Anonymizer::new(options(
+        TextDetector::Model,
+        Some(empty.path().to_path_buf()),
+    ))
+    .unwrap();
+    assert!(!anonymizer
+        .required_uids(&object(&[frame(false)]))
+        .unwrap()
+        .is_empty());
 }

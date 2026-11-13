@@ -123,7 +123,12 @@ impl ProfileArgs {
         profile.text_detector_dir = self
             .text_detector_dir
             .as_ref()
-            .map(|path| path.to_string_lossy().into_owned());
+            .map(|path| {
+                path.to_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| "--text-detector-dir must be a UTF-8 path".to_owned())
+            })
+            .transpose()?;
         profile
             .sop_class_allowlist
             .extend(self.allow_sop_class.iter().cloned());

@@ -128,8 +128,8 @@ pub struct CensorCounts {
     /// Without that setting such a region fails closed.
     #[serde(default)]
     pub regions_left_over_tissue: u64,
-    /// Text boxes that the pinned model found, before the censor rules apply. The model
-    /// runs once per object, on the maximum projection of its frames.
+    /// Text boxes that the pinned model found in all frames, before boxes are joined and
+    /// the censor rules apply.
     #[serde(default)]
     pub model_boxes: u64,
 }
@@ -1007,6 +1007,62 @@ fn frame_view(samples: &[u16], geometry: &Geometry) -> Vec<u16> {
     }
 }
 
+/// A joined model box, inclusive, in frame pixels. `tall` is set when one of its boxes is
+/// higher than a text line.
+#[derive(Debug, Clone, Copy)]
+struct MergedBox {
+    top: usize,
+    left: usize,
+    bottom: usize,
+    right: usize,
+    tall: bool,
+    /// One of its boxes is more than three times as wide as it is high: a text line, not
+    /// one or two characters.
+    long: bool,
+    /// How many model boxes it joins.
+    parts: usize,
+}
+
+/// Whether every pixel inside the box that is not the darkest value is bright or touches
+/// a bright pixel (8-connected), at or above `text_level`. That is a glyph with
+/// its anti-aliased edge. A faint patch, such as tissue between words or tissue that
+/// touches a glyph, makes the box unfit to censor.
+fn only_glyphs_and_their_edges(
+    view: &[u16],
+    columns: usize,
+    area: MergedBox,
+    low: u16,
+    text_level: u16,
+) -> bool {
+    const REACH: usize = 1;
+    let width = area.right - area.left + 1;
+    let height = area.bottom - area.top + 1;
+    let at = |y: usize, x: usize| view[(area.top + y) * columns + area.left + x];
+    // Summed-area table of bright pixels, one row and column larger.
+    let stride = width + 1;
+    let mut sums = vec![0_u32; stride * (height + 1)];
+    for y in 0..height {
+        for x in 0..width {
+            let bright = u32::from(at(y, x) >= text_level);
+            sums[(y + 1) * stride + x + 1] =
+                bright + sums[y * stride + x + 1] + sums[(y + 1) * stride + x]
+                    - sums[y * stride + x];
+        }
+    }
+    (0..height).all(|y| {
+        (0..width).all(|x| {
+            let value = at(y, x);
+            if value == low || value >= text_level {
+                return true;
+            }
+            let (y0, x0) = (y.saturating_sub(REACH), x.saturating_sub(REACH));
+            let (y1, x1) = ((y + REACH + 1).min(height), (x + REACH + 1).min(width));
+            sums[y1 * stride + x1] + sums[y0 * stride + x0]
+                > sums[y0 * stride + x1] + sums[y1 * stride + x0]
+        })
+    })
+}
+
 /// The model boxes with a margin of 2 pixels, clamped to the frame, and with every two
 /// boxes that overlap or touch joined into their bounding box, as stacked lines are for
 /// the heuristic. Each edge test then sees only pixels outside every box.
@@ -1014,16 +1070,17 @@ fn merged_boxes(
     boxes: &[crate::text_detector::TextBox],
     rows: usize,
     columns: usize,
-) -> Vec<(usize, usize, usize, usize)> {
-    let mut merged: Vec<(usize, usize, usize, usize)> = boxes
+) -> Vec<MergedBox> {
+    let mut merged: Vec<MergedBox> = boxes
         .iter()
-        .map(|text| {
-            (
-                text.top.saturating_sub(2),
-                text.left.saturating_sub(2),
-                (text.bottom + 2).min(rows - 1),
-                (text.right + 2).min(columns - 1),
-            )
+        .map(|text| MergedBox {
+            top: text.top.saturating_sub(2),
+            left: text.left.saturating_sub(2),
+            bottom: (text.bottom + 2).min(rows - 1),
+            right: (text.right + 2).min(columns - 1),
+            tall: text.bottom - text.top + 1 > MAX_MODEL_BOX_HEIGHT,
+            long: text.right - text.left + 1 > 3 * (text.bottom - text.top + 1),
+            parts: 1,
         })
         .collect();
     loop {
@@ -1033,8 +1090,20 @@ fn merged_boxes(
             let mut other = index + 1;
             while other < merged.len() {
                 let (a, b) = (merged[index], merged[other]);
-                if a.0 <= b.2 + 1 && b.0 <= a.2 + 1 && a.1 <= b.3 + 1 && b.1 <= a.3 + 1 {
-                    merged[index] = (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3));
+                if a.top <= b.bottom + 1
+                    && b.top <= a.bottom + 1
+                    && a.left <= b.right + 1
+                    && b.left <= a.right + 1
+                {
+                    merged[index] = MergedBox {
+                        top: a.top.min(b.top),
+                        left: a.left.min(b.left),
+                        bottom: a.bottom.max(b.bottom),
+                        right: a.right.max(b.right),
+                        tall: a.tall || b.tall,
+                        long: a.long || b.long,
+                        parts: a.parts + b.parts,
+                    };
                     merged.swap_remove(other);
                     joined = true;
                 } else {
@@ -1050,26 +1119,32 @@ fn merged_boxes(
 }
 
 /// Highest model box, in frame pixels, that can be censored: two of the highest glyphs.
-/// A higher box, or one that covers more than 1/16 of the frame, is not a text line, so
-/// it is handled as text over tissue and is never written. This keeps a false box around
+/// A higher box, or joined boxes that cover more than 1/16 of the frame, is not text, so
+/// it is handled as text over tissue and is never written. The height applies to each
+/// box before boxes are joined, so stacked lines of a header stay censorable. This keeps a false box around
 /// anatomy on a dark background from erasing it.
 const MAX_MODEL_BOX_HEIGHT: usize = 2 * MAX_GLYPH_HEIGHT;
+/// Highest block of joined model boxes that can be censored, such as the stacked lines of
+/// a header: four of the highest glyphs.
+const MAX_MODEL_BLOCK_HEIGHT: usize = 4 * MAX_GLYPH_HEIGHT;
 
-/// Censor the model's text boxes in one frame, in place, with the same safety rule as
-/// for the heuristic: nothing that can connect to tissue is written. A box, with a
-/// margin, is censored only when every pixel on its edge is background (the frame's
-/// darkest value, in a dark region that reaches the frame border) and the box is no
-/// larger than a text line. Every non-background pixel inside is then closed in by
-/// background, and it is overwritten. Otherwise a box of one or two characters (at most
-/// three times as wide as it is high) is left in place, and a longer or larger one is
-/// text over tissue. Returns the same counts as the heuristic.
+/// Censor the joined model boxes in one frame, in place, with the same safety rule as
+/// for the heuristic: nothing that can connect to tissue is written. A box that holds
+/// only the darkest value is skipped. A box is censored only when its whole edge is
+/// background (the frame's darkest value, in a dark region that reaches the frame
+/// border), every other pixel inside is bright or touches a bright pixel, no box that it
+/// joins is higher than `MAX_MODEL_BOX_HEIGHT`, it is at most `MAX_MODEL_BLOCK_HEIGHT`
+/// high, and it covers at most 1/16 of the frame. Its non-background pixels are then
+/// overwritten. Otherwise a single box at most 1.5 times as wide as it is high (one or
+/// two characters) is left in place, and any other box is text over tissue. Returns the
+/// same counts as the heuristic.
 fn censor_frame_boxes(
     samples: &mut [u16],
     view: &[u16],
     geometry: &Geometry,
     frame: usize,
     over_tissue: TextOverTissue,
-    boxes: &[crate::text_detector::TextBox],
+    boxes: &[MergedBox],
 ) -> Result<(u64, u64, u64, u64)> {
     let (rows, columns) = (geometry.rows, geometry.columns);
     let (mut censored, mut pixels, mut left_in_place, mut left_over_tissue) = (0, 0, 0, 0);
@@ -1094,17 +1169,40 @@ fn censor_frame_boxes(
     } else {
         low
     };
-    for &(top, left, bottom, right) in &merged_boxes(boxes, rows, columns) {
+    let text_level = low + (TEXT_LEVEL * f64::from(high - low)).ceil() as u16;
+    for &area in boxes {
+        let MergedBox {
+            top,
+            left,
+            bottom,
+            right,
+            tall,
+            long,
+            parts,
+        } = area;
+        // A box that holds nothing in this frame is not text here.
+        if (top..=bottom).all(|row| {
+            view[row * columns + left..=row * columns + right]
+                .iter()
+                .all(|&value| value == low)
+        }) {
+            continue;
+        }
         let (height, width) = (bottom - top + 1, right - left + 1);
-        let too_large = height > MAX_MODEL_BOX_HEIGHT || 16 * height * width > rows * columns;
+        let too_large =
+            tall || height > MAX_MODEL_BLOCK_HEIGHT || 16 * height * width > rows * columns;
         let edge_is_background = !too_large
             && (left..=right).all(|column| {
                 outside(top * columns + column) && outside(bottom * columns + column)
             })
             && (top..=bottom)
-                .all(|row| outside(row * columns + left) && outside(row * columns + right));
+                .all(|row| outside(row * columns + left) && outside(row * columns + right))
+            && only_glyphs_and_their_edges(view, columns, area, low, text_level);
         if !edge_is_background {
-            if !too_large && width <= 3 * height {
+            // One box of at most one or two characters: at most 1.5 times as wide as it is
+            // high. Anything wider, or several boxes together, is handled as text over
+            // tissue, because the model gives no glyph count.
+            if !too_large && !long && parts == 1 && 2 * width <= 3 * height {
                 left_in_place += 1;
                 continue;
             }
@@ -1184,33 +1282,25 @@ pub(crate) fn censor(
     }
     if detector_mode.uses_model() {
         let model = load_detector(profile)?;
-        // The model runs once per object, after the heuristic, so that text it censored
-        // is background here. For several frames it runs on their maximum projection:
-        // text that is bright in any frame is bright in the projection, so one run finds
-        // it, and each frame then applies the boxes with its own background test.
-        let mut projection = vec![0_u16; frame_samples];
-        for frame in samples.chunks(frame_samples) {
-            for (maximum, value) in projection.iter_mut().zip(frame_view(frame, &geometry)) {
-                *maximum = (*maximum).max(value);
-            }
-        }
-        let (low, high) = projection
-            .iter()
-            .fold((u16::MAX, 0), |(low, high), &value| {
+        // The model runs on each frame, after the heuristic, so that text it censored is
+        // background here.
+        for (index, frame) in samples.chunks_mut(frame_samples).enumerate() {
+            let view = frame_view(frame, &geometry);
+            let (low, high) = view.iter().fold((u16::MAX, 0), |(low, high), &value| {
                 (low.min(value), high.max(value))
             });
-        if high > low {
-            let boxes = model.detect(&projection, geometry.rows, geometry.columns, low, high)?;
-            counts.model_boxes += boxes.len() as u64;
-            for (index, frame) in samples.chunks_mut(frame_samples).enumerate() {
-                let view = frame_view(frame, &geometry);
-                let (regions, pixels, left_in_place, left_over_tissue) =
-                    censor_frame_boxes(frame, &view, &geometry, index, over_tissue, &boxes)?;
-                counts.regions_censored += regions;
-                counts.pixels_censored += pixels;
-                counts.regions_left_in_place += left_in_place;
-                counts.regions_left_over_tissue += left_over_tissue;
+            if high == low {
+                continue;
             }
+            let boxes = model.detect(&view, geometry.rows, geometry.columns, low, high)?;
+            counts.model_boxes += boxes.len() as u64;
+            let boxes = merged_boxes(&boxes, geometry.rows, geometry.columns);
+            let (regions, pixels, left_in_place, left_over_tissue) =
+                censor_frame_boxes(frame, &view, &geometry, index, over_tissue, &boxes)?;
+            counts.regions_censored += regions;
+            counts.pixels_censored += pixels;
+            counts.regions_left_in_place += left_in_place;
+            counts.regions_left_over_tissue += left_over_tissue;
         }
     }
     if detector_mode == crate::text_detector::TextDetector::Both {
@@ -1289,6 +1379,10 @@ mod tests {
         }
     }
 
+    fn merged(boxes: &[crate::text_detector::TextBox], geometry: &Geometry) -> Vec<MergedBox> {
+        merged_boxes(boxes, geometry.rows, geometry.columns)
+    }
+
     fn text_box(
         top: usize,
         left: usize,
@@ -1333,12 +1427,193 @@ mod tests {
             &geometry,
             0,
             TextOverTissue::Fail,
-            &boxes,
+            &merged(&boxes, &geometry),
         )
         .unwrap();
         assert_eq!((censored, left, over), (1, 0, 0));
         assert_eq!(pixels, 20 * 100);
         assert!(samples.iter().all(|&value| value != 4095));
+    }
+
+    #[test]
+    fn a_faint_patch_in_a_model_box_stops_the_write() {
+        let (mut samples, geometry) = model_frame();
+        // A faint 6 x 6 patch between the block and the box edge.
+        for row in 25..31 {
+            for column in 125..131 {
+                samples[row * 512 + column] = 200;
+            }
+        }
+        let view = samples.clone();
+        let original = samples.clone();
+        let boxes = [text_box(18, 18, 42, 140)];
+        let (censored, _, left, over) = censor_frame_boxes(
+            &mut samples,
+            &view,
+            &geometry,
+            0,
+            TextOverTissue::Leave,
+            &merged(&boxes, &geometry),
+        )
+        .unwrap();
+        assert_eq!((censored, left, over), (0, 0, 1));
+        assert_eq!(samples, original);
+    }
+
+    #[test]
+    fn faint_tissue_that_touches_a_glyph_stops_the_write() {
+        let (mut samples, geometry) = model_frame();
+        // A faint 6 x 6 patch against the right end of the block.
+        for row in 25..31 {
+            for column in 120..126 {
+                samples[row * 512 + column] = 200;
+            }
+        }
+        let view = samples.clone();
+        let original = samples.clone();
+        let boxes = [text_box(18, 18, 42, 140)];
+        let error = censor_frame_boxes(
+            &mut samples,
+            &view,
+            &geometry,
+            0,
+            TextOverTissue::Fail,
+            &merged(&boxes, &geometry),
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::BurnedInTextOverTissue { frame: 0 }));
+        assert_eq!(samples, original);
+    }
+
+    #[test]
+    fn stacked_text_lines_over_tissue_fail_closed() {
+        let (rows, columns) = (1024, 1024);
+        let mut samples = vec![0_u16; rows * columns];
+        for row in 0..rows {
+            for column in 700..columns {
+                samples[row * columns + column] = 1500 + (row % 5) as u16;
+            }
+        }
+        let geometry = geometry(rows, columns);
+        let view = samples.clone();
+        let original = samples.clone();
+        // Three long lines over the tissue edge. Joined, their box is less than three
+        // times as wide as it is high, but each line is long.
+        let boxes = [
+            text_box(100, 600, 129, 799),
+            text_box(130, 600, 159, 799),
+            text_box(160, 600, 189, 799),
+        ];
+        let error = censor_frame_boxes(
+            &mut samples,
+            &view,
+            &geometry,
+            0,
+            TextOverTissue::Fail,
+            &merged(&boxes, &geometry),
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::BurnedInTextOverTissue { frame: 0 }));
+        assert_eq!(samples, original);
+    }
+
+    #[test]
+    fn a_two_pixel_faint_strip_against_a_glyph_stops_the_write() {
+        let (mut samples, geometry) = model_frame();
+        for row in 25..31 {
+            for column in 120..122 {
+                samples[row * 512 + column] = 200;
+            }
+        }
+        let view = samples.clone();
+        let original = samples.clone();
+        let boxes = [text_box(18, 18, 42, 140)];
+        let (censored, _, _, over) = censor_frame_boxes(
+            &mut samples,
+            &view,
+            &geometry,
+            0,
+            TextOverTissue::Leave,
+            &merged(&boxes, &geometry),
+        )
+        .unwrap();
+        assert_eq!((censored, over), (0, 1));
+        assert_eq!(samples, original);
+    }
+
+    #[test]
+    fn a_monochrome1_model_box_is_filled_with_the_background_value() {
+        let (frame, geometry) = model_frame();
+        let geometry = Geometry {
+            inverted: true,
+            ..geometry
+        };
+        // Stored samples: background 4095, text 0; the view has text bright.
+        let mut samples: Vec<u16> = frame.iter().map(|&value| 4095 - value).collect();
+        let view = frame_view(&samples, &geometry);
+        let boxes = [text_box(18, 18, 42, 122)];
+        let (censored, pixels, _, _) = censor_frame_boxes(
+            &mut samples,
+            &view,
+            &geometry,
+            0,
+            TextOverTissue::Fail,
+            &merged(&boxes, &geometry),
+        )
+        .unwrap();
+        assert_eq!((censored, pixels), (1, 20 * 100));
+        for row in 20..40 {
+            for column in 20..120 {
+                assert_eq!(samples[row * 512 + column], 4095);
+            }
+        }
+    }
+
+    #[test]
+    fn a_box_that_holds_nothing_in_a_frame_is_skipped() {
+        let geometry = geometry(256, 512);
+        let mut samples = vec![0_u16; 256 * 512];
+        let view = samples.clone();
+        let boxes = [text_box(18, 18, 42, 122)];
+        let counts = censor_frame_boxes(
+            &mut samples,
+            &view,
+            &geometry,
+            1,
+            TextOverTissue::Fail,
+            &merged(&boxes, &geometry),
+        )
+        .unwrap();
+        assert_eq!(counts, (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn stacked_lines_higher_than_one_box_together_are_censored() {
+        let (rows, columns) = (2048, 2048);
+        let mut samples = vec![0_u16; rows * columns];
+        let mut boxes = Vec::new();
+        // Six 60-pixel lines, 360 pixels in all, whose boxes touch.
+        for line in 0..6 {
+            let top = 20 + line * 62;
+            for row in top + 10..top + 50 {
+                for column in 30..300 {
+                    samples[row * columns + column] = 4095;
+                }
+            }
+            boxes.push(text_box(top, 20, top + 61, 310));
+        }
+        let view = samples.clone();
+        let (censored, _, left, over) = censor_frame_boxes(
+            &mut samples,
+            &view,
+            &geometry(rows, columns),
+            0,
+            TextOverTissue::Fail,
+            &merged(&boxes, &geometry(rows, columns)),
+        )
+        .unwrap();
+        assert_eq!((censored, left, over), (1, 0, 0));
+        assert!(samples.iter().all(|&value| value == 0));
     }
 
     #[test]
@@ -1354,7 +1629,7 @@ mod tests {
             &geometry,
             0,
             TextOverTissue::Fail,
-            &tall,
+            &merged(&tall, &geometry),
         )
         .unwrap_err();
         assert!(matches!(error, Error::BurnedInTextOverTissue { frame: 0 }));
@@ -1364,7 +1639,7 @@ mod tests {
             &geometry,
             0,
             TextOverTissue::Leave,
-            &tall,
+            &merged(&tall, &geometry),
         )
         .unwrap();
         assert_eq!((censored, left, over), (0, 0, 1));
@@ -1384,7 +1659,7 @@ mod tests {
             &geometry,
             0,
             TextOverTissue::Fail,
-            &short,
+            &merged(&short, &geometry),
         )
         .unwrap();
         assert_eq!((censored, left, over), (0, 1, 0));
@@ -1396,7 +1671,7 @@ mod tests {
             &geometry,
             0,
             TextOverTissue::Fail,
-            &long,
+            &merged(&long, &geometry),
         )
         .is_err());
         assert_eq!(samples, original);
@@ -1751,7 +2026,7 @@ mod tests {
 
     #[test]
     fn a_frame_with_too_many_text_like_lines_fails_closed() {
-        let (rows, columns) = (1024, 1024);
+        let (rows, columns) = (2048, 2048);
         let mut samples = vec![0_u16; rows * columns];
         // A grid of separate glyphs, 30 pixels apart: more than 1000 lines.
         for top in (2..rows - 12).step_by(30) {

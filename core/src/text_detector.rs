@@ -132,7 +132,7 @@ const UNCLIP_RATIO: f64 = 1.5;
 const MIN_BOX_SIDE: usize = 3;
 /// Most boxes in one frame. More is not text that the censor rules can handle.
 #[cfg_attr(not(feature = "text-detector"), allow(dead_code))]
-const MAX_BOXES: usize = 4096;
+const MAX_BOXES: usize = 256;
 /// Longest model input side. Larger frames are scaled down.
 #[cfg_attr(not(feature = "text-detector"), allow(dead_code))]
 const MAX_INPUT_SIDE: usize = 1920;
@@ -281,7 +281,7 @@ mod runtime {
         session: Mutex<Session>,
     }
 
-    static LOADED_RUNTIME: Mutex<Option<PathBuf>> = Mutex::new(None);
+    static LOADED_RUNTIME: Mutex<bool> = Mutex::new(false);
 
     fn detectors() -> &'static Mutex<BTreeMap<PathBuf, Arc<Detector>>> {
         static DETECTORS: OnceLock<Mutex<BTreeMap<PathBuf, Arc<Detector>>>> = OnceLock::new();
@@ -295,10 +295,19 @@ mod runtime {
             .collect()
     }
 
+    /// Largest file that is read for its checksum. The pinned files are under 50 MB.
+    const MAX_ASSET_BYTES: u64 = 256 << 20;
+
     fn read_verified(path: &Path, expected: &str, what: &str) -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
         std::fs::File::open(path)
-            .and_then(|mut file| file.read_to_end(&mut bytes))
+            .and_then(|file| {
+                let metadata = file.metadata()?;
+                if !metadata.is_file() || metadata.len() > MAX_ASSET_BYTES {
+                    return Err(std::io::Error::other("not a pinned asset file"));
+                }
+                file.take(MAX_ASSET_BYTES).read_to_end(&mut bytes)
+            })
             .map_err(|_| {
                 not_assessed(&format!(
                     "the {what} is missing or unreadable; install it with install_text_detector"
@@ -312,16 +321,17 @@ mod runtime {
         Ok(bytes)
     }
 
-    fn initialize_runtime(library: &Path) -> Result<()> {
+    /// Load ONNX Runtime once per process from `library`, which the caller has just
+    /// checked. The library is loaded by path, so the installed folder must be writable
+    /// only by the account that installed it. The file is hashed again after the load,
+    /// so a library replaced before the load and not restored fails. Every accepted
+    /// library has the pinned SHA-256, so a later call with another verified folder
+    /// reuses the loaded runtime.
+    fn initialize_runtime(library: &Path, expected: &str) -> Result<()> {
         let mut loaded = LOADED_RUNTIME
             .lock()
             .map_err(|_| not_assessed("the runtime lock is poisoned"))?;
-        if let Some(existing) = loaded.as_deref() {
-            if existing != library {
-                return Err(not_assessed(
-                    "ONNX Runtime is already loaded from another folder in this process",
-                ));
-            }
+        if *loaded {
             return Ok(());
         }
         let builder = ort::init_from(library)
@@ -331,23 +341,37 @@ mod runtime {
                 "ONNX Runtime was initialized before the text detector",
             ));
         }
-        *loaded = Some(library.to_path_buf());
+        read_verified(library, expected, "ONNX Runtime library")?;
+        *loaded = true;
         Ok(())
+    }
+
+    /// Hash both installed files of `dir` against their pins and return the model bytes.
+    pub(crate) fn verified_assets(dir: &Path) -> Result<(Vec<u8>, PathBuf, &'static str)> {
+        let (model_path, library_path, pin) = asset_paths(dir)?;
+        let model = read_verified(&model_path, MODEL_SHA256, "model file")?;
+        read_verified(&library_path, pin.library_sha256, "ONNX Runtime library")?;
+        Ok((model, library_path, pin.library_sha256))
     }
 
     /// The detector installed in `dir`, loaded once per process. Both files are hashed
     /// on first load; the model runs from the verified bytes.
     pub(crate) fn detector(dir: &Path) -> Result<Arc<Detector>> {
+        // One folder can be named in several ways; the cache and the runtime check use
+        // its canonical path.
+        let dir = &std::fs::canonicalize(dir).map_err(|_| {
+            not_assessed(
+                "the folder is missing or unreadable; install it with install_text_detector",
+            )
+        })?;
         let mut cache = detectors()
             .lock()
             .map_err(|_| not_assessed("the detector cache lock is poisoned"))?;
         if let Some(detector) = cache.get(dir) {
             return Ok(Arc::clone(detector));
         }
-        let (model_path, library_path, pin) = asset_paths(dir)?;
-        let model = read_verified(&model_path, MODEL_SHA256, "model file")?;
-        read_verified(&library_path, pin.library_sha256, "ONNX Runtime library")?;
-        initialize_runtime(&library_path)?;
+        let (model, library_path, library_sha256) = verified_assets(dir)?;
+        initialize_runtime(&library_path, library_sha256)?;
         let failed = |error: &dyn std::fmt::Display| {
             not_assessed(&format!("the model cannot be loaded: {error}"))
         };
@@ -355,7 +379,9 @@ mod runtime {
         // same on every run.
         let session = Session::builder()
             .map_err(|error| failed(&error))?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
+            // Basic graph optimizations only: the extended levels add layout transforms
+            // that depend on the processor, which can change a box between hosts.
+            .with_optimization_level(GraphOptimizationLevel::Level1)
             .map_err(|error| failed(&error))?
             .with_intra_threads(1)
             .map_err(|error| failed(&error))?
@@ -416,12 +442,14 @@ mod runtime {
 }
 
 #[cfg(feature = "text-detector")]
-pub(crate) use runtime::{detector, Detector};
+pub(crate) use runtime::{detector, verified_assets, Detector};
 
 /// Load the detector installed in `dir`: both files must match their pinned SHA-256,
 /// ONNX Runtime must load, and the model must run on a blank frame without a box.
 #[cfg(feature = "text-detector")]
 pub fn check_text_detector(dir: &Path) -> Result<()> {
+    // Hash the files on every check, also when this process has loaded them before.
+    verified_assets(dir)?;
     let detector = detector(dir)?;
     let blank = vec![0_u16; 64 * 64];
     let boxes = detector.detect(&blank, 64, 64, 0, 1)?;
@@ -545,19 +573,13 @@ pub fn install_text_detector(target: &Path) -> Result<()> {
     }
     fs::remove_file(&archive)
         .map_err(|error| install(format!("cannot remove the archive: {error}")))?;
-    let library = runtime_dir.join(pin.library);
-    let mut bytes = Vec::new();
-    File::open(&library)
-        .and_then(|mut file| file.read_to_end(&mut bytes))
-        .map_err(|_| install("the archive has no ONNX Runtime library".to_owned()))?;
-    let actual: String = Sha256::digest(&bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    if actual != pin.library_sha256 {
-        return Err(install(
-            "checksum mismatch for the ONNX Runtime library".to_owned(),
-        ));
+    // Load and run the staged detector before it takes the target name, so that a
+    // detector that cannot run leaves nothing behind.
+    check_text_detector(staging.path())?;
+    // The target is checked again, because a folder can appear during the download, and
+    // rename replaces an empty folder on Linux.
+    if target.symlink_metadata().is_ok() {
+        return Err(install(format!("{} already exists", target.display())));
     }
     let staged = staging.keep();
     fs::rename(&staged, target).map_err(|error| {

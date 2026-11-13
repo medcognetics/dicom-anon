@@ -214,9 +214,7 @@ fn napi_error(error: impl std::fmt::Display) -> Error {
 #[napi]
 pub fn install_text_detector(path: String) -> Result<()> {
     let path = std::path::PathBuf::from(path);
-    dicom_anon::install_text_detector(&path)
-        .and_then(|()| dicom_anon::check_text_detector(&path))
-        .map_err(napi_error)
+    dicom_anon::install_text_detector(&path).map_err(napi_error)
 }
 
 /// Check the text detector installed in `path` against its pinned SHA-256 values.
