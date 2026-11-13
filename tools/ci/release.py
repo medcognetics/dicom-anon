@@ -29,7 +29,7 @@ DEFAULT_OUTPUT = REPOSITORY_ROOT / "target" / "release-assets"
 SECURITY_REPORTS = REPOSITORY_ROOT / "target" / "ci-reports" / "security"
 REPOSITORY_URL = "https://github.com/medcognetics/dicom-anon"
 RUST_TARGET = "x86_64-unknown-linux-gnu"
-BINARIES = ("dicom-anonymize", "dicom-validate")
+BINARIES = ("dicom-anonymize", "dicom-validate", "dicom-text-detector")
 # The workspace release profile keeps symbols so that source builds of the bindings load
 # on macOS. The published Linux artifacts are stripped.
 STRIP_SYMBOLS = ("--config", 'profile.release.strip="symbols"')

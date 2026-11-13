@@ -676,6 +676,8 @@ fn validate_dicom_options(args: &AnonymizeArgs) -> Result<(), String> {
         allow_sop_class,
         burned_in_text,
         text_over_tissue,
+        burned_in_text_detector,
+        text_detector_dir,
     } = &args.profile;
     let option = if !matches!(policy, ProfilePreset::DicomExtended) {
         Some("--policy")
@@ -701,6 +703,10 @@ fn validate_dicom_options(args: &AnonymizeArgs) -> Result<(), String> {
         Some("--burned-in-text")
     } else if *text_over_tissue != dicom_anon::TextOverTissue::Fail {
         Some("--text-over-tissue")
+    } else if *burned_in_text_detector != dicom_anon::TextDetector::Heuristic {
+        Some("--burned-in-text-detector")
+    } else if text_detector_dir.is_some() {
+        Some("--text-detector-dir")
     } else {
         None
     };

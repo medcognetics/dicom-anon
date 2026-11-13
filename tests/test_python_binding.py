@@ -248,5 +248,7 @@ def test_python_binding_checks_and_refuses_text_detector_folders(tmp_path) -> No
         }
     )
     with pytest.raises(ValueError) as unconfigured:
-        dicom_anon_python.anonymize(INVALID_DICOM, b"0" * 32, "SUBJ-0001", configuration)
+        dicom_anon_python.anonymize(
+            INVALID_DICOM, b"0" * 32, "SUBJ-0001", configuration
+        )
     assert "text_detector_dir" in str(unconfigured.value)

@@ -1,7 +1,7 @@
 .PHONY: check ci ci-minimum format lint python-quality test coverage docs node-dependencies \
 		binding-types test-python test-node test-ci audit deprecations release release-assets bench \
 		report-integration report-integration-coverage report-cuda-integration codec-pins \
-		codec-pins-latest test-jpeg2000-conformance
+		codec-pins-latest test-jpeg2000-conformance test-text-detector
 
 CI_UV_RUN = uv run --project tools/ci --frozen
 ACTIONLINT ?= actionlint
@@ -16,7 +16,7 @@ REPORT_INTEGRATION_MIN_LINE_COVERAGE := 84
 check: format lint test docs binding-types
 
 ci: format lint python-quality docs binding-types test-python test-node test-ci coverage \
-	codec-pins test-jpeg2000-conformance
+	codec-pins test-jpeg2000-conformance test-text-detector
 
 ci-minimum: test test-python test-node
 
@@ -73,6 +73,15 @@ JPEG2000_CONFORMANCE_DIR ?= target/jpeg2000-conformance
 test-jpeg2000-conformance:
 	scripts/fetch-jpeg2000-conformance.sh $(JPEG2000_CONFORMANCE_DIR)
 	DICOM_ANON_J2K_CONFORMANCE=$(abspath $(JPEG2000_CONFORMANCE_DIR)) cargo test --locked -p dicom-anon --test jpeg2000_conformance
+
+# The pinned text detector of the burned-in text check. The model and ONNX Runtime are
+# installed once, checked against their pinned SHA-256 values, and kept in the folder.
+TEXT_DETECTOR_DIR ?= target/text-detector
+test-text-detector:
+	cargo build --locked -p dicom-anon --bin dicom-text-detector
+	if [ -d $(TEXT_DETECTOR_DIR) ]; then target/debug/dicom-text-detector check $(TEXT_DETECTOR_DIR); \
+	else target/debug/dicom-text-detector install $(TEXT_DETECTOR_DIR); fi
+	DICOM_ANON_TEXT_DETECTOR_DIR=$(abspath $(TEXT_DETECTOR_DIR)) cargo test --locked -p dicom-anon --test text_detector
 
 test-ci:
 	$(ACTIONLINT) -config-file .github/actionlint.yaml

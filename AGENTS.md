@@ -15,6 +15,7 @@ This workspace implements deterministic, configurable DICOM metadata de-identifi
 - `core/src/j2k_packets.rs`: JPEG 2000 tier-2 packet walk that rejects tiles missing packets before OpenJPEG runs
 - `core/src/codec.rs`: JPEG 2000 (OpenJPEG) and JPEG (libjpeg-turbo) decoding for the burned-in text check; the only `unsafe` code. `core/tests/jpeg2000.rs` and `jpeg2000_conformance.rs` cover it; keep the codec pins equal to medcognetics/dicom-preprocessing (`make codec-pins`)
 - `core/src/pixel_text.rs`: burned-in text detection and censoring under `burned_in_text` ([#47](https://github.com/medcognetics/dicom-anon/issues/47)); `core/tests/burned_in_text.rs` covers it with synthetic MG and DBT objects
+- `core/src/text_detector.rs`: the pinned PP-OCRv4 text-detection model, its ONNX Runtime loading and SHA-256 checks, and `install_text_detector`; `core/src/bin/dicom-text-detector.rs` installs and checks it, and `core/tests/text_detector.rs` runs it when `DICOM_ANON_TEXT_DETECTOR_DIR` is set (`make test-text-detector`)
 - `tools/generate_breast_descriptor_map.py`: edition-checked generator for the shipped PS3.16 breast-imaging descriptor maps
 - `descriptor-maps/`: reviewed, versioned descriptor maps; regenerate rather than edit by hand
 - `core/src/pseudonym.rs`: keyed patient and UID transformations

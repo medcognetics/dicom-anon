@@ -502,6 +502,12 @@ pub fn install_text_detector(target: &Path) -> Result<()> {
             .map_err(|error| install(format!("cannot create {}: {error}", dir.display())))?;
     }
     download(MODEL_URL, &model_dir.join(MODEL_FILE), MODEL_SHA256)?;
+    let notice = format!(
+        "{MODEL_FILE}: PaddleOCR PP-OCRv4 mobile text detector, ONNX export of the RapidOCR\n\
+         project, licensed under the Apache License 2.0.\nSource: {MODEL_URL}\nSHA-256: {MODEL_SHA256}\n"
+    );
+    fs::write(model_dir.join("NOTICE.txt"), notice)
+        .map_err(|error| install(format!("cannot write the model notice: {error}")))?;
     let archive = staging.path().join("onnxruntime.tgz");
     download(pin.archive_url, &archive, pin.archive_sha256)?;
 
