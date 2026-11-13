@@ -1,3 +1,5 @@
+import os
+
 def anonymize(
     data: bytes,
     key: bytes,
@@ -38,3 +40,7 @@ def validate_with_source(
     patient_scope: str | None = None,
     configuration_json: str | None = None,
 ) -> tuple[bool, str]: ...
+
+def install_text_detector(path: str | os.PathLike[str]) -> None: ...
+
+def check_text_detector(path: str | os.PathLike[str]) -> None: ...

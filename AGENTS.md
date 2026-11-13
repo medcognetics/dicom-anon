@@ -15,6 +15,7 @@ This workspace implements deterministic, configurable DICOM metadata de-identifi
 - `core/src/j2k_packets.rs`: JPEG 2000 tier-2 packet walk that rejects tiles missing packets before OpenJPEG runs
 - `core/src/codec.rs`: JPEG 2000 (OpenJPEG) and JPEG (libjpeg-turbo) decoding for the burned-in text check; the only `unsafe` code. `core/tests/jpeg2000.rs` and `jpeg2000_conformance.rs` cover it; keep the codec pins equal to medcognetics/dicom-preprocessing (`make codec-pins`)
 - `core/src/pixel_text.rs`: burned-in text detection and censoring under `burned_in_text` ([#47](https://github.com/medcognetics/dicom-anon/issues/47)); `core/tests/burned_in_text.rs` covers it with synthetic MG and DBT objects
+- `core/src/text_detector.rs`: the pinned PP-OCRv4 text-detection model, its ONNX Runtime loading and SHA-256 checks, and `install_text_detector`; `core/src/bin/dicom-text-detector.rs` installs and checks it, and `core/tests/text_detector.rs` runs it when `DICOM_ANON_TEXT_DETECTOR_DIR` is set (`make test-text-detector`)
 - `tools/generate_breast_descriptor_map.py`: edition-checked generator for the shipped PS3.16 breast-imaging descriptor maps
 - `descriptor-maps/`: reviewed, versioned descriptor maps; regenerate rather than edit by hand
 - `core/src/pseudonym.rs`: keyed patient and UID transformations
@@ -57,7 +58,7 @@ This workspace implements deterministic, configurable DICOM metadata de-identifi
 - Replace File Meta Information instead of copying source AE titles or private information.
 - Fail closed on invalid dates, missing patient scope, unsupported DICOM input, and already de-identified input unless the caller opts in.
 - Treat pixel data as unassessed, also when `burned_in_text` censoring runs. The heuristic can miss text. Do not claim the Clean Pixel Data Option.
-- When censoring burned-in text, write only text pixels, and only when every other pixel in the box has the frame's darkest value. Otherwise fail closed or leave the box unchanged as `docs/conformance.md` states. Never write tissue.
+- When censoring burned-in text, write only text pixels. The heuristic writes a box only when every other pixel in it has the frame's darkest value. The model path writes a box only when its whole edge is background outside the anatomy and every other pixel inside is bright or touches a bright pixel. Otherwise fail closed or leave the box unchanged as `docs/conformance.md` states. Never write tissue.
 - Fail closed when a frame cannot be decoded or a sample cannot be interpreted. Write censored output losslessly as native Explicit VR Little Endian, and keep the source Burned In Annotation.
 - Remove JPEG 2000 COM segments only from main and tile-part headers. Remove JPEG and JPEG-LS COM and APPn segments, but keep an APP14 Adobe segment that a three- or four-component frame needs for its color transform. Copy entropy-coded data byte for byte, and fail closed when a codestream, frame mapping, color interpretation, or offset table cannot be rewritten safely.
 - Keep Parquet output metadata-only. Never add Pixel Data to the schema or staged rows.
@@ -65,7 +66,7 @@ This workspace implements deterministic, configurable DICOM metadata de-identifi
 - Parse each Parquet input DICOM once. Schema discovery may reread the compact unlinked staging file, but must not reopen source DICOMs.
 - Reject named files without a `.dcm` or `.dicom` extension before opening them. Check extensionless files for `DICM` at byte offset 128.
 - Write the crate version in De-identification Method `(0012,0063)`. A change to any output byte for the same input and configuration requires at least a minor version change; record it in `CHANGELOG.md`. This rule excludes the crate version text in De-identification Method: compare outputs with the version text removed.
-- Keep anonymization deterministic. Do not add timestamps, random UIDs, random date offsets, or nondeterministic report ordering. The only exception is opt-in Safe Harbor UID map generation. It draws missing replacements from the operating-system CSPRNG and returns them only in the caller map.
+- Keep anonymization deterministic. Do not add timestamps, random UIDs, random date offsets, or nondeterministic report ordering. One exception is opt-in Safe Harbor UID map generation. It draws missing replacements from the operating-system CSPRNG and returns them only in the caller map. The second exception is the opt-in text-detection model (`burned_in_text_detector` = `model` or `both`): its censored pixels can differ between processor types, as `docs/conformance.md` states. Keep the heuristic bit-deterministic.
 - Keep the patient-scoped time offset stable and apply TM midnight rollover to its known paired DA attribute.
 - Never include originals, key material, patient scope, UID-map contents, or identifying mismatch values in validation reports or logs. Missing-mapping errors name only the attribute path.
 - In Safe Harbor metadata mode, require an external non-PHI patient scope and a complete collision-free UID map; empty Patient ID, Patient Name, and Birth Date; and retain no temporal detail below year.

@@ -63,6 +63,8 @@ Anonymization and validation share these profile arguments:
 | `--require-no-burned-in-annotation` | Fail unless Burned In Annotation `(0028,0301)` is exactly `NO`. A `YES`, empty, or absent value fails. |
 | `--burned-in-text MODE` | `auto` (default), `censor` or `off`. `auto` censors burned-in text under `safe-harbor-metadata` and does nothing under the other policies. `censor` fails closed when a frame cannot be decoded or when text lies over tissue. See [Conformance and scope](conformance.md#burned-in-text). |
 | `--text-over-tissue MODE` | `fail` (default) or `leave`. `leave` keeps text over tissue that cannot be censored and counts it in `regions_left_over_tissue`. It is a temporary relief for false positives; the output can keep identifying text. |
+| `--burned-in-text-detector MODE` | `heuristic` (default), `model` or `both`. `model` and `both` run the pinned text-detection model and need `--text-detector-dir`. See [Conformance and scope](conformance.md#text-detection-model). |
+| `--text-detector-dir DIR` | Folder of the text detector that `dicom-text-detector install DIR` created. |
 | `--allow-sop-class UID` | Permit only the given SOP Class UID; repeat for multiple SOP Classes. An absent or other SOP Class UID fails, and so does a Media Storage SOP Class UID `(0002,0002)` that differs from it. |
 
 The presets enable these options before applying `--enable-option` and `--disable-option`:
@@ -283,3 +285,7 @@ else
   fi
 fi
 ```
+
+## `dicom-text-detector`
+
+`dicom-text-detector install DIR` downloads the pinned PP-OCRv4 text-detection model and this platform's ONNX Runtime library into `DIR`, which must not exist, checks each against its pinned SHA-256 value, and runs the model once. A failed install leaves no folder. `dicom-text-detector check DIR` repeats the checks on an installed folder. Both exit with status 0 on success and 2 on an error. The install needs network access to `huggingface.co` and `github.com`; copy the folder to hosts without it. The release assets do not include `dicom-text-detector` yet; build it from source (`cargo build --release -p dicom-anon --bin dicom-text-detector`) or call `install_text_detector` from a binding. `report-anon` refuses `--burned-in-text-detector model` and `both`, because it loads its own ONNX Runtime.

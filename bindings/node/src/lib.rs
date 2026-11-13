@@ -209,3 +209,16 @@ fn parse_configuration(value: &str) -> Result<ProfileConfiguration> {
 fn napi_error(error: impl std::fmt::Display) -> Error {
     Error::new(Status::InvalidArg, error.to_string())
 }
+
+/// Download the pinned text detector into `path`, which must not exist, and check it.
+#[napi]
+pub fn install_text_detector(path: String) -> Result<()> {
+    let path = std::path::PathBuf::from(path);
+    dicom_anon::install_text_detector(&path).map_err(napi_error)
+}
+
+/// Check the text detector installed in `path` against its pinned SHA-256 values.
+#[napi]
+pub fn check_text_detector(path: String) -> Result<()> {
+    dicom_anon::check_text_detector(std::path::Path::new(&path)).map_err(napi_error)
+}
