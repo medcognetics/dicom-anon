@@ -802,7 +802,9 @@ fn profile_name(profile: &ProfileConfiguration) -> String {
         } else {
             preset.burned_in_text
         };
-        // `text_over_tissue` has no effect when nothing is censored.
+        // `text_over_tissue` = `leave` names a configured profile when the check runs,
+        // because it keeps text. The detector choice only changes how text is found, so
+        // it does not change the name.
         let text_over_tissue = if profile.censors_burned_in_text() {
             preset.text_over_tissue
         } else {
@@ -814,6 +816,8 @@ fn profile_name(profile: &ProfileConfiguration) -> String {
                 fail_on_unmapped_sequences: profile.fail_on_unmapped_sequences.clone(),
                 burned_in_text,
                 text_over_tissue,
+                burned_in_text_detector: profile.burned_in_text_detector,
+                text_detector_dir: profile.text_detector_dir.clone(),
                 ..preset
             }
     };
@@ -976,10 +980,15 @@ pub fn validate_source_object(
         .retain(|finding| finding.code != "source_not_compared");
     if validation_options.profile.censors_burned_in_text() {
         // The expected output was built with the check, so a match shows that it ran. The
-        // pixels stay unassessed: the heuristic can miss text, so the code is kept.
+        // pixels stay unassessed: the detectors can miss text, so the code is kept.
+        let detector = match validation_options.profile.burned_in_text_detector {
+            crate::TextDetector::Heuristic => "a heuristic detector",
+            crate::TextDetector::Model => "the pinned text-detection model",
+            crate::TextDetector::Both => "a heuristic detector and the pinned text-detection model",
+        };
         for finding in &mut report.findings {
             if finding.code == "pixel_data_not_assessed" {
-                finding.message = "pixel data was checked for burned-in text by a heuristic detector that can miss text; the Clean Pixel Data Option is not claimed".to_owned();
+                finding.message = format!("pixel data was checked for burned-in text by {detector}, which can miss text; the Clean Pixel Data Option is not claimed");
             }
         }
     }

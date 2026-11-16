@@ -1,6 +1,9 @@
 'use strict'
 
 const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const os = require('node:os')
+const path = require('node:path')
 const binding = require('../bindings/node')
 
 const INVALID_DICOM = Buffer.from('not a DICOM Part 10 object')
@@ -166,4 +169,25 @@ assert.throws(
 assert.throws(
   () => binding.anonymize(INVALID_DICOM, KEY, null, scopedGuardConfiguration([], ['00540220'])),
   (error) => error instanceof Error && error.message.includes('need at least one'),
+)
+
+const detectorFolder = fs.mkdtempSync(path.join(os.tmpdir(), 'dicom-anon-detector-'))
+assert.throws(
+  () => binding.checkTextDetector(detectorFolder),
+  (error) => error instanceof Error && error.message.includes('install'),
+)
+assert.throws(
+  () => binding.installTextDetector(detectorFolder),
+  (error) => error instanceof Error && error.message.includes('already exists'),
+)
+fs.rmSync(detectorFolder, { recursive: true })
+assert.throws(
+  () =>
+    binding.anonymize(
+      INVALID_DICOM,
+      KEY,
+      'SUBJ-0001',
+      JSON.stringify({ policy: 'safe-harbor-metadata', options: [], burned_in_text_detector: 'model' }),
+    ),
+  (error) => error instanceof Error && error.message.includes('text_detector_dir'),
 )

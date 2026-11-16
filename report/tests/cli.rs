@@ -118,6 +118,38 @@ fn dicom_profile_options_require_a_dicom_input() {
 }
 
 #[test]
+fn the_text_detector_model_is_refused_with_or_without_a_dicom_input() {
+    for extra in [
+        &[][..],
+        &["--dicom", "/not/read/before/usage-validation.dcm"][..],
+    ] {
+        let output = run_with_stdin(
+            Command::new(env!("CARGO_BIN_EXE_report-anon"))
+                .args(["anonymize", "--burned-in-text-detector", "model"])
+                .args(extra)
+                .args(["--model-dir", "/not/read/before/usage-validation"]),
+            b"Patient report",
+        );
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("--burned-in-text-detector model or both is not available"));
+    }
+    let output = run_with_stdin(
+        Command::new(env!("CARGO_BIN_EXE_report-anon")).args([
+            "anonymize",
+            "--text-detector-dir",
+            "/not/read",
+            "--model-dir",
+            "/not/read/before/usage-validation",
+        ]),
+        b"Patient report",
+    );
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("--text-detector-dir requires at least one --dicom"));
+}
+
+#[test]
 fn piped_linkage_requires_an_explicit_association_destination() {
     let output = run_with_stdin(
         Command::new(env!("CARGO_BIN_EXE_report-anon")).args([

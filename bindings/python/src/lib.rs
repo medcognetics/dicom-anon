@@ -148,6 +148,20 @@ fn validate_with_source(
     Ok((conformant, report))
 }
 
+/// Download the pinned text detector into `path`, which must not exist, and check it.
+#[pyfunction]
+fn install_text_detector(py: Python<'_>, path: std::path::PathBuf) -> PyResult<()> {
+    py.detach(|| dicom_anon::install_text_detector(&path))
+        .map_err(value_error)
+}
+
+/// Check the text detector installed in `path` against its pinned SHA-256 values.
+#[pyfunction]
+fn check_text_detector(py: Python<'_>, path: std::path::PathBuf) -> PyResult<()> {
+    py.detach(|| dicom_anon::check_text_detector(&path))
+        .map_err(value_error)
+}
+
 #[pymodule]
 fn dicom_anon_python(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(anonymize, module)?)?;
@@ -156,6 +170,8 @@ fn dicom_anon_python(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(anonymize_study, module)?)?;
     module.add_function(wrap_pyfunction!(validate, module)?)?;
     module.add_function(wrap_pyfunction!(validate_with_source, module)?)?;
+    module.add_function(wrap_pyfunction!(install_text_detector, module)?)?;
+    module.add_function(wrap_pyfunction!(check_text_detector, module)?)?;
     Ok(())
 }
 

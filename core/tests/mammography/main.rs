@@ -126,6 +126,8 @@ fn breast_map() -> BTreeMap<String, BTreeMap<String, String>> {
         allow_sop_class: Vec::new(),
         burned_in_text: BurnedInText::default(),
         text_over_tissue: Default::default(),
+        burned_in_text_detector: Default::default(),
+        text_detector_dir: None,
     }
     .load()
     .unwrap()

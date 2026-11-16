@@ -148,6 +148,13 @@ impl DicomLinkage {
                 "at least one DICOM input is required".to_owned(),
             ));
         }
+        // The report model owns this process's ONNX Runtime, so the text detector cannot
+        // run beside it.
+        if options.profile.burned_in_text_detector.uses_model() {
+            return Err(Error::Dicom(
+                "the text-detection model is not available with report linkage".to_owned(),
+            ));
+        }
         let anonymizer = Anonymizer::new(options)
             .map_err(|_| Error::Dicom("the DICOM anonymization options are invalid".to_owned()))?;
         let mut mappings = BTreeMap::<String, (String, bool)>::new();

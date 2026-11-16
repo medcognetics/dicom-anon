@@ -230,3 +230,25 @@ def test_python_binding_validates_the_fail_on_unmapped_sequence_scope() -> None:
             _scoped_guard_configuration(["00080100"], ["00540220"]),
         )
     assert "sequence" not in str(unreadable.value)
+
+
+def test_python_binding_checks_and_refuses_text_detector_folders(tmp_path) -> None:
+    with pytest.raises(ValueError) as missing:
+        dicom_anon_python.check_text_detector(tmp_path)
+    assert "install" in str(missing.value)
+    with pytest.raises(ValueError) as existing:
+        dicom_anon_python.install_text_detector(str(tmp_path))
+    assert "already exists" in str(existing.value)
+
+    configuration = json.dumps(
+        {
+            "policy": "safe-harbor-metadata",
+            "options": [],
+            "burned_in_text_detector": "model",
+        }
+    )
+    with pytest.raises(ValueError) as unconfigured:
+        dicom_anon_python.anonymize(
+            INVALID_DICOM, b"0" * 32, "SUBJ-0001", configuration
+        )
+    assert "text_detector_dir" in str(unconfigured.value)

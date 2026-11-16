@@ -21,6 +21,7 @@ use crate::profile::{
 use crate::temporal::{
     shift_date_values, shift_date_values_with_adjustments, shift_datetime_values, shift_time_values,
 };
+use crate::text_detector::TextDetector;
 use crate::uid_map::{RequiredUid, UidResolver};
 use crate::{Error, Result, SecretKey};
 
@@ -111,6 +112,9 @@ pub struct AnonymizationReport {
     /// What the check did with text over tissue: `fail`, or `leave` as a temporary relief.
     #[serde(default)]
     pub text_over_tissue: TextOverTissue,
+    /// Which detector the burned-in text check used: `heuristic`, `model` or `both`.
+    #[serde(default)]
+    pub burned_in_text_detector: TextDetector,
     /// Frames, regions and pixels of the burned-in text check. No pixel values or text.
     #[serde(default)]
     pub burned_in_text: CensorCounts,
@@ -144,6 +148,7 @@ impl AnonymizationReport {
             unmapped_dummy_replacements: BTreeMap::new(),
             burned_in_text_censoring: profile.censors_burned_in_text(),
             text_over_tissue: profile.text_over_tissue,
+            burned_in_text_detector: profile.burned_in_text_detector,
             burned_in_text: CensorCounts::default(),
         }
     }
@@ -381,7 +386,7 @@ impl Anonymizer {
             Some(pixel_text::censor(
                 source,
                 source_transfer_syntax,
-                self.options.profile.text_over_tissue,
+                &self.options.profile,
             )?)
         } else {
             None
@@ -1366,6 +1371,7 @@ mod tests {
             "burned_in_text_censoring",
             "burned_in_text",
             "text_over_tissue",
+            "burned_in_text_detector",
         ] {
             fields.remove(added).unwrap();
         }

@@ -129,8 +129,23 @@ jobs:
           tool: cargo-llvm-cov@0.8.7
       - name: Synchronize CI tools
         run: uv sync --project tools/ci --frozen --python "${{ matrix.python }}"
+      # `make test-text-detector` hashes the cached files against their pins before use.
+      - name: Restore the pinned text detector
+        id: text-detector
+        if: matrix.cache_tier == 'latest'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/text-detector
+          key: text-detector-linux-x64-${{ hashFiles('core/src/text_detector.rs') }}
       - name: Run ${{ matrix.name }} checks
         run: make ${{ matrix.make_target }}
+      # Save only a detector that passed the tests, and only from master.
+      - name: Save the pinned text detector
+        if: matrix.cache_tier == 'latest' && github.ref == 'refs/heads/master' && steps.text-detector.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/text-detector
+          key: ${{ steps.text-detector.outputs.cache-primary-key }}
 
   report-cpu:
     name: Linux / Report CPU integration
